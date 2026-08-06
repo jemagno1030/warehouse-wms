@@ -73,6 +73,7 @@ const state = {
   scanner: { reader: null, controls: null, target: null, kind: null },
   putaway: { locationCode: null, cart: [], matchedSkuId: null, duplicateDetailsSkuId: null, lookupSequence: 0 },
   pick: freshOperationState(),
+  pickOrder: { salesOrder: null, status: null, pickCount: 0, openedBy: null },
   transfer: freshOperationState(),
   data: { inventory: [], containers: [], expiry: [], history: [], audit: [], locations: [], rackMap: [] },
   selectedQrLocations: new Set()
@@ -160,11 +161,17 @@ function setupStaticEvents() {
   }));
 
   $('pick-lock-btn').addEventListener('click', lockPickLocation);
+  $('pick-so').addEventListener('change', refreshPickSalesOrderStatus);
+  $('pick-so').addEventListener('blur', refreshPickSalesOrderStatus);
+  $('pick-so-override').addEventListener('change', () => {
+    $('pick-so-override-reason').disabled = !$('pick-so-override').checked || Boolean(state.pick.lockToken);
+  });
   $('pick-barcode').addEventListener('change', () => loadOperationLots('pick'));
   $('pick-lot').addEventListener('change', () => updatePickFefoNote());
   $('pick-add-btn').addEventListener('click', () => addOperationItem('pick'));
   $('pick-cancel-btn').addEventListener('click', () => cancelOperation('pick'));
   $('pick-complete-btn').addEventListener('click', completePicking);
+  $('pick-finish-so-btn').addEventListener('click', finishPickSalesOrder);
 
   $('tr-lock-btn').addEventListener('click', lockTransferLocation);
   $('tr-barcode').addEventListener('change', () => loadOperationLots('transfer'));
@@ -325,6 +332,7 @@ function applyMode(mode) {
   putawaySubmit.disabled = !active;
   if (state.putaway.cart.length) $('pa-complete-btn').disabled = !active;
   if (state.pick.lockToken) $('pick-complete-btn').disabled = !active;
+  updatePickSalesOrderControls();
   if (state.transfer.lockToken) $('tr-complete-btn').disabled = !active;
 }
 
@@ -356,6 +364,7 @@ function showScreen(name) {
 async function loadScreen(name, force = false) {
   try {
     if (name === 'dashboard') await loadDashboard();
+    if (name === 'picking') await refreshPickSalesOrderStatus();
     if (name === 'inventory') await loadInventory(force);
     if (name === 'containers') await loadContainers(force);
     if (name === 'rackmap') await loadRackMap(force);
@@ -668,7 +677,23 @@ async function lockPickLocation() {
   const so = $('pick-so').value.trim();
   const location = normalizeLocation($('pick-location').value);
   if (!so || !location) return toast('Enter the sales order and scan the source location first.', 'error');
-  await acquireOperationLock('pick', location, 'PICK', so);
+
+  const overrideCompleted = isSupervisor() && $('pick-so-override').checked;
+  const overrideReason = $('pick-so-override-reason').value.trim();
+  if (overrideCompleted && !overrideReason) {
+    return toast('Enter the supervisor override reason before reopening a completed sales order.', 'error');
+  }
+
+  const locked = await acquireOperationLock('pick', location, 'PICK', so, {
+    overrideCompleted,
+    overrideReason: overrideReason || null
+  });
+  if (locked) {
+    $('pick-so-override').checked = false;
+    $('pick-so-override-reason').value = '';
+    $('pick-so-override-reason').disabled = true;
+    await refreshPickSalesOrderStatus();
+  }
 }
 
 async function lockTransferLocation() {
@@ -677,17 +702,31 @@ async function lockTransferLocation() {
   await acquireOperationLock('transfer', location, 'TRANSFER', null);
 }
 
-async function acquireOperationLock(operation, location, type, salesOrder) {
+async function acquireOperationLock(operation, location, type, salesOrder, options = {}) {
   const opState = state[operation];
   const button = operation === 'pick' ? $('pick-lock-btn') : $('tr-lock-btn');
   setBusy(button, true, 'Locking…');
   const { data, error } = await supabase.rpc('acquire_location_lock', {
     p_location_code: location,
     p_operation: type,
-    p_sales_order: salesOrder
+    p_sales_order: salesOrder,
+    p_override_completed: Boolean(options.overrideCompleted),
+    p_override_reason: options.overrideReason || null
   });
   setBusy(button, false);
-  if (error) return toast(friendlyError(error), 'error');
+  if (error) {
+    const message = friendlyError(error);
+    if (message.includes('SALES_ORDER_ALREADY_COMPLETED') && isSupervisor()) {
+      $('pick-so-override').checked = true;
+      $('pick-so-override-reason').disabled = false;
+      $('pick-so-override-reason').focus();
+      toast('This sales order is completed. Enter a supervisor override reason, then lock the rack again.', 'error');
+      await refreshPickSalesOrderStatus();
+      return false;
+    }
+    toast(message, 'error');
+    return false;
+  }
   opState.lockToken = data[0].lock_token;
   state.data.rackMap = [];
   state.data.audit = [];
@@ -696,6 +735,7 @@ async function acquireOperationLock(operation, location, type, salesOrder) {
   configureOperationUi(operation, true);
   if (operation === 'pick') await loadPickRackContents();
   toast(`${opState.locationCode} locked for your ${type.toLowerCase()} session.`, 'success');
+  return true;
 }
 
 function startHeartbeat(opState) {
@@ -722,7 +762,11 @@ function configureOperationUi(operation, locked) {
   const locationInput = $(pick ? 'pick-location' : 'tr-source');
   lockBtn.disabled = locked || state.mode !== 'ACTIVE';
   locationInput.disabled = locked;
-  if (pick) $('pick-so').disabled = locked;
+  if (pick) {
+    $('pick-so').disabled = locked;
+    $('pick-so-override').disabled = locked;
+    $('pick-so-override-reason').disabled = locked || !$('pick-so-override').checked;
+  }
   $(`${prefix}-barcode`).disabled = !locked;
   qsa(`[data-scan-target="${prefix}-barcode"]`).forEach((b) => b.disabled = !locked);
   $(`${prefix}-lot`).disabled = !locked;
@@ -730,6 +774,7 @@ function configureOperationUi(operation, locked) {
   $(pick ? 'pick-add-btn' : 'tr-add-btn').disabled = !locked;
   $(pick ? 'pick-cancel-btn' : 'tr-cancel-btn').disabled = !locked;
   $(pick ? 'pick-complete-btn' : 'tr-complete-btn').disabled = !locked;
+  if (pick) updatePickSalesOrderControls();
   if (!pick) {
     $('tr-destination').disabled = !locked;
     qsa('[data-scan-target="tr-destination"]').forEach((b) => b.disabled = !locked);
@@ -881,7 +926,9 @@ async function addSupervisorBarcodeBypass(lotId) {
   const qtyText = window.prompt(`Enter the ${lot.uom} quantity to pick. Available: ${Number(lot.qty).toLocaleString()}`);
   if (qtyText === null) return;
   const qty = Number(qtyText);
-  if (!Number.isFinite(qty) || qty <= 0) return toast('Enter a valid quantity greater than zero.', 'error');
+  if (!Number.isFinite(qty) || qty <= 0 || !Number.isInteger(qty)) {
+    return toast('Pick quantity must be a whole number greater than zero.', 'error');
+  }
 
   const already = state.pick.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
   if (qty + already > Number(lot.qty)) return toast(`Cannot exceed available stock of ${fmtQtyUom(lot.qty, lot.uom)}.`, 'error');
@@ -930,6 +977,7 @@ function addOperationItem(operation) {
   const qty = Number($(pick ? 'pick-qty' : 'tr-qty').value);
   const lot = opState.lots[lotIndex];
   if (!lot || !qty || qty <= 0) return toast('Select a lot and enter a valid quantity.', 'error');
+  if (pick && !Number.isInteger(qty)) return toast('Pick quantity must be a whole number.', 'error');
   const already = opState.cart.filter((x) => x.lot_id === lot.lot_id).reduce((a, x) => a + x.qty, 0);
   if (qty + already > Number(lot.qty)) return toast(`Cannot exceed available stock of ${fmtQtyUom(lot.qty, lot.uom)}.`, 'error');
   opState.cart.push({
@@ -983,7 +1031,9 @@ async function cancelOperation(operation, silent = false) {
   }
   invalidateReports();
   resetOperation(operation);
-  if (!silent) toast('Session cancelled. You may scan the same or a different location.');
+  if (!silent) toast(operation === 'pick'
+    ? 'Rack session cancelled. The sales order remains open so you may scan the same or a different location.'
+    : 'Session cancelled. You may scan the same or a different location.');
 }
 
 function resetOperation(operation) {
@@ -1012,6 +1062,76 @@ function resetOperation(operation) {
   renderOperationCart(operation);
 }
 
+
+function updatePickSalesOrderControls() {
+  const hasSo = Boolean($('pick-so').value.trim());
+  const orderOpen = state.pickOrder.status === 'OPEN';
+  const hasSavedPick = Number(state.pickOrder.pickCount || 0) > 0;
+  const unlocked = !state.pick.lockToken;
+  $('pick-finish-so-btn').disabled = !(state.mode === 'ACTIVE' && hasSo && orderOpen && hasSavedPick && unlocked);
+}
+
+async function refreshPickSalesOrderStatus() {
+  const so = $('pick-so').value.trim();
+  const box = $('pick-so-status');
+  if (!so) {
+    state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null };
+    box.innerHTML = '<strong>Sales order status:</strong> enter a sales order number. A completed sales order cannot be reused by a regular user.';
+    updatePickSalesOrderControls();
+    return;
+  }
+
+  const { data, error } = await supabase.rpc('get_pick_sales_order_status', { p_sales_order: so });
+  if (error) {
+    box.innerHTML = `<strong>Sales order status:</strong> ${escapeHtml(friendlyError(error))}`;
+    updatePickSalesOrderControls();
+    return;
+  }
+
+  const row = data?.[0];
+  if (!row?.order_exists) {
+    state.pickOrder = { salesOrder: so, status: 'NEW', pickCount: 0, openedBy: null };
+    box.innerHTML = `<strong>Sales order status:</strong> New sales order <strong>${escapeHtml(so)}</strong>. It will open when the first source rack is locked.`;
+  } else {
+    state.pickOrder = {
+      salesOrder: row.order_number,
+      status: row.order_status,
+      pickCount: Number(row.pick_transaction_count || 0),
+      openedBy: row.opened_by_username || null
+    };
+    if (row.order_status === 'COMPLETED') {
+      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was completed ${row.completed_at ? `on ${escapeHtml(fmtDateTime(row.completed_at))}` : ''}. It cannot be reused unless a supervisor checks the override and records a reason.`;
+    } else {
+      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> is OPEN by ${escapeHtml(row.opened_by_username || 'a user')} · ${Number(row.pick_transaction_count || 0).toLocaleString()} completed rack pick(s). Continue to another rack or finish the sales order.`;
+    }
+  }
+  updatePickSalesOrderControls();
+}
+
+async function finishPickSalesOrder() {
+  const so = $('pick-so').value.trim();
+  if (!so) return toast('Enter the sales order number.', 'error');
+  if (state.pick.lockToken) return toast('Complete or cancel the current rack before finishing the sales order.', 'error');
+  if (!window.confirm(`Finish sales order ${so}? After this, regular users cannot use this sales order number again.`)) return;
+
+  const button = $('pick-finish-so-btn');
+  setBusy(button, true, 'Finishing…');
+  const { data, error } = await supabase.rpc('finish_pick_sales_order', { p_sales_order: so });
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  const row = data?.[0];
+  toast(`Sales order ${row?.result_sales_order || so} completed after ${Number(row?.pick_transaction_count || 0).toLocaleString()} rack pick(s).`, 'success');
+  $('pick-so').value = '';
+  $('pick-location').value = '';
+  $('pick-so-override').checked = false;
+  $('pick-so-override-reason').value = '';
+  $('pick-so-override-reason').disabled = true;
+  state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null };
+  await refreshPickSalesOrderStatus();
+  invalidateReports();
+}
+
 async function completePicking() {
   if (!state.pick.cart.length) return toast('Add at least one item.', 'error');
   const requiresOverride = state.pick.cart.some((x) => x.expiry_date > x.earliest_expiry);
@@ -1036,10 +1156,11 @@ async function completePicking() {
   setBusy(button, false);
   if (error) return toast(friendlyError(error), 'error');
   const so = $('pick-so').value;
-  toast(`Picking saved: ${data?.[0]?.transaction_no || 'completed'}${requiresOverride ? ' · FEFO override recorded' : ''}`, 'success');
+  toast(`Rack pick saved: ${data?.[0]?.transaction_no || 'completed'}${requiresOverride ? ' · FEFO override recorded' : ''}. Scan the next source rack, or finish the sales order when all items are complete.`, 'success');
   invalidateReports();
   resetOperation('pick');
   $('pick-so').value = so; // Keep the sales order for picking from the next rack.
+  await refreshPickSalesOrderStatus();
 }
 
 async function completeTransfer() {
