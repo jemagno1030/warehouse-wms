@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#16324f" />
+  <meta name="description" content="Responsive warehouse management system with barcode scanning, FEFO, location locking and container tracking." />
+  <title>Warehouse Control System v1</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="toast-root" aria-live="polite"></div>
+
+  <section id="auth-view" class="auth-shell">
+    <div class="auth-card">
+      <div class="brand-lockup">
+        <div class="brand-mark">W</div>
+        <div>
+          <h1>Warehouse Control</h1>
+          <p>Inventory, picking, transfers, and container traceability</p>
+        </div>
+      </div>
+
+      <div class="auth-tabs">
+        <button class="tab active" data-auth-tab="login">Sign in</button>
+        <button class="tab" data-auth-tab="signup">Create account</button>
+      </div>
+
+      <form id="login-form" class="stack auth-panel">
+        <label>Email<input id="login-email" type="email" autocomplete="email" required /></label>
+        <label>Password<input id="login-password" type="password" autocomplete="current-password" required /></label>
+        <button class="primary" type="submit">Sign in</button>
+      </form>
+
+      <form id="signup-form" class="stack auth-panel hidden">
+        <label>User name<input id="signup-username" maxlength="60" required /></label>
+        <label>Email<input id="signup-email" type="email" autocomplete="email" required /></label>
+        <label>Password<input id="signup-password" type="password" minlength="8" autocomplete="new-password" required /></label>
+        <button class="primary" type="submit">Create account</button>
+        <p class="hint">New accounts start as regular users. A supervisor can promote accounts using the supplied SQL command.</p>
+      </form>
+    </div>
+  </section>
+
+  <div id="app-view" class="app-shell hidden">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-mark small">W</div>
+        <div><strong id="app-name">Warehouse Control</strong><span>Operations</span></div>
+      </div>
+      <nav id="main-nav">
+        <button data-screen="dashboard" class="active">Dashboard</button>
+        <button data-screen="putaway">Put-away</button>
+        <button data-screen="picking">Picking</button>
+        <button data-screen="transfer">Stock transfer</button>
+        <button data-screen="inventory">Inventory</button>
+        <button data-screen="containers">Containers</button>
+        <button data-screen="rackmap">Rack map</button>
+        <button data-screen="expiry">Expiry alerts</button>
+        <button data-screen="history">History</button>
+        <button data-screen="locations" data-role-min="supervisor">Locations & QR</button>
+        <button data-screen="control">System control</button>
+      </nav>
+      <div class="sidebar-user">
+        <div><strong id="current-username">—</strong><span id="current-role">—</span></div>
+        <button id="logout-btn" class="ghost compact">Sign out</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <button id="menu-btn" class="icon-button" aria-label="Open menu">☰</button>
+        <div>
+          <h2 id="screen-title">Dashboard</h2>
+          <p id="screen-subtitle">Live warehouse overview</p>
+        </div>
+        <div class="topbar-actions">
+          <span id="system-state-chip" class="status-chip active">Operational</span>
+          <button id="refresh-btn" class="ghost">Refresh</button>
+        </div>
+      </header>
+
+      <div id="hold-banner" class="hold-banner hidden">
+        <strong>Administrative Pause is active.</strong>
+        Stock-changing transactions are temporarily blocked across all devices.
+      </div>
+
+      <section id="screen-dashboard" class="screen active">
+        <div id="dashboard-kpis" class="kpi-grid"></div>
+        <div class="content-grid two">
+          <article class="card">
+            <div class="card-head"><div><h3>Expiry attention</h3><p>Expired and within six months</p></div><button class="link-btn" data-jump="expiry">View all</button></div>
+            <div id="dashboard-expiry"></div>
+          </article>
+          <article class="card">
+            <div class="card-head"><div><h3>Recent activity</h3><p>Latest warehouse transactions</p></div><button class="link-btn" data-jump="history">View history</button></div>
+            <div id="dashboard-history"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="screen-putaway" class="screen">
+        <form id="putaway-form" class="card form-card">
+          <div class="card-head"><div><h3>Put-away transaction</h3><p>CASE, PACK, and PIECE barcode fields are all required. Use N/A only when a barcode is unavailable. Container, expiry, and quantities are always entered manually.</p></div></div>
+          <div class="form-grid three">
+            <label>Rack location / QR *<div class="scan-field"><input id="pa-location" required /><button type="button" class="scan-btn" data-scan-target="pa-location" data-scan-kind="location">Scan</button></div></label>
+            <label>Case barcode *<div class="scan-field with-na"><input id="pa-case" required autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="pa-case">Scan</button><button type="button" class="na-btn" data-na-target="pa-case">N/A</button></div></label>
+            <label>Pack barcode *<div class="scan-field with-na"><input id="pa-pack" required autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="pa-pack">Scan</button><button type="button" class="na-btn" data-na-target="pa-pack">N/A</button></div></label>
+            <label>Piece barcode *<div class="scan-field with-na"><input id="pa-piece" required autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="pa-piece">Scan</button><button type="button" class="na-btn" data-na-target="pa-piece">N/A</button></div></label>
+            <label>Brand *<input id="pa-brand" required /></label>
+            <label>Description *<input id="pa-description" required /></label>
+            <label>Variant *<input id="pa-variant" required /></label>
+            <label>Size *<input id="pa-size" required /></label>
+            <label>Container number *<input id="pa-container" required /></label>
+            <label>Expiry date *<input id="pa-expiry" type="date" required /></label>
+            <label>Case quantity<input id="pa-case-qty" type="number" min="0" step="0.001" value="0" /></label>
+            <label>Pack quantity<input id="pa-pack-qty" type="number" min="0" step="0.001" value="0" /></label>
+            <label>Piece quantity<input id="pa-piece-qty" type="number" min="0" step="0.001" value="0" /></label>
+            <label>Remarks<textarea id="pa-note" rows="2"></textarea></label>
+          </div>
+          <div id="pa-match-note" class="info-box hidden"></div>
+          <div id="pa-duplicate-warning" class="warning-box hidden">
+            <strong>ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE</strong>
+            <p id="pa-duplicate-details"></p>
+            <label class="check-line"><input id="pa-still-add" type="checkbox" /> Still Add to Database</label>
+          </div>
+          <div class="form-actions"><button id="pa-clear-line-btn" type="button" class="ghost">Clear SKU line</button><button id="pa-add-btn" class="secondary" type="submit">Add SKU to pallet</button></div>
+          <div id="pa-cart" class="table-wrap"></div>
+          <div class="form-actions split"><button id="pa-cancel-btn" type="button" class="danger ghost" disabled>Cancel pallet session</button><button id="pa-complete-btn" class="primary" type="button" disabled>Complete put-away</button></div>
+        </form>
+      </section>
+
+      <section id="screen-picking" class="screen">
+        <div class="card form-card">
+          <div class="card-head"><div><h3>Picking session</h3><p>Lock one source location, add one or more lots, then complete the pick.</p></div><span id="pick-lock-chip" class="status-chip neutral">No location locked</span></div>
+          <div class="form-grid three">
+            <label>Sales order number *<input id="pick-so" required /></label>
+            <label>Source rack / QR *<div class="scan-field"><input id="pick-location" /><button type="button" class="scan-btn" data-scan-target="pick-location" data-scan-kind="location">Scan</button></div></label>
+            <div class="field-action"><button id="pick-lock-btn" class="secondary" type="button">Lock source location</button></div>
+            <label>SKU barcode<div class="scan-field"><input id="pick-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="pick-barcode" disabled>Scan</button></div></label>
+            <label>Available lot<select id="pick-lot" disabled><option value="">Scan a barcode first</option></select></label>
+            <label>Pick quantity (selected unit)<input id="pick-qty" type="number" min="0.001" step="0.001" disabled /></label>
+          </div>
+          <div id="pick-fefo-note" class="warning-box hidden"></div>
+          <div class="form-actions split"><button id="pick-add-btn" class="secondary" type="button" disabled>Add item</button><div><button id="pick-cancel-btn" class="danger ghost" type="button" disabled>Cancel / restart</button><button id="pick-complete-btn" class="primary" type="button" disabled>Complete picking</button></div></div>
+          <div id="pick-cart" class="table-wrap"></div>
+        </div>
+      </section>
+
+      <section id="screen-transfer" class="screen">
+        <div class="card form-card">
+          <div class="card-head"><div><h3>Stock transfer session</h3><p>Lock the source, add lots, then scan the destination QR.</p></div><span id="transfer-lock-chip" class="status-chip neutral">No location locked</span></div>
+          <div class="form-grid three">
+            <label>Source rack / QR *<div class="scan-field"><input id="tr-source" /><button type="button" class="scan-btn" data-scan-target="tr-source" data-scan-kind="location">Scan</button></div></label>
+            <div class="field-action"><button id="tr-lock-btn" class="secondary" type="button">Lock source location</button></div>
+            <label>SKU barcode<div class="scan-field"><input id="tr-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="tr-barcode" disabled>Scan</button></div></label>
+            <label>Available lot<select id="tr-lot" disabled><option value="">Scan a barcode first</option></select></label>
+            <label>Transfer quantity (selected unit)<input id="tr-qty" type="number" min="0.001" step="0.001" disabled /></label>
+            <label>New location / QR *<div class="scan-field"><input id="tr-destination" disabled /><button type="button" class="scan-btn" data-scan-target="tr-destination" data-scan-kind="location" disabled>Scan</button></div></label>
+            <label>Remarks<textarea id="tr-note" rows="2"></textarea></label>
+          </div>
+          <div class="form-actions split"><button id="tr-add-btn" class="secondary" type="button" disabled>Add item</button><div><button id="tr-cancel-btn" class="danger ghost" type="button" disabled>Cancel / restart</button><button id="tr-complete-btn" class="primary" type="button" disabled>Complete transfer</button></div></div>
+          <div id="tr-cart" class="table-wrap"></div>
+        </div>
+      </section>
+
+      <section id="screen-inventory" class="screen">
+        <article class="card">
+          <div class="card-head"><div><h3>Inventory by lot and location</h3><p>Current positive stock only</p></div><button class="secondary export-btn" data-export="inventory">Export CSV</button></div>
+          <div class="filters"><input id="inventory-search" placeholder="Search SKU, container, location..." /></div>
+          <h4>SKU summary</h4>
+          <div id="inventory-summary-table" class="table-wrap"></div>
+          <h4>Detailed lots</h4>
+          <div id="inventory-table" class="table-wrap"></div>
+        </article>
+      </section>
+
+      <section id="screen-containers" class="screen">
+        <article class="card">
+          <div class="card-head"><div><h3>Container report</h3><p>Remaining contents, SKUs, expiry dates, and locations</p></div><button class="secondary export-btn" data-export="containers">Export CSV</button></div>
+          <div class="filters"><input id="container-search" placeholder="Search container number..." /></div>
+          <div id="container-summary-table" class="table-wrap"></div>
+          <div id="container-detail" class="detail-panel hidden"></div>
+        </article>
+      </section>
+
+      <section id="screen-rackmap" class="screen">
+        <article class="card">
+          <div class="card-head"><div><h3>Rack occupancy map</h3><p>Empty, occupied, locked, and pending locations</p></div></div>
+          <div class="legend"><span><i class="dot empty"></i>Empty</span><span><i class="dot occupied"></i>Occupied</span><span><i class="dot locked"></i>Locked</span><span><i class="dot pending"></i>Pending</span></div>
+          <div class="filters rack-filters">
+            <select id="rack-map-row"><option value="">All rack rows</option></select>
+            <input id="rack-map-search" placeholder="Search rack, container, or user..." />
+          </div>
+          <div id="rack-map" class="rack-grid"></div>
+        </article>
+      </section>
+
+      <section id="screen-expiry" class="screen">
+        <article class="card">
+          <div class="card-head"><div><h3>Expiry alerts</h3><p>Expired items and items expiring within six months</p></div><button class="secondary export-btn" data-export="expiry">Export CSV</button></div>
+          <div id="expiry-table" class="table-wrap"></div>
+        </article>
+      </section>
+
+      <section id="screen-history" class="screen">
+        <article class="card">
+          <div class="card-head"><div><h3>Transaction history</h3><p>Every movement, FEFO override, edit, and system-control action</p></div><button class="secondary export-btn" data-export="history">Export CSV</button></div>
+          <div class="filters grid"><input id="history-search" placeholder="Search transaction, user, SO, SKU..." /><select id="history-type"><option value="">All actions</option><option>PUTAWAY</option><option>PICK</option><option>TRANSFER</option><option>PICK_CANCEL</option><option>TRANSFER_CANCEL</option><option>ADMIN_PAUSE</option><option>ADMIN_RESUME</option></select></div>
+          <div id="history-table" class="table-wrap"></div>
+          <div class="card-head audit-head"><div><h3>System audit events</h3><p>Before/after records for corrections and administrative actions</p></div><button class="secondary export-btn" data-export="audit">Export audit CSV</button></div>
+          <div id="audit-history-table" class="table-wrap"></div>
+        </article>
+      </section>
+
+      <section id="screen-locations" class="screen">
+        <div class="content-grid two">
+          <form id="location-form" class="card form-card">
+            <div class="card-head"><div><h3>Add another location</h3><p>Your 738 supplied rack locations and PENDING are preloaded. Use this form only for future additions.</p></div></div>
+            <div class="form-grid two">
+              <label>Location code *<input id="loc-code" required placeholder="L1" /></label>
+              <label>Display name<input id="loc-name" placeholder="Rack L1" /></label>
+              <label>Zone<input id="loc-zone" /></label>
+              <label>Row<input id="loc-row" /></label>
+              <label>Position<input id="loc-bay" /></label>
+              <label>Level<input id="loc-level" /></label>
+              <label class="check-row"><input id="loc-pending" type="checkbox" /> Virtual pending location</label>
+            </div>
+            <div class="form-actions"><button class="primary" type="submit">Add location</button></div>
+          </form>
+          <article class="card">
+            <div class="card-head">
+              <div><h3>Location QR labels</h3><p>Filter by rack row, select the visible locations, then print.</p></div>
+              <div class="button-cluster">
+                <button id="select-visible-qr-btn" class="secondary" type="button">Select visible</button>
+                <button id="clear-qr-btn" class="secondary" type="button">Clear</button>
+                <button id="print-qr-btn" class="secondary" type="button">Print selected</button>
+              </div>
+            </div>
+            <div class="filters rack-filters">
+              <select id="location-row-filter"><option value="">All rack rows</option></select>
+              <input id="location-search" placeholder="Search location..." />
+            </div>
+            <p id="location-count" class="small-note">0 shown · 0 selected</p>
+            <div id="locations-table" class="table-wrap"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="screen-control" class="screen">
+        <div class="content-grid two">
+          <article class="card control-card">
+            <div class="card-head"><div><h3>Administrative Pause</h3><p>Temporarily prevent stock-changing operations on every connected device.</p></div></div>
+            <label>Administrative control code<input id="admin-code" type="password" autocomplete="off" /></label>
+            <button id="admin-code-btn" class="primary">Apply control code</button>
+            <div id="control-result" class="info-box hidden"></div>
+          </article>
+          <article class="card">
+            <h3>How it behaves</h3>
+            <p>The pause and resume codes are different. The database validates them securely; the codes are not stored in this website.</p>
+            <p>Administrative Pause blocks put-away, picking, transfers, and supervisor corrections. Viewing reports remains available.</p>
+            <p class="hint">Change the two placeholder codes in <code>supabase-schema.sql</code> before running it.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="scanner-dialog" class="scanner-dialog">
+    <div class="scanner-head"><div><h3 id="scanner-title">Scan code</h3><p>Point the camera at the barcode or QR code.</p></div><button id="scanner-close" class="icon-button" aria-label="Close">✕</button></div>
+    <video id="scanner-video" playsinline muted></video>
+    <div class="scanner-line"></div>
+    <div class="scanner-controls">
+      <select id="camera-select"></select>
+      <button id="camera-start" class="secondary">Start camera</button>
+    </div>
+    <form id="manual-scan-form" class="manual-scan"><input id="manual-scan-input" placeholder="Or type / use a USB scanner" /><button class="primary">Use code</button></form>
+    <p id="scanner-status" class="hint">Camera access requires HTTPS and browser permission.</p>
+  </dialog>
+
+  <dialog id="edit-dialog" class="edit-dialog">
+    <div class="scanner-head"><div><h3>Supervisor correction</h3><p>Corrections update inventory while preserving the audit trail.</p></div><button id="edit-close" class="icon-button">✕</button></div>
+    <form id="edit-transaction-form" class="stack">
+      <input id="edit-transaction-id" type="hidden" />
+      <label>Sales order<input id="edit-sales-order" /></label>
+      <div id="edit-lines"></div>
+      <label>Reason for correction *<textarea id="edit-reason" required></textarea></label>
+      <button class="primary" type="submit">Save correction</button>
+    </form>
+  </dialog>
+
+  <script src="config.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

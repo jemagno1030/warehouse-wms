@@ -1,0 +1,17 @@
+{
+  "name": "Warehouse Control System v1",
+  "short_name": "Warehouse WMS v1",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f3f6f8",
+  "theme_color": "#16324f",
+  "description": "Warehouse inventory, barcode scanning, FEFO picking, transfers and container tracking.",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
