@@ -139,10 +139,13 @@
             <label>Sales order number *<input id="pick-so" required /></label>
             <label>Source rack / QR *<div class="scan-field"><input id="pick-location" /><button type="button" class="scan-btn" data-scan-target="pick-location" data-scan-kind="location">Scan</button></div></label>
             <div class="field-action"><button id="pick-lock-btn" class="secondary" type="button">Lock source location</button></div>
-            <label>SKU barcode<div class="scan-field"><input id="pick-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="pick-barcode" disabled>Scan</button></div></label>
-            <label>Available lot<select id="pick-lot" disabled><option value="">Scan a barcode first</option></select></label>
-            <label>Pick quantity (selected unit)<input id="pick-qty" type="number" min="0.001" step="0.001" disabled /></label>
+            <label>CASE, PACK, or PIECE barcode *<div class="scan-field"><input id="pick-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="pick-barcode" disabled>Scan</button></div></label>
+            <label>Matching expiry / container<select id="pick-lot" disabled><option value="">Scan a barcode first</option></select></label>
+            <label>Pick quantity (<span id="pick-unit-label">matched unit</span>)<input id="pick-qty" type="number" min="0.001" step="0.001" disabled /></label>
           </div>
+          <div class="info-box"><strong>Barcode-controlled deduction:</strong> a CASE barcode deducts CASE stock, a PACK barcode deducts PACK stock, and a PIECE barcode deducts PIECE stock. The item must exist in the locked source rack.</div>
+          <div class="card-head compact"><div><h3 id="pick-rack-title">Source rack contents</h3><p>Displayed for reference. Regular users must still scan or type the correct registered barcode.</p></div></div>
+          <div id="pick-rack-contents" class="table-wrap"><div class="empty-state">Lock a source rack to display its available items.</div></div>
           <div id="pick-fefo-note" class="warning-box hidden"></div>
           <div class="form-actions split"><button id="pick-add-btn" class="secondary" type="button" disabled>Add item</button><div><button id="pick-cancel-btn" class="danger ghost" type="button" disabled>Cancel / restart</button><button id="pick-complete-btn" class="primary" type="button" disabled>Complete picking</button></div></div>
           <div id="pick-cart" class="table-wrap"></div>

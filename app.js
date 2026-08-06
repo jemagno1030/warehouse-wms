@@ -79,7 +79,7 @@ const state = {
 };
 
 function freshOperationState() {
-  return { lockToken: null, locationCode: null, heartbeat: null, cart: [], lots: [], sku: null };
+  return { lockToken: null, locationCode: null, heartbeat: null, cart: [], lots: [], rackLots: [], sku: null };
 }
 
 const screenMeta = {
@@ -208,6 +208,8 @@ function setupStaticEvents() {
     if (detail) showContainerDetail(detail.dataset.containerDetail);
     const edit = event.target.closest('[data-edit-transaction]');
     if (edit) openSupervisorEdit(edit.dataset.editTransaction);
+    const bypassPick = event.target.closest('[data-pick-bypass-lot]');
+    if (bypassPick) addSupervisorBarcodeBypass(bypassPick.dataset.pickBypassLot);
     const qr = event.target.closest('[data-qr-location]');
     if (qr) toggleQrSelection(qr.dataset.qrLocation, qr.checked);
   });
@@ -692,6 +694,7 @@ async function acquireOperationLock(operation, location, type, salesOrder) {
   opState.locationCode = data[0].location_code;
   startHeartbeat(opState);
   configureOperationUi(operation, true);
+  if (operation === 'pick') await loadPickRackContents();
   toast(`${opState.locationCode} locked for your ${type.toLowerCase()} session.`, 'success');
 }
 
@@ -736,32 +739,179 @@ function configureOperationUi(operation, locked) {
   chip.className = `status-chip ${locked ? 'active' : 'neutral'}`;
 }
 
+async function loadPickRackContents() {
+  const location = state.pick.locationCode;
+  const container = $('pick-rack-contents');
+  if (!location) {
+    state.pick.rackLots = [];
+    $('pick-rack-title').textContent = 'Source rack contents';
+    container.innerHTML = emptyState('Lock a source rack to display its available items.');
+    return;
+  }
+
+  $('pick-rack-title').textContent = `Items currently stored in ${location}`;
+  container.innerHTML = '<div class="empty-state">Loading rack contents…</div>';
+  const { data, error } = await supabase
+    .from('v_inventory_details')
+    .select('*')
+    .eq('location_code', location)
+    .order('sku_name')
+    .order('container_no')
+    .order('expiry_date')
+    .order('uom');
+  if (error) {
+    state.pick.rackLots = [];
+    container.innerHTML = `<div class="warning-box">${escapeHtml(friendlyError(error))}</div>`;
+    return;
+  }
+  state.pick.rackLots = data || [];
+  renderPickRackContents();
+}
+
+function renderPickRackContents() {
+  const rows = state.pick.rackLots;
+  const container = $('pick-rack-contents');
+  if (!rows.length) {
+    container.innerHTML = emptyState(state.pick.locationCode
+      ? `No available stock is recorded in ${state.pick.locationCode}.`
+      : 'Lock a source rack to display its available items.');
+    return;
+  }
+
+  container.innerHTML = `<table><thead><tr><th>Item</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Available</th><th>Queued</th><th></th></tr></thead><tbody>${rows.map((lot) => {
+    const queued = state.pick.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
+    const remaining = Math.max(Number(lot.qty) - queued, 0);
+    const bypassAction = isSupervisor()
+      ? `<button class="link-btn" type="button" data-pick-bypass-lot="${lot.lot_id}">Bypass unreadable barcode</button>`
+      : '<small>Correct barcode required</small>';
+    return `<tr>
+      <td class="wrap"><strong>${escapeHtml(lot.sku_name)}</strong></td>
+      <td>${escapeHtml(lot.container_no)}</td>
+      <td>${fmtDate(lot.expiry_date)} ${expiryPill(lot.expiry_status)}</td>
+      <td><span class="pill">${escapeHtml(lot.uom)}</span></td>
+      <td>${fmtQtyUom(remaining, lot.uom)}${queued ? `<br><small>Original: ${fmtQtyUom(lot.qty, lot.uom)}</small>` : ''}</td>
+      <td>${queued ? fmtQtyUom(queued, lot.uom) : '—'}</td>
+      <td>${bypassAction}</td>
+    </tr>`;
+  }).join('')}</tbody></table>`;
+}
+
 async function loadOperationLots(operation) {
   const pick = operation === 'pick';
-  const barcode = $(pick ? 'pick-barcode' : 'tr-barcode').value.trim();
+  const barcodeInput = $(pick ? 'pick-barcode' : 'tr-barcode');
+  const barcode = barcodeInput.value.trim();
   const opState = state[operation];
   const lotSelect = $(pick ? 'pick-lot' : 'tr-lot');
   if (!barcode || !opState.locationCode) return;
+
+  if (barcode.toUpperCase() === 'N/A') {
+    lotSelect.innerHTML = '<option value="">N/A cannot be used for picking</option>';
+    if (pick) $('pick-unit-label').textContent = 'matched unit';
+    return toast('Scan or type an actual CASE, PACK, or PIECE barcode. N/A cannot authorize a pick.', 'error');
+  }
 
   const { data: skuData, error: skuError } = await supabase.rpc('find_sku_by_barcode', { p_barcode: barcode });
   if (skuError) return toast(friendlyError(skuError), 'error');
   const sku = skuData?.[0];
   if (!sku) {
     lotSelect.innerHTML = '<option value="">Barcode is not registered</option>';
+    if (pick) $('pick-unit-label').textContent = 'matched unit';
     return toast('This barcode is not registered to a SKU.', 'error');
   }
 
+  const barcodeType = String(sku.barcode_type || '').toUpperCase();
+  const expectedUom = ['CASE', 'PACK', 'PIECE'].includes(barcodeType) ? barcodeType : null;
+  if (pick && !expectedUom) {
+    lotSelect.innerHTML = '<option value="">Barcode type could not be identified</option>';
+    $('pick-unit-label').textContent = 'matched unit';
+    return toast('The barcode could not be matched to CASE, PACK, or PIECE.', 'error');
+  }
+
+  let lotsQuery = supabase.from('v_inventory_details')
+    .select('*')
+    .eq('location_code', opState.locationCode)
+    .eq('sku_id', sku.id)
+    .order('expiry_date');
+  let earliestQuery = supabase.from('v_inventory_details')
+    .select('expiry_date,location_code,container_no,uom')
+    .eq('sku_id', sku.id)
+    .order('expiry_date')
+    .limit(1);
+
+  // A CASE barcode can only use CASE balances, PACK only PACK, and PIECE only PIECE.
+  if (pick) {
+    lotsQuery = lotsQuery.eq('uom', expectedUom);
+    earliestQuery = earliestQuery.eq('uom', expectedUom);
+  }
+
   const [{ data: lots, error: lotsError }, { data: earliestRows, error: earliestError }] = await Promise.all([
-    supabase.from('v_inventory_details').select('*').eq('location_code', opState.locationCode).eq('sku_id', sku.id).order('expiry_date'),
-    supabase.from('v_inventory_details').select('expiry_date,location_code,container_no,uom').eq('sku_id', sku.id).order('expiry_date').limit(1)
+    lotsQuery,
+    earliestQuery
   ]);
   if (lotsError || earliestError) return toast(friendlyError(lotsError || earliestError), 'error');
+
   opState.sku = sku;
-  opState.lots = (lots || []).map((lot) => ({ ...lot, earliestExpiry: earliestRows?.[0]?.expiry_date || lot.expiry_date, scannedBarcode: barcode }));
+  opState.lots = (lots || []).map((lot) => ({
+    ...lot,
+    earliestExpiry: earliestRows?.[0]?.expiry_date || lot.expiry_date,
+    scannedBarcode: barcode,
+    scannedBarcodeType: expectedUom
+  }));
+
+  if (pick) $('pick-unit-label').textContent = expectedUom;
   lotSelect.innerHTML = opState.lots.length
     ? `<option value="">Select expiry / container</option>${opState.lots.map((lot, i) => `<option value="${i}">${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)} · Available ${fmtQtyUom(lot.qty, lot.uom)}</option>`).join('')}`
-    : '<option value="">No stock for this SKU in the locked location</option>';
+    : `<option value="">No ${pick ? expectedUom : ''} stock for this SKU in the locked location</option>`;
+
+  if (!opState.lots.length && pick) {
+    toast(`This is the correct ${expectedUom} barcode for ${sku.brand} ${sku.description}, but no ${expectedUom} quantity is available in ${opState.locationCode}.`, 'error');
+  }
   if (pick) updatePickFefoNote();
+}
+
+async function addSupervisorBarcodeBypass(lotId) {
+  if (!isSupervisor()) return toast('Only a supervisor can bypass an unreadable barcode.', 'error');
+  if (!state.pick.lockToken || !state.pick.locationCode) return toast('Lock the source rack first.', 'error');
+  const lot = state.pick.rackLots.find((row) => row.lot_id === lotId);
+  if (!lot) return toast('The selected rack item is no longer available. Refresh the source rack.', 'error');
+
+  const reason = window.prompt(`Supervisor bypass reason for ${lot.sku_name} (${lot.uom}). Explain why the barcode cannot be read:`);
+  if (!reason?.trim()) return toast('A supervisor bypass reason is required.', 'error');
+
+  const qtyText = window.prompt(`Enter the ${lot.uom} quantity to pick. Available: ${Number(lot.qty).toLocaleString()}`);
+  if (qtyText === null) return;
+  const qty = Number(qtyText);
+  if (!Number.isFinite(qty) || qty <= 0) return toast('Enter a valid quantity greater than zero.', 'error');
+
+  const already = state.pick.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
+  if (qty + already > Number(lot.qty)) return toast(`Cannot exceed available stock of ${fmtQtyUom(lot.qty, lot.uom)}.`, 'error');
+
+  const { data: earliestRows, error: earliestError } = await supabase
+    .from('v_inventory_details')
+    .select('expiry_date')
+    .eq('sku_id', lot.sku_id)
+    .eq('uom', lot.uom)
+    .order('expiry_date')
+    .limit(1);
+  if (earliestError) return toast(friendlyError(earliestError), 'error');
+  const earliestSameUnit = earliestRows?.[0]?.expiry_date || lot.expiry_date;
+
+  state.pick.cart.push({
+    lot_id: lot.lot_id,
+    qty,
+    barcode: null,
+    supervisor_bypass: true,
+    bypass_reason: reason.trim(),
+    sku_name: lot.sku_name,
+    container_no: lot.container_no,
+    expiry_date: lot.expiry_date,
+    earliest_expiry: earliestSameUnit,
+    available: Number(lot.qty),
+    uom: lot.uom
+  });
+  renderOperationCart('pick');
+  renderPickRackContents();
+  toast('Supervisor barcode bypass added and will be recorded in history.', 'success');
 }
 
 function updatePickFefoNote() {
@@ -791,9 +941,12 @@ function addOperationItem(operation) {
     expiry_date: lot.expiry_date,
     earliest_expiry: lot.earliestExpiry,
     available: Number(lot.qty),
-    uom: lot.uom
+    uom: lot.uom,
+    supervisor_bypass: false,
+    bypass_reason: null
   });
   renderOperationCart(operation);
+  if (pick) renderPickRackContents();
   $(pick ? 'pick-qty' : 'tr-qty').value = '';
   toast('Item added to the session.', 'success');
 }
@@ -803,14 +956,20 @@ function renderOperationCart(operation) {
   const rows = state[operation].cart;
   const container = $(pick ? 'pick-cart' : 'tr-cart');
   if (!rows.length) return container.innerHTML = emptyState('No items added yet.');
-  container.innerHTML = `<table><thead><tr><th>SKU</th><th>Container</th><th>Expiry</th><th>Quantity</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
+  container.innerHTML = `<table><thead><tr><th>SKU</th><th>Container</th><th>Expiry</th><th>Quantity</th><th>Barcode control</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
     <td class="wrap">${escapeHtml(r.sku_name)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td>
+    <td class="wrap">${pick
+      ? (r.supervisor_bypass
+        ? `<span class="pill override">Supervisor bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>`
+        : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span>`)
+      : '<span class="pill">Barcode scanned</span>'}</td>
     <td><button class="link-btn" data-operation="${operation}" data-remove-cart="${i}">Remove</button></td></tr>`).join('')}</tbody></table>`;
 }
 
 function removeCartItem(operation, index) {
   state[operation].cart.splice(index, 1);
   renderOperationCart(operation);
+  if (operation === 'pick') renderPickRackContents();
 }
 
 async function cancelOperation(operation, silent = false) {
@@ -837,6 +996,9 @@ function resetOperation(operation) {
     $('pick-barcode').value = '';
     $('pick-lot').innerHTML = '<option value="">Scan a barcode first</option>';
     $('pick-qty').value = '';
+    $('pick-unit-label').textContent = 'matched unit';
+    $('pick-rack-title').textContent = 'Source rack contents';
+    $('pick-rack-contents').innerHTML = emptyState('Lock a source rack to display its available items.');
     $('pick-fefo-note').classList.add('hidden');
   } else {
     $('tr-source').value = '';
@@ -864,7 +1026,9 @@ async function completePicking() {
     p_location_code: state.pick.locationCode,
     p_lock_token: state.pick.lockToken,
     p_sales_order: $('pick-so').value.trim(),
-    p_items: state.pick.cart.map(({ lot_id, qty, barcode }) => ({ lot_id, qty, barcode })),
+    p_items: state.pick.cart.map(({ lot_id, qty, barcode, supervisor_bypass, bypass_reason }) => ({
+      lot_id, qty, barcode, supervisor_bypass: Boolean(supervisor_bypass), bypass_reason: bypass_reason || null
+    })),
     p_allow_fefo_override: requiresOverride,
     p_override_reason: reason,
     p_note: null
@@ -1051,11 +1215,15 @@ function renderHistory() {
   const firstLineByTx = new Set();
   $('history-table').innerHTML = rows.length ? `<table><thead><tr><th>Transaction</th><th>Action</th><th>User / time</th><th>SO</th><th>Location</th><th>SKU / container</th><th>Qty</th><th>Flags</th><th></th></tr></thead><tbody>${rows.map((r) => {
     const first = !firstLineByTx.has(r.transaction_id); firstLineByTx.add(r.transaction_id);
-    const flags = [r.fefo_overridden ? '<span class="pill override">FEFO override</span>' : '', r.edited_at ? '<span class="pill">Corrected</span>' : ''].filter(Boolean).join(' ');
+    const flags = [
+      r.fefo_overridden ? '<span class="pill override">FEFO override</span>' : '',
+      r.barcode_bypassed ? '<span class="pill override">Supervisor barcode bypass</span>' : '',
+      r.edited_at ? '<span class="pill">Corrected</span>' : ''
+    ].filter(Boolean).join(' ');
     return `<tr><td><strong>${escapeHtml(r.tx_no)}</strong><br><small>${first ? escapeHtml(r.transaction_note || '') : ''}</small></td><td>${escapeHtml(r.transaction_type)}</td>
       <td>${escapeHtml(r.created_by_username)}<br><small>${fmtDateTime(r.created_at)}</small></td><td>${escapeHtml(r.sales_order || '—')}</td><td>${escapeHtml(r.location_code || '—')}</td>
       <td class="wrap">${escapeHtml(r.sku_name || 'System action')}<br><small>${escapeHtml(r.container_no || '')} ${r.expiry_date ? `· ${fmtDate(r.expiry_date)}` : ''}</small></td>
-      <td>${r.signed_qty == null ? '—' : fmtQtyUom(r.signed_qty, r.uom)}</td><td class="wrap">${flags}${first && r.override_reason ? `<br><small>${escapeHtml(r.override_reason)}</small>` : ''}${first && r.edit_reason ? `<br><small>Edit: ${escapeHtml(r.edit_reason)}</small>` : ''}</td>
+      <td>${r.signed_qty == null ? '—' : fmtQtyUom(r.signed_qty, r.uom)}</td><td class="wrap">${flags}${r.barcode_bypassed ? `<br><small>Bypass by ${escapeHtml(r.bypassed_by_username || r.created_by_username)}: ${escapeHtml(r.bypass_reason || '')}</small>` : ''}${first && r.override_reason ? `<br><small>${escapeHtml(r.override_reason)}</small>` : ''}${first && r.edit_reason ? `<br><small>Edit: ${escapeHtml(r.edit_reason)}</small>` : ''}</td>
       <td>${first && isSupervisor() && ['PUTAWAY','PICK','TRANSFER'].includes(r.transaction_type) ? `<button class="link-btn" data-edit-transaction="${r.transaction_id}">Correct</button>` : ''}</td></tr>`;
   }).join('')}</tbody></table>` : emptyState('No matching history.');
 }
