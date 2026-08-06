@@ -819,7 +819,7 @@ async function loadOperationLots(operation) {
     return toast('This barcode is not registered to a SKU.', 'error');
   }
 
-  const barcodeType = String(sku.barcode_type || '').toUpperCase();
+  const barcodeType = String(sku.barcode_type || sku.matched_type || '').toUpperCase();
   const expectedUom = ['CASE', 'PACK', 'PIECE'].includes(barcodeType) ? barcodeType : null;
   if (pick && !expectedUom) {
     lotSelect.innerHTML = '<option value="">Barcode type could not be identified</option>';
