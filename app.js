@@ -554,37 +554,52 @@ function putawayQuantityText(item) {
 
 async function addPutawayItem(event) {
   event.preventDefault();
-  const resolution = await resolvePutawaySku();
-  if (['conflict', 'error', 'stale'].includes(resolution)) return;
-  if (!event.currentTarget.reportValidity()) return;
-  const location = normalizeLocation($('pa-location').value);
-  if (!location) return toast('Scan or enter a rack location.', 'error');
+  // Keep stable references before awaiting database lookups. In browsers,
+  // event.currentTarget is cleared after the synchronous event phase ends.
+  const form = event.currentTarget;
+  const button = event.submitter || $('pa-add-btn');
+  setBusy(button, true, 'Checking…');
 
-  const item = putawayLinePayload();
-  const codes = [item.case_barcode, item.pack_barcode, item.piece_barcode];
-  if (codes.some((code) => !code)) return toast('CASE, PACK, and PIECE barcode are all required. Enter N/A when unavailable.', 'error');
-  const actualCodes = codes.filter((code) => code !== 'N/A').map((code) => code.toLowerCase());
-  if (!actualCodes.length) return toast('At least one actual barcode is required; use N/A only for unavailable barcode types.', 'error');
-  if (new Set(actualCodes).size !== actualCodes.length) return toast('The same actual barcode cannot be used as CASE, PACK, or PIECE barcode.', 'error');
-  if ([item.case_qty, item.pack_qty, item.piece_qty].some((qty) => qty < 0)) return toast('Quantities cannot be negative.', 'error');
-  if (item.case_qty <= 0 && item.pack_qty <= 0 && item.piece_qty <= 0) return toast('Enter at least one CASE, PACK, or PIECE quantity.', 'error');
+  try {
+    const resolution = await resolvePutawaySku();
+    if (['conflict', 'error', 'stale'].includes(resolution)) return;
+    if (!form.reportValidity()) return;
 
-  const duplicateMatch = await checkPutawayDuplicateDetails();
-  if (duplicateMatch && !$('pa-still-add').checked) {
-    return toast('ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE, or select Still Add to Database.', 'error');
+    const location = normalizeLocation($('pa-location').value);
+    if (!location) return toast('Scan or enter a rack location.', 'error');
+
+    const item = putawayLinePayload();
+    const codes = [item.case_barcode, item.pack_barcode, item.piece_barcode];
+    if (codes.some((code) => !code)) return toast('CASE, PACK, and PIECE barcode are all required. Enter N/A when unavailable.', 'error');
+    const actualCodes = codes.filter((code) => code !== 'N/A').map((code) => code.toLowerCase());
+    if (!actualCodes.length) return toast('At least one actual barcode is required; use N/A only for unavailable barcode types.', 'error');
+    if (new Set(actualCodes).size !== actualCodes.length) return toast('The same actual barcode cannot be used as CASE, PACK, or PIECE barcode.', 'error');
+    if ([item.case_qty, item.pack_qty, item.piece_qty].some((qty) => qty < 0)) return toast('Quantities cannot be negative.', 'error');
+    if (item.case_qty <= 0 && item.pack_qty <= 0 && item.piece_qty <= 0) return toast('Enter at least one CASE, PACK, or PIECE quantity.', 'error');
+
+    const duplicateMatch = await checkPutawayDuplicateDetails();
+    if (duplicateMatch && !$('pa-still-add').checked) {
+      return toast('ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE, or select Still Add to Database.', 'error');
+    }
+    item.allow_duplicate_details = $('pa-still-add').checked;
+
+    if (!state.putaway.locationCode) state.putaway.locationCode = location;
+    if (state.putaway.locationCode !== location) return toast('All lines in this pallet session must use the same rack location.', 'error');
+    state.putaway.cart.push(item);
+    $('pa-location').disabled = true;
+    qsa('[data-scan-target="pa-location"]').forEach((b) => b.disabled = true);
+    $('pa-cancel-btn').disabled = false;
+    $('pa-complete-btn').disabled = state.mode !== 'ACTIVE';
+    renderPutawayCart();
+    clearPutawayLine();
+    toast('SKU line added to the pallet session.', 'success');
+  } catch (error) {
+    console.error('Put-away line error:', error);
+    toast(`Could not add SKU line: ${friendlyError(error)}`, 'error');
+  } finally {
+    setBusy(button, false);
+    button.disabled = state.mode !== 'ACTIVE';
   }
-  item.allow_duplicate_details = $('pa-still-add').checked;
-
-  if (!state.putaway.locationCode) state.putaway.locationCode = location;
-  if (state.putaway.locationCode !== location) return toast('All lines in this pallet session must use the same rack location.', 'error');
-  state.putaway.cart.push(item);
-  $('pa-location').disabled = true;
-  qsa('[data-scan-target="pa-location"]').forEach((b) => b.disabled = true);
-  $('pa-cancel-btn').disabled = false;
-  $('pa-complete-btn').disabled = state.mode !== 'ACTIVE';
-  renderPutawayCart();
-  clearPutawayLine();
-  toast('SKU line added to the pallet session.', 'success');
 }
 
 function clearPutawayLine() {
