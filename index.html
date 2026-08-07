@@ -143,6 +143,8 @@
             <label>Matching expiry / container<select id="pick-lot" disabled><option value="">Scan a barcode first</option></select></label>
             <label>Pick quantity — whole number (<span id="pick-unit-label">matched unit</span>)<input id="pick-qty" type="number" min="1" step="1" inputmode="numeric" disabled /></label>
           </div>
+          <div id="pick-barcode-match" class="info-box hidden"></div>
+          <div id="pick-qty-note" class="info-box hidden"></div>
           <div id="pick-so-status" class="info-box"><strong>Sales order status:</strong> enter a sales order number. A completed sales order cannot be reused by a regular user.</div>
           <div id="pick-so-override-panel" class="warning-box hidden" data-role-min="supervisor">
             <label><input id="pick-so-override" type="checkbox" /> Supervisor override: reopen this sales order if it was already completed</label>
@@ -161,6 +163,8 @@
             </div>
           </div>
           <div id="pick-cart" class="table-wrap"></div>
+          <div class="card-head compact"><div><h3>Sales order picking summary</h3><p>All saved picks from completed source racks, plus items currently queued on this rack, remain visible until you finish the sales order.</p></div><button id="pick-summary-refresh-btn" class="secondary" type="button">Refresh summary</button></div>
+          <div id="pick-order-summary" class="table-wrap"><div class="empty-state">Enter a sales order number to see its picking summary.</div></div>
         </div>
       </section>
 
