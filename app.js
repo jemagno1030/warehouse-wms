@@ -74,6 +74,7 @@ const state = {
   putaway: { locationCode: null, cart: [], matchedSkuId: null, duplicateDetailsSkuId: null, lookupSequence: 0 },
   pick: freshOperationState(),
   pickOrder: { salesOrder: null, status: null, pickCount: 0, openedBy: null },
+  pickOrderLookupSequence: 0,
   transfer: freshOperationState(),
   data: { inventory: [], containers: [], expiry: [], history: [], audit: [], locations: [], rackMap: [] },
   selectedQrLocations: new Set()
@@ -163,9 +164,7 @@ function setupStaticEvents() {
   $('pick-lock-btn').addEventListener('click', lockPickLocation);
   $('pick-so').addEventListener('change', refreshPickSalesOrderStatus);
   $('pick-so').addEventListener('blur', refreshPickSalesOrderStatus);
-  $('pick-so-override').addEventListener('change', () => {
-    $('pick-so-override-reason').disabled = !$('pick-so-override').checked || Boolean(state.pick.lockToken);
-  });
+  $('pick-so-override').addEventListener('change', syncPickOverrideControls);
   $('pick-barcode').addEventListener('change', () => loadOperationLots('pick'));
   $('pick-lot').addEventListener('change', () => updatePickFefoNote());
   $('pick-add-btn').addEventListener('click', () => addOperationItem('pick'));
@@ -311,7 +310,9 @@ async function handleSession(session) {
   $('app-view').classList.remove('hidden');
   await loadSystemMode();
   subscribeRealtime();
-  showScreen('dashboard');
+
+  const savedScreen = getSavedScreen();
+  showScreen(canOpenScreen(savedScreen) ? savedScreen : 'dashboard');
 }
 
 async function loadSystemMode() {
@@ -349,9 +350,39 @@ function unsubscribeRealtime() {
   state.realtimeChannel = null;
 }
 
+function screenStorageKey() {
+  return state.session?.user?.id ? `wms:last-screen:${state.session.user.id}` : null;
+}
+
+function getSavedScreen() {
+  const key = screenStorageKey();
+  if (!key) return 'dashboard';
+  try {
+    return localStorage.getItem(key) || 'dashboard';
+  } catch (_) {
+    return 'dashboard';
+  }
+}
+
+function saveCurrentScreen(name) {
+  const key = screenStorageKey();
+  if (!key) return;
+  try { localStorage.setItem(key, name); } catch (_) { /* Browser storage can be unavailable. */ }
+}
+
+function canOpenScreen(name) {
+  if (!name || !screenMeta[name] || !$(`screen-${name}`)) return false;
+  if (['locations', 'control'].includes(name) && !isSupervisor()) return false;
+  return true;
+}
+
 function showScreen(name) {
-  if (name === 'locations' && !isSupervisor()) return toast('Supervisor access is required.', 'error');
+  if (!canOpenScreen(name)) {
+    if (['locations', 'control'].includes(name) && !isSupervisor()) toast('Supervisor access is required.', 'error');
+    name = 'dashboard';
+  }
   state.currentScreen = name;
+  saveCurrentScreen(name);
   qsa('.screen').forEach((s) => s.classList.toggle('active', s.id === `screen-${name}`));
   qsa('#main-nav [data-screen]').forEach((b) => b.classList.toggle('active', b.dataset.screen === name));
   const [title, subtitle] = screenMeta[name] || [name, ''];
@@ -678,8 +709,16 @@ async function lockPickLocation() {
   const location = normalizeLocation($('pick-location').value);
   if (!so || !location) return toast('Enter the sales order and scan the source location first.', 'error');
 
-  const overrideCompleted = isSupervisor() && $('pick-so-override').checked;
-  const overrideReason = $('pick-so-override-reason').value.trim();
+  // Verify the sales order immediately before locking. This prevents a stale status
+  // or a supervisor override left checked from a previously entered sales order.
+  const statusOk = await refreshPickSalesOrderStatus();
+  if (!statusOk || !['NEW', 'OPEN', 'COMPLETED'].includes(state.pickOrder.status)) {
+    return toast('The sales order status could not be verified. Please try again.', 'error');
+  }
+
+  const isCompletedOrder = state.pickOrder.status === 'COMPLETED';
+  const overrideCompleted = isSupervisor() && isCompletedOrder && $('pick-so-override').checked;
+  const overrideReason = overrideCompleted ? $('pick-so-override-reason').value.trim() : '';
   if (overrideCompleted && !overrideReason) {
     return toast('Enter the supervisor override reason before reopening a completed sales order.', 'error');
   }
@@ -691,7 +730,6 @@ async function lockPickLocation() {
   if (locked) {
     $('pick-so-override').checked = false;
     $('pick-so-override-reason').value = '';
-    $('pick-so-override-reason').disabled = true;
     await refreshPickSalesOrderStatus();
   }
 }
@@ -764,8 +802,7 @@ function configureOperationUi(operation, locked) {
   locationInput.disabled = locked;
   if (pick) {
     $('pick-so').disabled = locked;
-    $('pick-so-override').disabled = locked;
-    $('pick-so-override-reason').disabled = locked || !$('pick-so-override').checked;
+    syncPickOverrideControls();
   }
   $(`${prefix}-barcode`).disabled = !locked;
   qsa(`[data-scan-target="${prefix}-barcode"]`).forEach((b) => b.disabled = !locked);
@@ -1071,21 +1108,49 @@ function updatePickSalesOrderControls() {
   $('pick-finish-so-btn').disabled = !(state.mode === 'ACTIVE' && hasSo && orderOpen && hasSavedPick && unlocked);
 }
 
+function syncPickOverrideControls() {
+  const checkbox = $('pick-so-override');
+  const reason = $('pick-so-override-reason');
+  if (!checkbox || !reason) return;
+
+  const completed = state.pickOrder.status === 'COMPLETED';
+  const available = isSupervisor() && completed && !state.pick.lockToken;
+
+  // The override belongs only to the completed sales order currently displayed.
+  // Clear it as soon as the user switches to a NEW or OPEN sales order.
+  if (!completed) {
+    checkbox.checked = false;
+    reason.value = '';
+  }
+
+  checkbox.disabled = !available;
+  reason.disabled = !available || !checkbox.checked;
+}
+
 async function refreshPickSalesOrderStatus() {
   const so = $('pick-so').value.trim();
   const box = $('pick-so-status');
+  const requestNo = ++state.pickOrderLookupSequence;
+
   if (!so) {
     state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null };
     box.innerHTML = '<strong>Sales order status:</strong> enter a sales order number. A completed sales order cannot be reused by a regular user.';
+    syncPickOverrideControls();
     updatePickSalesOrderControls();
-    return;
+    return true;
   }
 
   const { data, error } = await supabase.rpc('get_pick_sales_order_status', { p_sales_order: so });
+
+  // Ignore an older lookup if the user has already entered another sales order.
+  if (requestNo !== state.pickOrderLookupSequence || $('pick-so').value.trim() !== so) return false;
+
   if (error) {
+    state.pickOrder = { salesOrder: so, status: null, pickCount: 0, openedBy: null };
     box.innerHTML = `<strong>Sales order status:</strong> ${escapeHtml(friendlyError(error))}`;
+    syncPickOverrideControls();
     updatePickSalesOrderControls();
-    return;
+    return false;
   }
 
   const row = data?.[0];
@@ -1105,7 +1170,10 @@ async function refreshPickSalesOrderStatus() {
       box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> is OPEN by ${escapeHtml(row.opened_by_username || 'a user')} · ${Number(row.pick_transaction_count || 0).toLocaleString()} completed rack pick(s). Continue to another rack or finish the sales order.`;
     }
   }
+
+  syncPickOverrideControls();
   updatePickSalesOrderControls();
+  return true;
 }
 
 async function finishPickSalesOrder() {
