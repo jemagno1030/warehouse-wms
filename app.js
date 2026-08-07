@@ -213,6 +213,8 @@ function setupStaticEvents() {
 
   $('edit-close').addEventListener('click', () => $('edit-dialog').close());
   $('edit-transaction-form').addEventListener('submit', submitSupervisorEdit);
+  $('inventory-adjust-close').addEventListener('click', () => $('inventory-adjust-dialog').close());
+  $('inventory-adjust-form').addEventListener('submit', submitInventoryLotEdit);
 
   document.addEventListener('click', (event) => {
     const remove = event.target.closest('[data-remove-cart]');
@@ -223,6 +225,10 @@ function setupStaticEvents() {
     if (detail) showContainerDetail(detail.dataset.containerDetail);
     const edit = event.target.closest('[data-edit-transaction]');
     if (edit) openSupervisorEdit(edit.dataset.editTransaction);
+    const inventoryEdit = event.target.closest('[data-inventory-edit]');
+    if (inventoryEdit) openInventoryLotEdit(inventoryEdit.dataset.inventoryEdit);
+    const inventoryDelete = event.target.closest('[data-inventory-delete]');
+    if (inventoryDelete) deleteInventoryLot(inventoryDelete.dataset.inventoryDelete);
     const bypassPick = event.target.closest('[data-pick-bypass-lot]');
     if (bypassPick) addSupervisorBarcodeBypass(bypassPick.dataset.pickBypassLot);
     const qr = event.target.closest('[data-qr-location]');
@@ -1562,9 +1568,104 @@ function renderInventory() {
   });
   const summaryRows = [...grouped.values()].sort((a, b) => a.sku_name.localeCompare(b.sku_name));
   $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
-  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th></tr></thead><tbody>${rows.map((r) => `<tr>
+  const actionHeader = isSupervisor() ? '<th>Actions</th>' : '';
+  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => `<tr>
     <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td>
+    ${isSupervisor() ? `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button> <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button></td>` : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching inventory.');
+}
+
+async function openInventoryLotEdit(lotId) {
+  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+  const row = state.data.inventory.find((r) => r.lot_id === lotId);
+  if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
+
+  const [skuRes, locationRes] = await Promise.all([
+    supabase.from('skus').select('id,brand,description,variant,size').order('brand').order('description').order('variant').order('size').limit(10000),
+    supabase.from('locations').select('id,code,sort_order,is_active').eq('is_active', true).order('sort_order', { ascending: true, nullsFirst: false }).order('code').limit(10000)
+  ]);
+  if (skuRes.error) return toast(friendlyError(skuRes.error), 'error');
+  if (locationRes.error) return toast(friendlyError(locationRes.error), 'error');
+
+  $('inventory-adjust-lot-id').value = lotId;
+  $('inventory-adjust-current').innerHTML = `<strong>Current lot:</strong> ${escapeHtml(row.sku_name)} · ${escapeHtml(row.location_code)} · ${escapeHtml(row.container_no)} · ${fmtDate(row.expiry_date)} · ${fmtQtyUom(row.qty, row.uom)}`;
+
+  $('inventory-adjust-sku').innerHTML = (skuRes.data || []).map((sku) => {
+    const label = [sku.brand, sku.description, sku.variant, sku.size].filter(Boolean).join(' ');
+    return `<option value="${escapeHtml(sku.id)}" ${sku.id === row.sku_id ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  }).join('');
+
+  $('inventory-adjust-location').innerHTML = (locationRes.data || []).map((loc) =>
+    `<option value="${escapeHtml(loc.code)}" ${loc.code === row.location_code ? 'selected' : ''}>${escapeHtml(loc.code)}</option>`
+  ).join('');
+
+  $('inventory-adjust-container').value = row.container_no || '';
+  $('inventory-adjust-expiry').value = row.expiry_date || '';
+  $('inventory-adjust-uom').value = row.uom || 'PIECE';
+  $('inventory-adjust-qty').value = Number(row.qty);
+  $('inventory-adjust-reason').value = '';
+  $('inventory-adjust-dialog').showModal();
+}
+
+async function submitInventoryLotEdit(event) {
+  event.preventDefault();
+  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+
+  const qty = Number($('inventory-adjust-qty').value);
+  if (!Number.isInteger(qty) || qty <= 0) {
+    return toast('Adjusted CASE, PACK, and PIECE quantities must be positive whole numbers.', 'error');
+  }
+  const reason = $('inventory-adjust-reason').value.trim();
+  if (!reason) return toast('Enter the reason for this inventory adjustment.', 'error');
+
+  const button = event.submitter;
+  setBusy(button, true, 'Saving…');
+  const { data, error } = await supabase.rpc('supervisor_adjust_inventory_lot', {
+    p_lot_id: $('inventory-adjust-lot-id').value,
+    p_sku_id: $('inventory-adjust-sku').value,
+    p_location_code: normalizeLocation($('inventory-adjust-location').value),
+    p_container_no: $('inventory-adjust-container').value.trim(),
+    p_expiry_date: $('inventory-adjust-expiry').value,
+    p_uom: $('inventory-adjust-uom').value,
+    p_qty: qty,
+    p_reason: reason
+  });
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  $('inventory-adjust-dialog').close();
+  invalidateReports();
+  await loadInventory(true);
+  const result = data?.[0];
+  toast(result?.merged_into_existing ? 'Inventory lot corrected and merged with an existing matching lot. Audit record saved.' : 'Inventory lot corrected. Audit record saved.', 'success');
+}
+
+async function deleteInventoryLot(lotId) {
+  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+  const row = state.data.inventory.find((r) => r.lot_id === lotId);
+  if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
+
+  const reason = window.prompt(`Reason for deleting this active inventory lot:
+
+${row.sku_name}
+${row.location_code} · ${row.container_no} · ${fmtQtyUom(row.qty, row.uom)}`);
+  if (!reason?.trim()) return;
+  if (!window.confirm(`Delete this lot from active inventory?
+
+${row.sku_name}
+${row.location_code} · ${row.container_no} · ${fmtQtyUom(row.qty, row.uom)}
+
+The balance will become zero. Historical transaction records will remain.`)) return;
+
+  const { error } = await supabase.rpc('supervisor_delete_inventory_lot', {
+    p_lot_id: lotId,
+    p_reason: reason.trim()
+  });
+  if (error) return toast(friendlyError(error), 'error');
+
+  invalidateReports();
+  await loadInventory(true);
+  toast('Inventory lot removed from active inventory. Audit record saved.', 'success');
 }
 
 async function loadContainers(force = false) {
