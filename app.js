@@ -908,7 +908,7 @@ async function checkShipperDuplicateDetails() {
     p_size: $('sp-size').value.trim()
   };
   if (Object.values(details).some((v) => !v)) { hideShipperDuplicateWarning(); return null; }
-  const { data, error } = await supabase.rpc('find_sku_by_details', details);
+  const { data, error } = await supabase.rpc('find_sku_by_details_type', { ...details, p_sku_type: 'SHIPPER' });
   if (error) { toast(friendlyError(error), 'error'); return null; }
   const match = data?.[0];
   if (!match) { hideShipperDuplicateWarning(); return null; }
@@ -978,7 +978,7 @@ async function checkShipperContentDuplicateDetails() {
     p_size: $('sp-content-size').value.trim()
   };
   if (Object.values(details).some((v) => !v)) { hideShipperContentDuplicateWarning(); return null; }
-  const { data, error } = await supabase.rpc('find_sku_by_details', details);
+  const { data, error } = await supabase.rpc('find_sku_by_details_type', { ...details, p_sku_type: 'STANDARD' });
   if (error) { toast(friendlyError(error), 'error'); return null; }
   const match = data?.[0];
   if (!match) { hideShipperContentDuplicateWarning(); return null; }
