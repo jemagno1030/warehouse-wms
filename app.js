@@ -197,6 +197,21 @@ function setupStaticEvents() {
   $('sp-cancel-btn').addEventListener('click', resetShipperPutaway);
   $('sp-complete-btn').addEventListener('click', completeShipperPutaway);
 
+  // Barcode entry must always remain exactly what the user typed/scanned.
+  // Disable browser form-history/autocomplete so a partial code such as 12345
+  // is never expanded to a previously used longer barcode.
+  ['pick-barcode', 'tr-barcode'].forEach((id) => {
+    const input = $(id);
+    input.setAttribute('autocomplete', 'off');
+    // A unique field name prevents Chrome/form-history from treating this barcode
+    // field as the same previously completed input across visits.
+    input.name = `wms-${id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    input.setAttribute('autocorrect', 'off');
+    input.setAttribute('autocapitalize', 'off');
+    input.setAttribute('spellcheck', 'false');
+    input.setAttribute('aria-autocomplete', 'none');
+  });
+
   $('pick-lock-btn').addEventListener('click', lockPickLocation);
   $('pick-so').addEventListener('change', refreshPickSalesOrderStatus);
   $('pick-so').addEventListener('blur', refreshPickSalesOrderStatus);
@@ -206,6 +221,7 @@ function setupStaticEvents() {
   $('pick-qty').addEventListener('input', updatePickQtyNote);
   $('pick-add-btn').addEventListener('click', () => addOperationItem('pick'));
   $('pick-cancel-btn').addEventListener('click', () => cancelOperation('pick'));
+  $('pick-cancel-order-btn').addEventListener('click', cancelEntirePicking);
   $('pick-complete-btn').addEventListener('click', completePicking);
   $('pick-finish-so-btn').addEventListener('click', finishPickSalesOrder);
   $('pick-summary-refresh-btn').addEventListener('click', loadPickSalesOrderSummary);
@@ -2045,6 +2061,16 @@ function updatePickSalesOrderControls() {
     : '';
 
   $('pick-finish-so-btn').disabled = !(state.mode === 'ACTIVE' && hasSo && orderOpen && hasSavedPick && unlocked);
+
+  // A whole picking session may be abandoned only before the first saved rack pick.
+  // The server re-checks this condition before releasing the Sales Order number.
+  const cancelWhole = $('pick-cancel-order-btn');
+  if (cancelWhole) {
+    cancelWhole.disabled = !(state.mode === 'ACTIVE' && hasSo && orderOpen && !hasSavedPick && Boolean(state.pickOrder.isCurrentOwner));
+    cancelWhole.title = hasSavedPick
+      ? 'This Sales Order already has a saved pick and can no longer be cancelled as an empty picking session.'
+      : 'Cancel the entire empty picking session and release this Sales Order number for reuse.';
+  }
 }
 
 function syncPickOverrideControls() {
@@ -2121,6 +2147,60 @@ async function refreshPickSalesOrderStatus() {
   updatePickSalesOrderControls();
   await loadPickSalesOrderSummary();
   return true;
+}
+
+async function cancelEntirePicking() {
+  const so = $('pick-so').value.trim();
+  if (!so) return toast('Enter the sales order number.', 'error');
+
+  // Refresh immediately before cancellation so an older client status cannot
+  // accidentally release an order that already has a completed rack pick.
+  const statusOk = await refreshPickSalesOrderStatus();
+  if (!statusOk) return toast('The sales order status could not be verified. Please try again.', 'error');
+  if (state.pickOrder.status !== 'OPEN') return toast('Only an OPEN picking session can be cancelled.', 'error');
+  if (!state.pickOrder.isCurrentOwner) return toast('Only the user who opened this empty picking session may cancel it.', 'error');
+  if (Number(state.pickOrder.pickCount || 0) > 0) {
+    return toast('This Sales Order already has a saved rack pick. It can no longer be cancelled as an empty picking session.', 'error');
+  }
+
+  const queuedText = state.pick.cart.length
+    ? `\n\n${state.pick.cart.length} unsaved queued line(s) on the current rack will be discarded. No inventory has been deducted yet.`
+    : '';
+  if (!window.confirm(`Cancel the entire picking process for Sales Order ${so}?${queuedText}\n\nBecause no rack pick has been saved, this Sales Order number will become available for use again.`)) return;
+
+  const button = $('pick-cancel-order-btn');
+  setBusy(button, true, 'Cancelling…');
+  const { data, error } = await supabase.rpc('cancel_empty_pick_sales_order', { p_sales_order: so });
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  // The database RPC releases any active rack lock belonging to this empty order.
+  stopHeartbeat(state.pick);
+  state.pick = freshOperationState();
+  $('pick-so').value = '';
+  $('pick-location').value = '';
+  $('pick-barcode').value = '';
+  $('pick-lot').innerHTML = '<option value="">Scan a barcode first</option>';
+  $('pick-qty').value = '';
+  $('pick-so-override').checked = false;
+  $('pick-so-override-reason').value = '';
+  $('pick-so-override-reason').disabled = true;
+  clearPickBarcodeMatch();
+  $('pick-fefo-note').classList.add('hidden');
+  $('pick-qty-note').classList.add('hidden');
+  $('pick-rack-title').textContent = 'Source rack contents';
+  $('pick-rack-contents').innerHTML = emptyState('Lock a source rack to display its available items.');
+  configureOperationUi('pick', false);
+  renderOperationCart('pick');
+  state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
+  state.pickOrderSummary = [];
+  invalidateReports();
+  await refreshPickSalesOrderStatus();
+
+  const result = data?.[0]?.result_action || 'CANCELLED_REUSABLE';
+  toast(result === 'RESTORED_COMPLETED'
+    ? `Picking session cancelled. ${so} remains protected as a previously completed Sales Order.`
+    : `Picking session cancelled. ${so} is available for use again.`, 'success');
 }
 
 async function finishPickSalesOrder() {
@@ -2225,7 +2305,7 @@ function renderInventory() {
   const actionHeader = isSupervisor() ? '<th>Actions</th>' : '';
   $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => `<tr>
     <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td>
-    ${isSupervisor() ? (r.shipper_box_id ? `<td><small>Protected Shipper lot<br>${escapeHtml(r.shipper_box_no || '')}</small></td>` : `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button> <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button></td>`) : ''}
+    ${isSupervisor() ? (r.shipper_box_id ? `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button><br><small>Shipper-safe correction · ${escapeHtml(r.shipper_box_no || '')}</small></td>` : `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button> <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button></td>`) : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching inventory.');
 }
 
@@ -2233,21 +2313,26 @@ async function openInventoryLotEdit(lotId) {
   if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
-  if (row.shipper_box_id) return toast('This lot belongs to a physical Shipper Box. Use Shipper Picking/Transfer so the box status and contents remain consistent.', 'error');
+
+  const isShipperLot = Boolean(row.shipper_box_id);
+  const shipperRole = String(row.shipper_lot_role || '').toUpperCase();
+  const targetSkuType = isShipperLot && shipperRole === 'HEADER' ? 'SHIPPER' : 'STANDARD';
 
   const [skuRes, locationRes] = await Promise.all([
-    supabase.from('skus').select('id,brand,description,variant,size').order('brand').order('description').order('variant').order('size').limit(10000),
+    supabase.from('skus').select('id,brand,description,variant,size,case_barcode,pack_barcode,piece_barcode,sku_type').eq('sku_type', targetSkuType).order('brand').order('description').order('variant').order('size').limit(10000),
     supabase.from('locations').select('id,code,sort_order,is_active').eq('is_active', true).order('sort_order', { ascending: true, nullsFirst: false }).order('code').limit(10000)
   ]);
   if (skuRes.error) return toast(friendlyError(skuRes.error), 'error');
   if (locationRes.error) return toast(friendlyError(locationRes.error), 'error');
 
   $('inventory-adjust-lot-id').value = lotId;
+  $('inventory-adjust-shipper-box-id').value = row.shipper_box_id || '';
   $('inventory-adjust-current').innerHTML = `<strong>Current lot:</strong> ${escapeHtml(row.sku_name)} · ${escapeHtml(row.location_code)} · ${escapeHtml(row.container_no)} · ${fmtDate(row.expiry_date)} · ${fmtQtyUom(row.qty, row.uom)}`;
 
   $('inventory-adjust-sku').innerHTML = (skuRes.data || []).map((sku) => {
     const label = [sku.brand, sku.description, sku.variant, sku.size].filter(Boolean).join(' ');
-    return `<option value="${escapeHtml(sku.id)}" ${sku.id === row.sku_id ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    const barcode = targetSkuType === 'SHIPPER' ? sku.case_barcode : (sku.pack_barcode || sku.case_barcode || sku.piece_barcode);
+    return `<option value="${escapeHtml(sku.id)}" ${sku.id === row.sku_id ? 'selected' : ''}>${escapeHtml(label)} · ${escapeHtml(targetSkuType === 'SHIPPER' ? 'CASE' : 'PACK')} ${escapeHtml(barcode || 'N/A')}</option>`;
   }).join('');
 
   $('inventory-adjust-location').innerHTML = (locationRes.data || []).map((loc) =>
@@ -2259,6 +2344,66 @@ async function openInventoryLotEdit(lotId) {
   $('inventory-adjust-uom').value = row.uom || 'PIECE';
   $('inventory-adjust-qty').value = Number(row.qty);
   $('inventory-adjust-reason').value = '';
+
+  const shipperContext = $('inventory-adjust-shipper-context');
+  const noteWrap = $('inventory-adjust-putaway-note-wrap');
+  const noteInput = $('inventory-adjust-putaway-note');
+  const help = $('inventory-adjust-shipper-help');
+
+  // Reset generic field behavior before applying Shipper-specific safeguards.
+  $('inventory-adjust-sku').disabled = false;
+  $('inventory-adjust-location').disabled = false;
+  $('inventory-adjust-container').disabled = false;
+  $('inventory-adjust-expiry').disabled = false;
+  $('inventory-adjust-uom').disabled = false;
+  $('inventory-adjust-qty').disabled = false;
+  $('inventory-adjust-qty').min = '1';
+  shipperContext.classList.add('hidden');
+  noteWrap.classList.add('hidden');
+  help.classList.add('hidden');
+  noteInput.value = '';
+
+  if (isShipperLot) {
+    const { data: box, error: boxError } = await supabase.from('shipper_boxes').select('id,box_no,status,shipper_sku_id,location_id,container_no,putaway_transaction_id').eq('id', row.shipper_box_id).single();
+    if (boxError) return toast(friendlyError(boxError), 'error');
+    const [shipperSkuRes, txRes] = await Promise.all([
+      supabase.from('skus').select('brand,description,variant,size,case_barcode').eq('id', box.shipper_sku_id).single(),
+      box.putaway_transaction_id
+        ? supabase.from('transactions').select('note,tx_no,created_at').eq('id', box.putaway_transaction_id).single()
+        : Promise.resolve({ data: null, error: null })
+    ]);
+    if (shipperSkuRes.error) return toast(friendlyError(shipperSkuRes.error), 'error');
+    if (txRes.error) return toast(friendlyError(txRes.error), 'error');
+
+    const shipperSku = shipperSkuRes.data || {};
+    const selectedBarcode = shipperRole === 'HEADER' ? row.case_barcode : row.pack_barcode;
+    shipperContext.innerHTML = `<strong>Physical Shipper correction</strong><br>
+      Box ID: <strong>${escapeHtml(box.box_no || row.shipper_box_no || '—')}</strong> · Status: <strong>${escapeHtml(box.status || row.shipper_status || '—')}</strong><br>
+      Shipper item: ${escapeHtml([shipperSku.brand, shipperSku.description, shipperSku.variant, shipperSku.size].filter(Boolean).join(' '))}<br>
+      Shipper CASE barcode: ${escapeHtml(shipperSku.case_barcode || '—')}<br>
+      Current ${escapeHtml(shipperRole === 'HEADER' ? 'Shipper CASE' : 'content PACK')} item: ${escapeHtml(row.sku_name)} · Barcode: ${escapeHtml(selectedBarcode || 'N/A')}<br>
+      Original transaction: ${escapeHtml(txRes.data?.tx_no || '—')} · ${txRes.data?.created_at ? escapeHtml(fmtDateTime(txRes.data.created_at)) : '—'}`;
+    shipperContext.classList.remove('hidden');
+    noteWrap.classList.remove('hidden');
+    help.classList.remove('hidden');
+    noteInput.value = txRes.data?.note || '';
+
+    // Physical Shipper identities have fixed stock units. HEADER CASE qty/expiry are
+    // derived from the box contents; CONTENT rows are PACK-level only.
+    $('inventory-adjust-uom').disabled = true;
+    if (shipperRole === 'HEADER') {
+      $('inventory-adjust-uom').value = 'CASE';
+      $('inventory-adjust-qty').value = 1;
+      $('inventory-adjust-qty').disabled = true;
+      $('inventory-adjust-expiry').disabled = true;
+      $('inventory-adjust-expiry').title = 'Complete Shipper expiry is automatically calculated from the earliest remaining content expiry.';
+    } else {
+      $('inventory-adjust-uom').value = 'PACK';
+      $('inventory-adjust-qty').min = '0';
+      $('inventory-adjust-expiry').title = '';
+    }
+  }
+
   $('inventory-adjust-dialog').showModal();
 }
 
@@ -2266,25 +2411,49 @@ async function submitInventoryLotEdit(event) {
   event.preventDefault();
   if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
 
-  const qty = Number($('inventory-adjust-qty').value);
-  if (!Number.isInteger(qty) || qty <= 0) {
-    return toast('Adjusted CASE, PACK, and PIECE quantities must be positive whole numbers.', 'error');
+  const lotId = $('inventory-adjust-lot-id').value;
+  const row = state.data.inventory.find((r) => r.lot_id === lotId);
+  if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
+  const isShipperLot = Boolean(row.shipper_box_id);
+  const shipperRole = String(row.shipper_lot_role || '').toUpperCase();
+  const qty = isShipperLot && shipperRole === 'HEADER' ? 1 : Number($('inventory-adjust-qty').value);
+
+  if (!Number.isInteger(qty) || (isShipperLot && shipperRole === 'CONTENT' ? qty < 0 : qty <= 0)) {
+    return toast(isShipperLot && shipperRole === 'CONTENT'
+      ? 'Shipper PACK quantity must be a whole number of 0 or greater.'
+      : 'Adjusted CASE, PACK, and PIECE quantities must be positive whole numbers.', 'error');
   }
   const reason = $('inventory-adjust-reason').value.trim();
   if (!reason) return toast('Enter the reason for this inventory adjustment.', 'error');
 
   const button = event.submitter;
   setBusy(button, true, 'Saving…');
-  const { data, error } = await supabase.rpc('supervisor_adjust_inventory_lot', {
-    p_lot_id: $('inventory-adjust-lot-id').value,
-    p_sku_id: $('inventory-adjust-sku').value,
-    p_location_code: normalizeLocation($('inventory-adjust-location').value),
-    p_container_no: $('inventory-adjust-container').value.trim(),
-    p_expiry_date: $('inventory-adjust-expiry').value,
-    p_uom: $('inventory-adjust-uom').value,
-    p_qty: qty,
-    p_reason: reason
-  });
+
+  let data, error;
+  if (isShipperLot) {
+    ({ data, error } = await supabase.rpc('supervisor_adjust_shipper_inventory_lot', {
+      p_lot_id: lotId,
+      p_sku_id: $('inventory-adjust-sku').value,
+      p_location_code: normalizeLocation($('inventory-adjust-location').value),
+      p_container_no: $('inventory-adjust-container').value.trim(),
+      p_expiry_date: $('inventory-adjust-expiry').value || row.expiry_date,
+      p_qty: qty,
+      p_putaway_note: $('inventory-adjust-putaway-note').value.trim() || null,
+      p_reason: reason
+    }));
+  } else {
+    ({ data, error } = await supabase.rpc('supervisor_adjust_inventory_lot', {
+      p_lot_id: lotId,
+      p_sku_id: $('inventory-adjust-sku').value,
+      p_location_code: normalizeLocation($('inventory-adjust-location').value),
+      p_container_no: $('inventory-adjust-container').value.trim(),
+      p_expiry_date: $('inventory-adjust-expiry').value,
+      p_uom: $('inventory-adjust-uom').value,
+      p_qty: qty,
+      p_reason: reason
+    }));
+  }
+
   setBusy(button, false);
   if (error) return toast(friendlyError(error), 'error');
 
@@ -2292,14 +2461,18 @@ async function submitInventoryLotEdit(event) {
   invalidateReports();
   await loadInventory(true);
   const result = data?.[0];
-  toast(result?.merged_into_existing ? 'Inventory lot corrected and merged with an existing matching lot. Audit record saved.' : 'Inventory lot corrected. Audit record saved.', 'success');
+  if (isShipperLot) {
+    toast(`Shipper inventory corrected${result?.result_box_no ? ` · ${result.result_box_no}` : ''}${result?.merged_into_existing ? ' · matching content lots merged' : ''}. Audit record saved.`, 'success');
+  } else {
+    toast(result?.merged_into_existing ? 'Inventory lot corrected and merged with an existing matching lot. Audit record saved.' : 'Inventory lot corrected. Audit record saved.', 'success');
+  }
 }
 
 async function deleteInventoryLot(lotId) {
   if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
-  if (row.shipper_box_id) return toast('This lot belongs to a physical Shipper Box and cannot be deleted through generic Detailed Lots.', 'error');
+  if (row.shipper_box_id) return toast('Shipper-linked lots can be corrected with Edit, but direct Delete remains protected so the physical box status cannot be broken.', 'error');
 
   const reason = window.prompt(`Reason for deleting this active inventory lot:
 

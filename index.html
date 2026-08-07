@@ -187,7 +187,7 @@
             <label>Sales order number *<input id="pick-so" required /></label>
             <label>Source rack / QR *<div class="scan-field"><input id="pick-location" /><button type="button" class="scan-btn" data-scan-target="pick-location" data-scan-kind="location">Scan</button></div></label>
             <div class="field-action"><button id="pick-lock-btn" class="secondary" type="button">Lock source location</button></div>
-            <label>CASE, PACK, or PIECE barcode *<div class="scan-field with-na"><input id="pick-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="pick-barcode" disabled>Scan</button><button type="button" class="na-btn" data-na-target="pick-barcode" disabled>N/A</button></div></label>
+            <label>CASE, PACK, or PIECE barcode *<div class="scan-field with-na"><input id="pick-barcode" name="wms-pick-barcode-entry" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-autocomplete="none" disabled /><button type="button" class="scan-btn" data-scan-target="pick-barcode" disabled>Scan</button><button type="button" class="na-btn" data-na-target="pick-barcode" disabled>N/A</button></div></label>
             <label>Matching expiry / container<select id="pick-lot" disabled><option value="">Scan a barcode first</option></select></label>
             <label>Pick quantity — whole number (<span id="pick-unit-label">matched unit</span>)<input id="pick-qty" type="number" min="1" step="1" inputmode="numeric" disabled /></label>
           </div>
@@ -206,6 +206,7 @@
             <button id="pick-add-btn" class="secondary" type="button" disabled>Add item</button>
             <div>
               <button id="pick-cancel-btn" class="danger ghost" type="button" disabled>Cancel / restart rack</button>
+              <button id="pick-cancel-order-btn" class="danger" type="button" disabled>Cancel picking</button>
               <button id="pick-complete-btn" class="secondary" type="button" disabled>Complete this rack</button>
               <button id="pick-finish-so-btn" class="primary" type="button" disabled>Finish sales order</button>
             </div>
@@ -222,7 +223,7 @@
           <div class="form-grid three">
             <label>Source rack / QR *<div class="scan-field"><input id="tr-source" /><button type="button" class="scan-btn" data-scan-target="tr-source" data-scan-kind="location">Scan</button></div></label>
             <div class="field-action"><button id="tr-lock-btn" class="secondary" type="button">Lock source location</button></div>
-            <label>CASE, PACK, or PIECE barcode *<div class="scan-field with-na"><input id="tr-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="tr-barcode" disabled>Scan</button><button type="button" class="na-btn" data-na-target="tr-barcode" disabled>N/A</button></div></label>
+            <label>CASE, PACK, or PIECE barcode *<div class="scan-field with-na"><input id="tr-barcode" name="wms-transfer-barcode-entry" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-autocomplete="none" disabled /><button type="button" class="scan-btn" data-scan-target="tr-barcode" disabled>Scan</button><button type="button" class="na-btn" data-na-target="tr-barcode" disabled>N/A</button></div></label>
             <label>Matching expiry / container<select id="tr-lot" disabled><option value="">Scan a barcode first</option></select></label>
             <label>Transfer quantity (<span id="tr-unit-label">matched unit</span>)<input id="tr-qty" type="number" min="1" step="1" inputmode="numeric" disabled /></label>
             <label>New location / QR *<div class="scan-field"><input id="tr-destination" disabled /><button type="button" class="scan-btn" data-scan-target="tr-destination" data-scan-kind="location" disabled>Scan</button></div></label>
@@ -246,7 +247,7 @@
           <h4>SKU summary</h4>
           <div id="inventory-summary-table" class="table-wrap"></div>
           <h4>Detailed lots</h4>
-          <div class="info-box" data-role-min="supervisor"><strong>Owner / Supervisor inventory adjustment:</strong> Edit or Delete is available per active lot. Every change requires a reason and is recorded in Audit History.</div>
+          <div class="info-box" data-role-min="supervisor"><strong>Owner / Supervisor inventory adjustment:</strong> Standard lots can be Edit/Delete. Shipper-linked lots can also be safely edited; the physical Shipper Box relationship is preserved. Every change requires a reason and is recorded in Audit History.</div>
           <div id="inventory-table" class="table-wrap"></div>
         </article>
       </section>
@@ -382,7 +383,9 @@
     <div class="scanner-head"><div><h3>Inventory lot adjustment</h3><p>Owner/Supervisor only. Changes are written to Audit History.</p></div><button id="inventory-adjust-close" class="icon-button" type="button">✕</button></div>
     <form id="inventory-adjust-form" class="stack">
       <input id="inventory-adjust-lot-id" type="hidden" />
+      <input id="inventory-adjust-shipper-box-id" type="hidden" />
       <div id="inventory-adjust-current" class="info-box"></div>
+      <div id="inventory-adjust-shipper-context" class="info-box hidden"></div>
       <div class="form-grid two">
         <label>SKU / Item<select id="inventory-adjust-sku" required></select></label>
         <label>Rack location<select id="inventory-adjust-location" required></select></label>
@@ -391,6 +394,8 @@
         <label>Stock unit<select id="inventory-adjust-uom" required><option value="CASE">CASE</option><option value="PACK">PACK</option><option value="PIECE">PIECE</option></select></label>
         <label>Quantity — whole number<input id="inventory-adjust-qty" type="number" min="1" step="1" inputmode="numeric" required /></label>
       </div>
+      <label id="inventory-adjust-putaway-note-wrap" class="hidden">Shipper put-away remarks<textarea id="inventory-adjust-putaway-note" rows="2" placeholder="Original/current Shipper put-away remarks"></textarea></label>
+      <p id="inventory-adjust-shipper-help" class="small-note hidden">For Shipper content, changing rack or container corrects the current physical box and all of its active contents together. PACK quantity may be corrected to 0 to remove an erroneous content line. A SEALED Shipper's complete CASE expiry is recalculated from its remaining contents.</p>
       <label>Reason for adjustment *<textarea id="inventory-adjust-reason" required placeholder="Example: physical count correction, wrong rack encoded, wrong container number"></textarea></label>
       <button class="primary" type="submit">Save inventory adjustment</button>
     </form>
