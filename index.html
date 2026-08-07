@@ -140,7 +140,7 @@
             <label>Sales order number *<input id="pick-so" required /></label>
             <label>Source rack / QR *<div class="scan-field"><input id="pick-location" /><button type="button" class="scan-btn" data-scan-target="pick-location" data-scan-kind="location">Scan</button></div></label>
             <div class="field-action"><button id="pick-lock-btn" class="secondary" type="button">Lock source location</button></div>
-            <label>CASE, PACK, or PIECE barcode *<div class="scan-field"><input id="pick-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="pick-barcode" disabled>Scan</button></div></label>
+            <label>CASE, PACK, or PIECE barcode *<div class="scan-field with-na"><input id="pick-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="pick-barcode" disabled>Scan</button><button type="button" class="na-btn" data-na-target="pick-barcode" disabled>N/A</button></div></label>
             <label>Matching expiry / container<select id="pick-lot" disabled><option value="">Scan a barcode first</option></select></label>
             <label>Pick quantity — whole number (<span id="pick-unit-label">matched unit</span>)<input id="pick-qty" type="number" min="1" step="1" inputmode="numeric" disabled /></label>
           </div>
@@ -151,7 +151,7 @@
             <label><input id="pick-so-override" type="checkbox" /> Supervisor override: reopen this sales order if it was already completed</label>
             <label>Override reason<input id="pick-so-override-reason" type="text" placeholder="Required only when reusing a completed sales order" disabled /></label>
           </div>
-          <div class="info-box"><strong>Barcode-controlled deduction:</strong> a CASE barcode deducts CASE stock, a PACK barcode deducts PACK stock, and a PIECE barcode deducts PIECE stock. The item must exist in the locked source rack.</div>
+          <div class="info-box"><strong>Barcode-controlled deduction:</strong> a CASE barcode deducts CASE stock, a PACK barcode deducts PACK stock, and a PIECE barcode deducts PIECE stock. If the required unit barcode is stored as N/A, enter N/A and select the exact eligible item from the locked source rack.</div>
           <div class="card-head compact"><div><h3 id="pick-rack-title">Source rack contents</h3><p>Displayed for reference. Regular users must still scan or type the correct registered barcode.</p></div></div>
           <div id="pick-rack-contents" class="table-wrap"><div class="empty-state">Lock a source rack to display its available items.</div></div>
           <div id="pick-fefo-note" class="warning-box hidden"></div>
@@ -175,7 +175,7 @@
           <div class="form-grid three">
             <label>Source rack / QR *<div class="scan-field"><input id="tr-source" /><button type="button" class="scan-btn" data-scan-target="tr-source" data-scan-kind="location">Scan</button></div></label>
             <div class="field-action"><button id="tr-lock-btn" class="secondary" type="button">Lock source location</button></div>
-            <label>CASE, PACK, or PIECE barcode *<div class="scan-field"><input id="tr-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="tr-barcode" disabled>Scan</button></div></label>
+            <label>CASE, PACK, or PIECE barcode *<div class="scan-field with-na"><input id="tr-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="tr-barcode" disabled>Scan</button><button type="button" class="na-btn" data-na-target="tr-barcode" disabled>N/A</button></div></label>
             <label>Matching expiry / container<select id="tr-lot" disabled><option value="">Scan a barcode first</option></select></label>
             <label>Transfer quantity (<span id="tr-unit-label">matched unit</span>)<input id="tr-qty" type="number" min="1" step="1" inputmode="numeric" disabled /></label>
             <label>New location / QR *<div class="scan-field"><input id="tr-destination" disabled /><button type="button" class="scan-btn" data-scan-target="tr-destination" data-scan-kind="location" disabled>Scan</button></div></label>
@@ -183,7 +183,9 @@
           </div>
           <div id="tr-barcode-match" class="info-box hidden"></div>
           <div id="tr-qty-note" class="info-box hidden"></div>
-          <div class="info-box"><strong>Barcode-controlled transfer:</strong> a CASE barcode transfers CASE stock, a PACK barcode transfers PACK stock, and a PIECE barcode transfers PIECE stock from the locked source rack.</div>
+          <div class="info-box"><strong>Barcode-controlled transfer:</strong> a CASE barcode transfers CASE stock, a PACK barcode transfers PACK stock, and a PIECE barcode transfers PIECE stock. If the required unit barcode is stored as N/A, enter N/A and select the exact eligible item from the locked source rack.</div>
+          <div class="card-head compact"><div><h3 id="tr-rack-title">Source rack contents</h3><p>Displayed for reference so the user can see what is currently available in the locked source rack.</p></div></div>
+          <div id="tr-rack-contents" class="table-wrap"><div class="empty-state">Lock a source rack to display its available items.</div></div>
           <div class="form-actions split"><button id="tr-add-btn" class="secondary" type="button" disabled>Add item</button><div><button id="tr-cancel-btn" class="danger ghost" type="button" disabled>Cancel / restart</button><button id="tr-complete-btn" class="primary" type="button" disabled>Complete transfer</button></div></div>
           <div class="card-head compact"><div><h3>Transfer summary</h3><p>All items queued for this transfer remain here until you click Complete transfer.</p></div></div>
           <div id="tr-cart" class="table-wrap"><div class="empty-state">No items queued for transfer yet.</div></div>

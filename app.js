@@ -82,7 +82,7 @@ const state = {
 };
 
 function freshOperationState() {
-  return { lockToken: null, locationCode: null, heartbeat: null, cart: [], lots: [], rackLots: [], sku: null };
+  return { lockToken: null, locationCode: null, heartbeat: null, cart: [], lots: [], rackLots: [], sku: null, naMode: false };
 }
 
 const screenMeta = {
@@ -172,7 +172,7 @@ function setupStaticEvents() {
   $('pick-so').addEventListener('blur', refreshPickSalesOrderStatus);
   $('pick-so-override').addEventListener('change', syncPickOverrideControls);
   $('pick-barcode').addEventListener('change', () => loadOperationLots('pick'));
-  $('pick-lot').addEventListener('change', () => { updatePickFefoNote(); updatePickQtyNote(); });
+  $('pick-lot').addEventListener('change', () => handleOperationLotChange('pick'));
   $('pick-qty').addEventListener('input', updatePickQtyNote);
   $('pick-add-btn').addEventListener('click', () => addOperationItem('pick'));
   $('pick-cancel-btn').addEventListener('click', () => cancelOperation('pick'));
@@ -182,7 +182,7 @@ function setupStaticEvents() {
 
   $('tr-lock-btn').addEventListener('click', lockTransferLocation);
   $('tr-barcode').addEventListener('change', () => loadOperationLots('transfer'));
-  $('tr-lot').addEventListener('change', updateTransferQtyNote);
+  $('tr-lot').addEventListener('change', () => handleOperationLotChange('transfer'));
   $('tr-qty').addEventListener('input', updateTransferQtyNote);
   $('tr-add-btn').addEventListener('click', () => addOperationItem('transfer'));
   $('tr-cancel-btn').addEventListener('click', () => cancelOperation('transfer'));
@@ -808,6 +808,7 @@ async function acquireOperationLock(operation, location, type, salesOrder, optio
   startHeartbeat(opState);
   configureOperationUi(operation, true);
   if (operation === 'pick') await loadPickRackContents();
+  if (operation === 'transfer') await loadTransferRackContents();
   toast(`${opState.locationCode} locked for your ${type.toLowerCase()} session.`, 'success');
   return true;
 }
@@ -844,6 +845,7 @@ function configureOperationUi(operation, locked) {
   }
   $(`${prefix}-barcode`).disabled = !locked;
   qsa(`[data-scan-target="${prefix}-barcode"]`).forEach((b) => b.disabled = !locked);
+  qsa(`[data-na-target="${prefix}-barcode"]`).forEach((b) => b.disabled = !locked);
   $(`${prefix}-lot`).disabled = !locked;
   $(`${prefix}-qty`).disabled = !locked;
   $(pick ? 'pick-add-btn' : 'tr-add-btn').disabled = !locked;
@@ -917,7 +919,113 @@ function renderPickRackContents() {
 }
 
 
-function clearPickBarcodeMatch(message = 'Scan or type a registered CASE, PACK, or PIECE barcode to confirm the item.') {
+async function loadTransferRackContents() {
+  const location = state.transfer.locationCode;
+  const container = $('tr-rack-contents');
+  if (!container) return;
+  if (!location) {
+    state.transfer.rackLots = [];
+    $('tr-rack-title').textContent = 'Source rack contents';
+    container.innerHTML = emptyState('Lock a source rack to display its available items.');
+    return;
+  }
+
+  $('tr-rack-title').textContent = `Items currently stored in ${location}`;
+  container.innerHTML = '<div class="empty-state">Loading rack contents…</div>';
+  const { data, error } = await supabase
+    .from('v_inventory_details')
+    .select('*')
+    .eq('location_code', location)
+    .order('sku_name')
+    .order('container_no')
+    .order('expiry_date')
+    .order('uom');
+  if (error) {
+    state.transfer.rackLots = [];
+    container.innerHTML = `<div class="warning-box">${escapeHtml(friendlyError(error))}</div>`;
+    return;
+  }
+  state.transfer.rackLots = data || [];
+  renderTransferRackContents();
+}
+
+function renderTransferRackContents() {
+  const container = $('tr-rack-contents');
+  if (!container) return;
+  const rows = state.transfer.rackLots || [];
+  if (!rows.length) {
+    container.innerHTML = emptyState(state.transfer.locationCode
+      ? `No available stock is recorded in ${state.transfer.locationCode}.`
+      : 'Lock a source rack to display its available items.');
+    return;
+  }
+
+  container.innerHTML = `<table><thead><tr><th>Item</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Available</th><th>Queued</th></tr></thead><tbody>${rows.map((lot) => {
+    const queued = state.transfer.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
+    const remaining = Math.max(Number(lot.qty) - queued, 0);
+    return `<tr>
+      <td class="wrap"><strong>${escapeHtml(lot.sku_name)}</strong></td>
+      <td>${escapeHtml(lot.container_no)}</td>
+      <td>${fmtDate(lot.expiry_date)} ${expiryPill(lot.expiry_status)}</td>
+      <td><span class="pill">${escapeHtml(lot.uom)}</span></td>
+      <td>${fmtQtyUom(remaining, lot.uom)}${queued ? `<br><small>Original: ${fmtQtyUom(lot.qty, lot.uom)}</small>` : ''}</td>
+      <td>${queued ? fmtQtyUom(queued, lot.uom) : '—'}</td>
+    </tr>`;
+  }).join('')}</tbody></table>`;
+}
+
+function lotUsesNaBarcode(lot) {
+  const field = { CASE: 'case_barcode', PACK: 'pack_barcode', PIECE: 'piece_barcode' }[String(lot?.uom || '').toUpperCase()];
+  return Boolean(field) && normalizeBarcode(lot?.[field]) === 'N/A';
+}
+
+function renderNaBarcodePrompt(operation) {
+  const pick = operation === 'pick';
+  const panel = $(pick ? 'pick-barcode-match' : 'tr-barcode-match');
+  if (!panel) return;
+  panel.classList.remove('hidden');
+  panel.innerHTML = `<strong>N/A barcode selection mode</strong><br>
+    Select the exact SKU, container, expiry, and CASE / PACK / PIECE unit from the eligible stock in the locked source rack.`;
+}
+
+function renderNaSelectedLot(operation) {
+  const pick = operation === 'pick';
+  const opState = state[operation];
+  if (!opState.naMode) return;
+  const select = $(pick ? 'pick-lot' : 'tr-lot');
+  const lot = select.value === '' ? null : opState.lots[Number(select.value)];
+  const unitLabel = $(pick ? 'pick-unit-label' : 'tr-unit-label');
+  if (!lot) {
+    unitLabel.textContent = 'selected unit';
+    renderNaBarcodePrompt(operation);
+    return;
+  }
+  unitLabel.textContent = lot.uom;
+  const panel = $(pick ? 'pick-barcode-match' : 'tr-barcode-match');
+  panel.classList.remove('hidden');
+  const queued = opState.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty || 0), 0);
+  const remaining = Math.max(Number(lot.qty || 0) - queued, 0);
+  panel.innerHTML = `<strong>N/A confirmed for ${escapeHtml(lot.uom)} — selected item</strong>
+    <div class="table-wrap"><table><tbody>
+      <tr><th>Brand</th><td>${escapeHtml(lot.brand)}</td><th>Description</th><td>${escapeHtml(lot.description)}</td></tr>
+      <tr><th>Variant</th><td>${escapeHtml(lot.variant)}</td><th>Size</th><td>${escapeHtml(lot.size)}</td></tr>
+      <tr><th>Container</th><td>${escapeHtml(lot.container_no)}</td><th>Expiry</th><td>${fmtDate(lot.expiry_date)}</td></tr>
+      <tr><th>Source rack</th><td>${escapeHtml(opState.locationCode || '—')}</td><th>Available ${escapeHtml(lot.uom)}</th><td>${fmtQtyUom(remaining, lot.uom)}</td></tr>
+    </tbody></table></div>`;
+}
+
+function handleOperationLotChange(operation) {
+  if (state[operation].naMode) renderNaSelectedLot(operation);
+  if (operation === 'pick') {
+    updatePickFefoNote();
+    updatePickQtyNote();
+  } else {
+    updateTransferQtyNote();
+  }
+}
+
+
+function clearPickBarcodeMatch(message = 'Scan or type a registered CASE, PACK, or PIECE barcode, or enter N/A to select from eligible rack stock.') {
   const panel = $('pick-barcode-match');
   if (!panel) return;
   panel.classList.remove('hidden');
@@ -978,7 +1086,7 @@ function updatePickQtyNote() {
 }
 
 
-function clearTransferBarcodeMatch(message = 'Scan or type a registered CASE, PACK, or PIECE barcode to confirm the item.') {
+function clearTransferBarcodeMatch(message = 'Scan or type a registered CASE, PACK, or PIECE barcode, or enter N/A to select from eligible rack stock.') {
   const panel = $('tr-barcode-match');
   if (!panel) return;
   panel.classList.remove('hidden');
@@ -1045,18 +1153,75 @@ async function loadOperationLots(operation) {
   }
 
   if (barcode.toUpperCase() === 'N/A') {
-    lotSelect.innerHTML = `<option value="">N/A cannot be used for ${pick ? 'picking' : 'stock transfer'}</option>`;
-    if (pick) {
-      $('pick-unit-label').textContent = 'matched unit';
-      clearPickBarcodeMatch('N/A is not a scannable picking barcode. Use a supervisor bypass only when the physical barcode is unreadable.');
+    opState.naMode = true;
+    opState.sku = null;
+    const { data: rackRows, error: rackError } = await supabase
+      .from('v_inventory_details')
+      .select('*')
+      .eq('location_code', opState.locationCode)
+      .order('sku_name')
+      .order('uom')
+      .order('expiry_date')
+      .order('container_no');
+    if (rackError) return toast(friendlyError(rackError), 'error');
+
+    const candidates = (rackRows || []).filter(lotUsesNaBarcode);
+    const skuIds = [...new Set(candidates.map((row) => row.sku_id).filter(Boolean))];
+    let fefoRows = [];
+    if (pick && skuIds.length) {
+      const { data, error } = await supabase
+        .from('v_inventory_details')
+        .select('lot_id,sku_id,expiry_date,location_code,container_no,qty,uom')
+        .in('sku_id', skuIds)
+        .gt('qty', 0)
+        .order('expiry_date');
+      if (error) return toast(friendlyError(error), 'error');
+      fefoRows = data || [];
     }
-    if (transfer) {
-      $('tr-unit-label').textContent = 'matched unit';
-      clearTransferBarcodeMatch('N/A is not a scannable stock-transfer barcode. Enter the registered CASE, PACK, or PIECE barcode.');
+
+    const queuedByLot = new Map();
+    opState.cart.forEach((line) => {
+      queuedByLot.set(line.lot_id, (queuedByLot.get(line.lot_id) || 0) + Number(line.qty || 0));
+    });
+
+    opState.lots = candidates.map((lot) => {
+      const effectiveQty = Math.max(Number(lot.qty || 0) - (queuedByLot.get(lot.lot_id) || 0), 0);
+      const earliest = pick
+        ? fefoRows.find((row) => row.sku_id === lot.sku_id && row.uom === lot.uom && Number(row.qty || 0) - (queuedByLot.get(row.lot_id) || 0) > 0)
+        : null;
+      return {
+        ...lot,
+        effectiveQty,
+        earliestExpiry: earliest?.expiry_date || lot.expiry_date,
+        earliestLocation: earliest?.location_code || opState.locationCode,
+        earliestContainer: earliest?.container_no || lot.container_no,
+        scannedBarcode: 'N/A',
+        scannedBarcodeType: lot.uom
+      };
+    });
+
+    lotSelect.innerHTML = opState.lots.length
+      ? `<option value="">Select N/A item / expiry / container / unit</option>${opState.lots.map((lot, i) => `<option value="${i}" ${Number(lot.effectiveQty) <= 0 ? 'disabled' : ''}>${escapeHtml(lot.sku_name)} · ${escapeHtml(lot.uom)} · ${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)} · Available ${fmtQtyUom(lot.effectiveQty, lot.uom)}</option>`).join('')}`
+      : '<option value="">No stock in this rack uses N/A for its active stock unit</option>';
+
+    $(pick ? 'pick-unit-label' : 'tr-unit-label').textContent = 'selected unit';
+    renderNaBarcodePrompt(operation);
+    if (opState.lots.length === 1 && Number(opState.lots[0].effectiveQty) > 0) {
+      lotSelect.value = '0';
+      renderNaSelectedLot(operation);
     }
-    return toast('Scan or type an actual CASE, PACK, or PIECE barcode. N/A cannot authorize this stock movement.', 'error');
+    if (!opState.lots.length) {
+      const note = $(pick ? 'pick-qty-note' : 'tr-qty-note');
+      note.classList.remove('hidden');
+      note.textContent = `No positive stock in ${opState.locationCode} has N/A recorded for the barcode corresponding to its CASE, PACK, or PIECE stock unit.`;
+      return toast(`No selectable N/A-barcode stock is available in ${opState.locationCode}.`, 'error');
+    }
+    if (pick) { updatePickFefoNote(); updatePickQtyNote(); }
+    if (transfer) updateTransferQtyNote();
+    return;
   }
 
+  opState.naMode = false;
   const { data: skuData, error: skuError } = await supabase.rpc('find_sku_by_barcode', { p_barcode: barcode });
   if (skuError) return toast(friendlyError(skuError), 'error');
   const sku = skuData?.[0];
@@ -1233,9 +1398,11 @@ async function addSupervisorBarcodeBypass(lotId) {
 }
 
 function updatePickFefoNote() {
-  const index = Number($('pick-lot').value);
-  const lot = state.pick.lots[index];
+  const value = $('pick-lot').value;
   const note = $('pick-fefo-note');
+  if (value === '') return note.classList.add('hidden');
+  const index = Number(value);
+  const lot = state.pick.lots[index];
   if (!lot || lot.expiry_date <= lot.earliestExpiry) return note.classList.add('hidden');
   const where = lot.earliestLocation
     ? ` at <strong>${escapeHtml(lot.earliestLocation)}</strong>${lot.earliestContainer ? ` / container <strong>${escapeHtml(lot.earliestContainer)}</strong>` : ''}`
@@ -1271,10 +1438,10 @@ function addOperationItem(operation) {
     qty,
     barcode: lot.scannedBarcode,
     sku_name: lot.sku_name,
-    brand: opState.sku?.brand || '',
-    description: opState.sku?.description || '',
-    variant: opState.sku?.variant || '',
-    size: opState.sku?.size || '',
+    brand: lot.brand || opState.sku?.brand || '',
+    description: lot.description || opState.sku?.description || '',
+    variant: lot.variant || opState.sku?.variant || '',
+    size: lot.size || opState.sku?.size || '',
     container_no: lot.container_no,
     expiry_date: lot.expiry_date,
     earliest_expiry: lot.earliestExpiry,
@@ -1289,6 +1456,8 @@ function addOperationItem(operation) {
   if (pick) {
     renderPickRackContents();
     renderPickSalesOrderSummary();
+  } else {
+    renderTransferRackContents();
   }
   $(pick ? 'pick-qty' : 'tr-qty').value = '';
   if (pick && $('pick-barcode').value.trim()) loadOperationLots('pick');
@@ -1314,8 +1483,12 @@ function renderOperationCart(operation) {
     <td class="wrap">${pick
       ? (r.supervisor_bypass
         ? `<span class="pill override">Supervisor bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>`
-        : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span>`)
-      : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span><br><small>${escapeHtml(r.barcode || '')}</small>`}</td>
+        : (normalizeBarcode(r.barcode) === 'N/A'
+          ? `<span class="pill near">N/A ${escapeHtml((r.uom || '').toUpperCase())} selected</span>`
+          : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span>`))
+      : (normalizeBarcode(r.barcode) === 'N/A'
+        ? `<span class="pill near">N/A ${escapeHtml((r.uom || '').toUpperCase())} selected</span>`
+        : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span><br><small>${escapeHtml(r.barcode || '')}</small>`)}</td>
     <td><button class="link-btn" data-operation="${operation}" data-remove-cart="${i}">Remove</button></td></tr>`).join('')}</tbody></table>`;
 }
 
@@ -1328,7 +1501,9 @@ function removeCartItem(operation, index) {
     if ($('pick-barcode').value.trim() && state.pick.locationCode) loadOperationLots('pick');
     else updatePickQtyNote();
   } else {
-    updateTransferQtyNote();
+    renderTransferRackContents();
+    if ($('tr-barcode').value.trim() && state.transfer.locationCode) loadOperationLots('transfer');
+    else updateTransferQtyNote();
   }
 }
 
@@ -1374,6 +1549,8 @@ function resetOperation(operation) {
     $('tr-unit-label').textContent = 'matched unit';
     $('tr-destination').value = '';
     $('tr-note').value = '';
+    $('tr-rack-title').textContent = 'Source rack contents';
+    $('tr-rack-contents').innerHTML = emptyState('Lock a source rack to display its available items.');
     clearTransferBarcodeMatch();
     $('tr-qty-note').textContent = '';
     $('tr-qty-note').classList.add('hidden');
