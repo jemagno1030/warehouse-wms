@@ -1,6 +1,6 @@
 {
-  "name": "Warehouse Control System v1",
-  "short_name": "Warehouse WMS v1",
+  "name": "IFTC Warehouse Locator System (JPM)",
+  "short_name": "IFTC-WLS",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#f3f6f8",
