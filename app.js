@@ -622,6 +622,7 @@ async function addPutawayItem(event) {
     if (!actualCodes.length) return toast('At least one actual barcode is required; use N/A only for unavailable barcode types.', 'error');
     if (new Set(actualCodes).size !== actualCodes.length) return toast('The same actual barcode cannot be used as CASE, PACK, or PIECE barcode.', 'error');
     if ([item.case_qty, item.pack_qty, item.piece_qty].some((qty) => qty < 0)) return toast('Quantities cannot be negative.', 'error');
+    if ([item.case_qty, item.pack_qty, item.piece_qty].some((qty) => !Number.isInteger(qty))) return toast('CASE, PACK, and PIECE quantities must be whole numbers only (0, 1, 2, 3, ...).', 'error');
     if (item.case_qty <= 0 && item.pack_qty <= 0 && item.piece_qty <= 0) return toast('Enter at least one CASE, PACK, or PIECE quantity.', 'error');
 
     const duplicateMatch = await checkPutawayDuplicateDetails();
@@ -695,6 +696,9 @@ function resetPutawaySession() {
 
 async function completePutaway() {
   if (!state.putaway.cart.length) return toast('Add at least one SKU line.', 'error');
+  if (state.putaway.cart.some((item) => [item.case_qty, item.pack_qty, item.piece_qty].some((qty) => !Number.isInteger(Number(qty))))) {
+    return toast('Put-away cannot continue: CASE, PACK, and PIECE quantities must be whole numbers.', 'error');
+  }
   const button = $('pa-complete-btn');
   setBusy(button, true, 'Completing…');
   const { data, error } = await supabase.rpc('complete_putaway', {
@@ -991,8 +995,8 @@ function updateTransferQtyNote() {
     return;
   }
   const qty = Number(raw);
-  if (!Number.isFinite(qty) || qty <= 0) {
-    note.textContent = `Enter a valid ${lot.uom} quantity greater than zero.`;
+  if (!Number.isFinite(qty) || qty <= 0 || !Number.isInteger(qty)) {
+    note.textContent = `Whole numbers only for ${lot.uom}. Example: 1, 2, 3.`;
     return;
   }
   note.textContent = qty <= remaining
@@ -1186,7 +1190,7 @@ function addOperationItem(operation) {
     if (qty === null) return toast(`Enter a whole-number ${lot.uom} quantity greater than zero.`, 'error');
   } else {
     qty = Number($('tr-qty').value);
-    if (!Number.isFinite(qty) || qty <= 0) return toast('Enter a valid transfer quantity.', 'error');
+    if (!Number.isFinite(qty) || qty <= 0 || !Number.isInteger(qty)) return toast(`Enter a whole-number ${lot.uom} transfer quantity greater than zero.`, 'error');
   }
 
   const already = opState.cart.filter((x) => x.lot_id === lot.lot_id).reduce((a, x) => a + Number(x.qty), 0);
@@ -1505,6 +1509,7 @@ async function completePicking() {
 
 async function completeTransfer() {
   if (!state.transfer.cart.length) return toast('Add at least one item.', 'error');
+  if (state.transfer.cart.some((item) => !Number.isInteger(Number(item.qty)))) return toast('Transfer cannot continue: CASE, PACK, and PIECE quantities must be whole numbers.', 'error');
   const destination = normalizeLocation($('tr-destination').value);
   if (!destination) return toast('Scan the destination location.', 'error');
   const button = $('tr-complete-btn');

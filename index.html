@@ -115,9 +115,9 @@
             <label>Size *<input id="pa-size" required /></label>
             <label>Container number *<input id="pa-container" required /></label>
             <label>Expiry date *<input id="pa-expiry" type="date" required /></label>
-            <label>Case quantity<input id="pa-case-qty" type="number" min="0" step="0.001" value="0" /></label>
-            <label>Pack quantity<input id="pa-pack-qty" type="number" min="0" step="0.001" value="0" /></label>
-            <label>Piece quantity<input id="pa-piece-qty" type="number" min="0" step="0.001" value="0" /></label>
+            <label>Case quantity<input id="pa-case-qty" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
+            <label>Pack quantity<input id="pa-pack-qty" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
+            <label>Piece quantity<input id="pa-piece-qty" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
             <label>Remarks<textarea id="pa-note" rows="2"></textarea></label>
           </div>
           <div id="pa-match-note" class="info-box hidden"></div>
@@ -176,7 +176,7 @@
             <div class="field-action"><button id="tr-lock-btn" class="secondary" type="button">Lock source location</button></div>
             <label>CASE, PACK, or PIECE barcode *<div class="scan-field"><input id="tr-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="tr-barcode" disabled>Scan</button></div></label>
             <label>Matching expiry / container<select id="tr-lot" disabled><option value="">Scan a barcode first</option></select></label>
-            <label>Transfer quantity (<span id="tr-unit-label">matched unit</span>)<input id="tr-qty" type="number" min="0.001" step="0.001" disabled /></label>
+            <label>Transfer quantity (<span id="tr-unit-label">matched unit</span>)<input id="tr-qty" type="number" min="1" step="1" inputmode="numeric" disabled /></label>
             <label>New location / QR *<div class="scan-field"><input id="tr-destination" disabled /><button type="button" class="scan-btn" data-scan-target="tr-destination" data-scan-kind="location" disabled>Scan</button></div></label>
             <label>Remarks<textarea id="tr-note" rows="2"></textarea></label>
           </div>
