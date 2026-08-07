@@ -125,7 +125,11 @@ function setBusy(button, busy, text = 'Working…') {
 }
 
 function isSupervisor() {
-  return ['supervisor', 'admin'].includes(state.profile?.role);
+  return ['supervisor', 'admin', 'owner'].includes(state.profile?.role);
+}
+
+function isOwner() {
+  return state.profile?.role === 'owner';
 }
 
 function setupStaticEvents() {
@@ -311,6 +315,8 @@ async function handleSession(session) {
   $('current-username').textContent = profile.username;
   $('current-role').textContent = profile.role;
   qsa('[data-role-min="supervisor"]').forEach((node) => node.classList.toggle('hidden', !isSupervisor()));
+  const controlNav = qs('#main-nav [data-screen="control"]');
+  if (controlNav) controlNav.classList.toggle('hidden', !isOwner());
   $('auth-view').classList.add('hidden');
   $('app-view').classList.remove('hidden');
   await loadSystemMode();
@@ -377,13 +383,15 @@ function saveCurrentScreen(name) {
 
 function canOpenScreen(name) {
   if (!name || !screenMeta[name] || !$(`screen-${name}`)) return false;
-  if (['locations', 'control'].includes(name) && !isSupervisor()) return false;
+  if (name === 'locations' && !isSupervisor()) return false;
+  if (name === 'control' && !isOwner()) return false;
   return true;
 }
 
 function showScreen(name) {
   if (!canOpenScreen(name)) {
-    if (['locations', 'control'].includes(name) && !isSupervisor()) toast('Supervisor access is required.', 'error');
+    if (name === 'locations' && !isSupervisor()) toast('Supervisor access is required.', 'error');
+    if (name === 'control' && !isOwner()) toast('Owner access is required.', 'error');
     name = 'dashboard';
   }
   state.currentScreen = name;
