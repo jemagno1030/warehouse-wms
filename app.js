@@ -73,7 +73,7 @@ const state = {
   scanner: { reader: null, controls: null, target: null, kind: null },
   putaway: { locationCode: null, cart: [], matchedSkuId: null, duplicateDetailsSkuId: null, lookupSequence: 0 },
   pick: freshOperationState(),
-  pickOrder: { salesOrder: null, status: null, pickCount: 0, openedBy: null },
+  pickOrder: { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false },
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
   transfer: freshOperationState(),
@@ -804,7 +804,9 @@ function configureOperationUi(operation, locked) {
   lockBtn.disabled = locked || state.mode !== 'ACTIVE';
   locationInput.disabled = locked;
   if (pick) {
-    $('pick-so').disabled = locked;
+    // Sales Order locking is controlled by the full order session, not merely
+    // by the current rack lock. Once this user opens an order, it remains locked
+    // while moving between racks until Finish sales order is completed.
     syncPickOverrideControls();
   }
   $(`${prefix}-barcode`).disabled = !locked;
@@ -1252,11 +1254,23 @@ function renderPickSalesOrderSummary() {
     }).join('')}</tbody></table>`;
 }
 
+function isPickSalesOrderInputLocked() {
+  return Boolean(state.pick.lockToken)
+    || (state.pickOrder.status === 'OPEN' && Boolean(state.pickOrder.isCurrentOwner));
+}
+
 function updatePickSalesOrderControls() {
   const hasSo = Boolean($('pick-so').value.trim());
   const orderOpen = state.pickOrder.status === 'OPEN';
   const hasSavedPick = Number(state.pickOrder.pickCount || 0) > 0;
   const unlocked = !state.pick.lockToken;
+  const soLocked = isPickSalesOrderInputLocked();
+
+  $('pick-so').disabled = soLocked;
+  $('pick-so').title = soLocked
+    ? 'Sales Order is locked while this picking order is in progress. Finish the Sales Order to release it.'
+    : '';
+
   $('pick-finish-so-btn').disabled = !(state.mode === 'ACTIVE' && hasSo && orderOpen && hasSavedPick && unlocked);
 }
 
@@ -1285,7 +1299,7 @@ async function refreshPickSalesOrderStatus() {
   const requestNo = ++state.pickOrderLookupSequence;
 
   if (!so) {
-    state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null };
+    state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
     box.innerHTML = '<strong>Sales order status:</strong> enter a sales order number. A completed sales order cannot be reused by a regular user.';
     syncPickOverrideControls();
     updatePickSalesOrderControls();
@@ -1299,7 +1313,7 @@ async function refreshPickSalesOrderStatus() {
   if (requestNo !== state.pickOrderLookupSequence || $('pick-so').value.trim() !== so) return false;
 
   if (error) {
-    state.pickOrder = { salesOrder: so, status: null, pickCount: 0, openedBy: null };
+    state.pickOrder = { salesOrder: so, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
     box.innerHTML = `<strong>Sales order status:</strong> ${escapeHtml(friendlyError(error))}`;
     syncPickOverrideControls();
     updatePickSalesOrderControls();
@@ -1310,19 +1324,23 @@ async function refreshPickSalesOrderStatus() {
 
   const row = data?.[0];
   if (!row?.order_exists) {
-    state.pickOrder = { salesOrder: so, status: 'NEW', pickCount: 0, openedBy: null };
+    state.pickOrder = { salesOrder: so, status: 'NEW', pickCount: 0, openedBy: null, isCurrentOwner: false };
     box.innerHTML = `<strong>Sales order status:</strong> New sales order <strong>${escapeHtml(so)}</strong>. It will open when the first source rack is locked.`;
   } else {
     state.pickOrder = {
       salesOrder: row.order_number,
       status: row.order_status,
       pickCount: Number(row.pick_transaction_count || 0),
-      openedBy: row.opened_by_username || null
+      openedBy: row.opened_by_username || null,
+      isCurrentOwner: Boolean(row.is_current_owner)
     };
     if (row.order_status === 'COMPLETED') {
       box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was completed ${row.completed_at ? `on ${escapeHtml(fmtDateTime(row.completed_at))}` : ''}. It cannot be reused unless a supervisor checks the override and records a reason.`;
     } else {
-      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> is OPEN by ${escapeHtml(row.opened_by_username || 'a user')} · ${Number(row.pick_transaction_count || 0).toLocaleString()} completed rack pick(s). Continue to another rack or finish the sales order.`;
+      const lockMessage = row.is_current_owner
+        ? ' · Sales Order number is locked until you finish this Sales Order.'
+        : '';
+      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> is OPEN by ${escapeHtml(row.opened_by_username || 'a user')} · ${Number(row.pick_transaction_count || 0).toLocaleString()} completed rack pick(s). Continue to another rack or finish the sales order.${lockMessage}`;
     }
   }
 
@@ -1351,7 +1369,7 @@ async function finishPickSalesOrder() {
   $('pick-so-override').checked = false;
   $('pick-so-override-reason').value = '';
   $('pick-so-override-reason').disabled = true;
-  state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null };
+  state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
   state.pickOrderSummary = [];
   await refreshPickSalesOrderStatus();
   invalidateReports();
