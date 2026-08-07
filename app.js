@@ -238,7 +238,11 @@ function setupStaticEvents() {
 
 async function init() {
   setupStaticEvents();
-  $('app-name').textContent = cfg.APP_NAME || 'Warehouse Control System v1';
+  const configuredAppName = cfg.APP_NAME || 'Warehouse Control System v1';
+  $('app-name').textContent = configuredAppName;
+  document.title = configuredAppName;
+  const authTitle = document.querySelector('#auth-view .brand-lockup h1');
+  if (authTitle) authTitle.textContent = configuredAppName;
   if (cfg.ALLOW_SIGNUP === false) {
     qsa('[data-auth-tab="signup"]').forEach((node) => node.classList.add('hidden'));
   }
@@ -315,7 +319,7 @@ async function handleSession(session) {
   $('current-username').textContent = profile.username;
   $('current-role').textContent = profile.role;
   qsa('[data-role-min="supervisor"]').forEach((node) => node.classList.toggle('hidden', !isSupervisor()));
-  const controlNav = qs('#main-nav [data-screen="control"]');
+  const controlNav = document.querySelector('#main-nav [data-screen="control"]');
   if (controlNav) controlNav.classList.toggle('hidden', !isOwner());
   $('auth-view').classList.add('hidden');
   $('app-view').classList.remove('hidden');
