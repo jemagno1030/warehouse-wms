@@ -77,7 +77,7 @@ const state = {
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
   transfer: freshOperationState(),
-  data: { inventory: [], containers: [], expiry: [], history: [], audit: [], locations: [], rackMap: [] },
+  data: { inventory: [], skuMaster: [], containers: [], expiry: [], history: [], audit: [], locations: [], rackMap: [] },
   selectedQrLocations: new Set()
 };
 
@@ -91,6 +91,7 @@ const screenMeta = {
   picking: ['Picking', 'FEFO-guided picking by source location'],
   transfer: ['Stock transfer', 'Move stock lots between rack locations'],
   inventory: ['Inventory', 'Stock by SKU, container, expiry, and location'],
+  skumaster: ['SKU Masterlist', 'Permanent SKU details and registered CASE / PACK / PIECE barcodes'],
   containers: ['Containers', 'Container consumption and remaining contents'],
   rackmap: ['Rack map', 'Visual location occupancy and active locks'],
   expiry: ['Expiry alerts', 'Expired and near-expiry stock'],
@@ -188,6 +189,7 @@ function setupStaticEvents() {
   $('tr-complete-btn').addEventListener('click', completeTransfer);
 
   $('inventory-search').addEventListener('input', renderInventory);
+  $('sku-master-search').addEventListener('input', renderSkuMaster);
   $('container-search').addEventListener('input', renderContainers);
   $('history-search').addEventListener('input', renderHistory);
   $('history-type').addEventListener('change', renderHistory);
@@ -215,6 +217,8 @@ function setupStaticEvents() {
   $('edit-transaction-form').addEventListener('submit', submitSupervisorEdit);
   $('inventory-adjust-close').addEventListener('click', () => $('inventory-adjust-dialog').close());
   $('inventory-adjust-form').addEventListener('submit', submitInventoryLotEdit);
+  $('sku-master-edit-close').addEventListener('click', () => $('sku-master-edit-dialog').close());
+  $('sku-master-edit-form').addEventListener('submit', submitSkuMasterEdit);
 
   document.addEventListener('click', (event) => {
     const remove = event.target.closest('[data-remove-cart]');
@@ -229,6 +233,8 @@ function setupStaticEvents() {
     if (inventoryEdit) openInventoryLotEdit(inventoryEdit.dataset.inventoryEdit);
     const inventoryDelete = event.target.closest('[data-inventory-delete]');
     if (inventoryDelete) deleteInventoryLot(inventoryDelete.dataset.inventoryDelete);
+    const skuMasterEdit = event.target.closest('[data-sku-master-edit]');
+    if (skuMasterEdit) openSkuMasterEdit(skuMasterEdit.dataset.skuMasterEdit);
     const bypassPick = event.target.closest('[data-pick-bypass-lot]');
     if (bypassPick) addSupervisorBarcodeBypass(bypassPick.dataset.pickBypassLot);
     const qr = event.target.closest('[data-qr-location]');
@@ -394,13 +400,14 @@ function saveCurrentScreen(name) {
 function canOpenScreen(name) {
   if (!name || !screenMeta[name] || !$(`screen-${name}`)) return false;
   if (name === 'locations' && !isSupervisor()) return false;
+  if (name === 'skumaster' && !isSupervisor()) return false;
   if (name === 'control' && !isOwner()) return false;
   return true;
 }
 
 function showScreen(name) {
   if (!canOpenScreen(name)) {
-    if (name === 'locations' && !isSupervisor()) toast('Supervisor access is required.', 'error');
+    if ((name === 'locations' || name === 'skumaster') && !isSupervisor()) toast('Supervisor access is required.', 'error');
     if (name === 'control' && !isOwner()) toast('Owner access is required.', 'error');
     name = 'dashboard';
   }
@@ -420,6 +427,7 @@ async function loadScreen(name, force = false) {
     if (name === 'dashboard') await loadDashboard();
     if (name === 'picking') await refreshPickSalesOrderStatus();
     if (name === 'inventory') await loadInventory(force);
+    if (name === 'skumaster') await loadSkuMaster(force);
     if (name === 'containers') await loadContainers(force);
     if (name === 'rackmap') await loadRackMap(force);
     if (name === 'expiry') await loadExpiry(force);
@@ -481,6 +489,7 @@ function uniqueBy(rows, keyFn) {
 
 function invalidateReports() {
   state.data.inventory = [];
+  state.data.skuMaster = [];
   state.data.containers = [];
   state.data.expiry = [];
   state.data.history = [];
@@ -920,7 +929,7 @@ function clearPickBarcodeMatch(message = 'Scan or type a registered CASE, PACK, 
 function renderPickBarcodeMatch(sku, expectedUom, lots) {
   const panel = $('pick-barcode-match');
   if (!panel || !sku) return;
-  const available = (lots || []).reduce((sum, lot) => sum + Number(lot.qty || 0), 0);
+  const available = (lots || []).reduce((sum, lot) => sum + Number(lot.effectiveQty ?? lot.qty ?? 0), 0);
   panel.classList.remove('hidden');
   panel.innerHTML = `<strong>Barcode confirmed as ${escapeHtml(expectedUom)}</strong>
     <div class="table-wrap"><table><tbody>
@@ -1085,23 +1094,55 @@ async function loadOperationLots(operation) {
     .eq('sku_id', sku.id)
     .eq('uom', expectedUom)
     .order('expiry_date');
-  let earliestQuery = supabase.from('v_inventory_details')
-    .select('expiry_date,location_code,container_no,uom')
-    .eq('sku_id', sku.id)
-    .eq('uom', expectedUom)
-    .order('expiry_date')
-    .limit(1);
+  const fefoQuery = pick
+    ? supabase.from('v_inventory_details')
+        .select('lot_id,expiry_date,location_code,container_no,qty,uom')
+        .eq('sku_id', sku.id)
+        .eq('uom', expectedUom)
+        .gt('qty', 0)
+        .order('expiry_date')
+    : null;
 
-  const [{ data: lots, error: lotsError }, { data: earliestRows, error: earliestError }] = await Promise.all([lotsQuery, earliestQuery]);
-  if (lotsError || earliestError) return toast(friendlyError(lotsError || earliestError), 'error');
+  const [{ data: lots, error: lotsError }, fefoResult] = await Promise.all([
+    lotsQuery,
+    fefoQuery ? fefoQuery : Promise.resolve({ data: [], error: null })
+  ]);
+  if (lotsError || fefoResult.error) return toast(friendlyError(lotsError || fefoResult.error), 'error');
+
+  // FEFO uses CURRENT positive stock only. Quantities already queued in this
+  // picking session are treated as consumed, so a fully picked earlier lot
+  // cannot keep generating a stale FEFO warning.
+  const queuedByLot = new Map();
+  if (pick) {
+    opState.cart.forEach((line) => {
+      queuedByLot.set(line.lot_id, (queuedByLot.get(line.lot_id) || 0) + Number(line.qty || 0));
+    });
+  }
+  const effectiveFefoRows = (fefoResult.data || []).filter(
+    (row) => Number(row.qty || 0) - (queuedByLot.get(row.lot_id) || 0) > 0
+  );
+  const earliestFefoRow = effectiveFefoRows[0] || null;
 
   opState.sku = sku;
   opState.lots = (lots || []).map((lot) => ({
     ...lot,
-    earliestExpiry: earliestRows?.[0]?.expiry_date || lot.expiry_date,
+    effectiveQty: Math.max(Number(lot.qty || 0) - (queuedByLot.get(lot.lot_id) || 0), 0),
+    earliestExpiry: earliestFefoRow?.expiry_date || lot.expiry_date,
+    earliestLocation: earliestFefoRow?.location_code || opState.locationCode,
+    earliestContainer: earliestFefoRow?.container_no || lot.container_no,
     scannedBarcode: barcode,
     scannedBarcodeType: expectedUom
   }));
+  if (pick) {
+    const lotIds = new Set(opState.lots.map((lot) => lot.lot_id));
+    opState.cart.forEach((line) => {
+      if (lotIds.has(line.lot_id)) {
+        line.earliest_expiry = earliestFefoRow?.expiry_date || line.expiry_date;
+        line.earliest_location = earliestFefoRow?.location_code || opState.locationCode;
+        line.earliest_container = earliestFefoRow?.container_no || line.container_no;
+      }
+    });
+  }
 
   if (pick) {
     $('pick-unit-label').textContent = expectedUom;
@@ -1113,7 +1154,7 @@ async function loadOperationLots(operation) {
   }
 
   lotSelect.innerHTML = opState.lots.length
-    ? `<option value="">Select expiry / container</option>${opState.lots.map((lot, i) => `<option value="${i}">${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)} · Available ${fmtQtyUom(lot.qty, lot.uom)}</option>`).join('')}`
+    ? `<option value="">Select expiry / container</option>${opState.lots.map((lot, i) => `<option value="${i}" ${pick && Number(lot.effectiveQty) <= 0 ? 'disabled' : ''}>${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)} · Available ${fmtQtyUom(pick ? lot.effectiveQty : lot.qty, lot.uom)}</option>`).join('')}`
     : `<option value="">No ${expectedUom} stock for this SKU in the locked location</option>`;
 
   if (opState.lots.length === 1) lotSelect.value = '0';
@@ -1155,15 +1196,21 @@ async function addSupervisorBarcodeBypass(lotId) {
   const already = state.pick.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
   if (qty + already > Number(lot.qty)) return toast(`Cannot exceed available stock of ${fmtQtyUom(lot.qty, lot.uom)}.`, 'error');
 
-  const { data: earliestRows, error: earliestError } = await supabase
+  const { data: fefoRows, error: earliestError } = await supabase
     .from('v_inventory_details')
-    .select('expiry_date')
+    .select('lot_id,expiry_date,location_code,container_no,qty')
     .eq('sku_id', lot.sku_id)
     .eq('uom', lot.uom)
-    .order('expiry_date')
-    .limit(1);
+    .gt('qty', 0)
+    .order('expiry_date');
   if (earliestError) return toast(friendlyError(earliestError), 'error');
-  const earliestSameUnit = earliestRows?.[0]?.expiry_date || lot.expiry_date;
+  const queuedByLot = new Map();
+  state.pick.cart.forEach((line) => {
+    queuedByLot.set(line.lot_id, (queuedByLot.get(line.lot_id) || 0) + Number(line.qty || 0));
+  });
+  const effectiveRows = (fefoRows || []).filter((row) => Number(row.qty || 0) - (queuedByLot.get(row.lot_id) || 0) > 0);
+  const earliestRow = effectiveRows?.[0] || null;
+  const earliestSameUnit = earliestRow?.expiry_date || lot.expiry_date;
 
   state.pick.cart.push({
     lot_id: lot.lot_id,
@@ -1175,6 +1222,8 @@ async function addSupervisorBarcodeBypass(lotId) {
     container_no: lot.container_no,
     expiry_date: lot.expiry_date,
     earliest_expiry: earliestSameUnit,
+    earliest_location: earliestRow?.location_code || state.pick.locationCode,
+    earliest_container: earliestRow?.container_no || lot.container_no,
     available: Number(lot.qty),
     uom: lot.uom
   });
@@ -1188,7 +1237,10 @@ function updatePickFefoNote() {
   const lot = state.pick.lots[index];
   const note = $('pick-fefo-note');
   if (!lot || lot.expiry_date <= lot.earliestExpiry) return note.classList.add('hidden');
-  note.innerHTML = `FEFO warning: selected expiry <strong>${fmtDate(lot.expiry_date)}</strong>, but the earliest available stock expires <strong>${fmtDate(lot.earliestExpiry)}</strong>. Completing this line will be recorded as an override.`;
+  const where = lot.earliestLocation
+    ? ` at <strong>${escapeHtml(lot.earliestLocation)}</strong>${lot.earliestContainer ? ` / container <strong>${escapeHtml(lot.earliestContainer)}</strong>` : ''}`
+    : '';
+  note.innerHTML = `FEFO warning: selected expiry <strong>${fmtDate(lot.expiry_date)}</strong>, but the earliest CURRENT positive stock expires <strong>${fmtDate(lot.earliestExpiry)}</strong>${where}. Completing this line will be recorded as an override.`;
   note.classList.remove('hidden');
 }
 
@@ -1226,6 +1278,8 @@ function addOperationItem(operation) {
     container_no: lot.container_no,
     expiry_date: lot.expiry_date,
     earliest_expiry: lot.earliestExpiry,
+    earliest_location: lot.earliestLocation || null,
+    earliest_container: lot.earliestContainer || null,
     available: Number(lot.qty),
     uom: lot.uom,
     supervisor_bypass: false,
@@ -1237,7 +1291,8 @@ function addOperationItem(operation) {
     renderPickSalesOrderSummary();
   }
   $(pick ? 'pick-qty' : 'tr-qty').value = '';
-  if (pick) updatePickQtyNote();
+  if (pick && $('pick-barcode').value.trim()) loadOperationLots('pick');
+  else if (pick) updatePickQtyNote();
   if (!pick) updateTransferQtyNote();
   toast(`${fmtQtyUom(qty, lot.uom)} added to the ${pick ? 'picking' : 'transfer'} session.`, 'success');
 }
@@ -1270,7 +1325,8 @@ function removeCartItem(operation, index) {
   if (operation === 'pick') {
     renderPickRackContents();
     renderPickSalesOrderSummary();
-    updatePickQtyNote();
+    if ($('pick-barcode').value.trim() && state.pick.locationCode) loadOperationLots('pick');
+    else updatePickQtyNote();
   } else {
     updateTransferQtyNote();
   }
@@ -1668,6 +1724,112 @@ The balance will become zero. Historical transaction records will remain.`)) ret
   toast('Inventory lot removed from active inventory. Audit record saved.', 'success');
 }
 
+
+async function loadSkuMaster(force = false) {
+  if (!isSupervisor()) return;
+  if (!force && state.data.skuMaster.length) return renderSkuMaster();
+  const { data, error } = await supabase
+    .from('v_sku_master')
+    .select('*')
+    .order('brand')
+    .order('description')
+    .order('variant')
+    .order('size')
+    .limit(10000);
+  if (error) throw error;
+  state.data.skuMaster = data || [];
+  renderSkuMaster();
+}
+
+function renderSkuMaster() {
+  if (!isSupervisor()) return;
+  const term = $('sku-master-search').value.trim().toLowerCase();
+  const rows = state.data.skuMaster.filter((r) => [
+    r.brand, r.description, r.variant, r.size,
+    r.case_barcode, r.pack_barcode, r.piece_barcode,
+    r.created_by_username
+  ].join(' ').toLowerCase().includes(term));
+
+  const actionHeader = isOwner() ? '<th>Owner action</th>' : '';
+  $('sku-master-table').innerHTML = rows.length ? `<table><thead><tr>
+    <th>Brand</th><th>Description</th><th>Variant</th><th>Size</th>
+    <th>CASE barcode</th><th>PACK barcode</th><th>PIECE barcode</th>
+    <th>Added by</th><th>Date added</th>${actionHeader}
+  </tr></thead><tbody>${rows.map((r) => `<tr>
+    <td>${escapeHtml(r.brand)}</td>
+    <td class="wrap">${escapeHtml(r.description)}</td>
+    <td>${escapeHtml(r.variant)}</td>
+    <td>${escapeHtml(r.size)}</td>
+    <td>${escapeHtml(r.case_barcode)}</td>
+    <td>${escapeHtml(r.pack_barcode)}</td>
+    <td>${escapeHtml(r.piece_barcode)}</td>
+    <td>${escapeHtml(r.created_by_username || '—')}</td>
+    <td>${fmtDateTime(r.created_at)}</td>
+    ${isOwner() ? `<td><button class="link-btn" type="button" data-sku-master-edit="${escapeHtml(r.id)}">Edit</button></td>` : ''}
+  </tr>`).join('')}</tbody></table>` : emptyState('No matching SKU master records.');
+  $('sku-master-count').textContent = `${rows.length.toLocaleString()} of ${state.data.skuMaster.length.toLocaleString()} SKU record(s) shown`;
+}
+
+function openSkuMasterEdit(skuId) {
+  if (!isOwner()) return toast('Owner access is required to edit the SKU Masterlist.', 'error');
+  const sku = state.data.skuMaster.find((row) => row.id === skuId);
+  if (!sku) return toast('SKU master record was not found. Refresh the SKU Masterlist and try again.', 'error');
+
+  $('sku-master-edit-id').value = sku.id;
+  $('sku-master-edit-brand').value = sku.brand || '';
+  $('sku-master-edit-description').value = sku.description || '';
+  $('sku-master-edit-variant').value = sku.variant || '';
+  $('sku-master-edit-size').value = sku.size || '';
+  $('sku-master-edit-case').value = sku.case_barcode || 'N/A';
+  $('sku-master-edit-pack').value = sku.pack_barcode || 'N/A';
+  $('sku-master-edit-piece').value = sku.piece_barcode || 'N/A';
+  $('sku-master-edit-reason').value = '';
+  $('sku-master-edit-current').innerHTML = `<strong>Editing SKU:</strong> ${escapeHtml([sku.brand, sku.description, sku.variant, sku.size].filter(Boolean).join(' '))}`;
+  $('sku-master-edit-dialog').showModal();
+}
+
+async function submitSkuMasterEdit(event) {
+  event.preventDefault();
+  if (!isOwner()) return toast('Owner access is required to edit the SKU Masterlist.', 'error');
+
+  const brand = $('sku-master-edit-brand').value.trim();
+  const description = $('sku-master-edit-description').value.trim();
+  const variant = $('sku-master-edit-variant').value.trim();
+  const size = $('sku-master-edit-size').value.trim();
+  const caseBarcode = normalizeBarcode($('sku-master-edit-case').value || 'N/A');
+  const packBarcode = normalizeBarcode($('sku-master-edit-pack').value || 'N/A');
+  const pieceBarcode = normalizeBarcode($('sku-master-edit-piece').value || 'N/A');
+  const reason = $('sku-master-edit-reason').value.trim();
+
+  if (!brand || !description || !variant || !size) return toast('Brand, description, variant, and size are required.', 'error');
+  if (!caseBarcode || !packBarcode || !pieceBarcode) return toast('CASE, PACK, and PIECE barcode fields are required. Enter N/A when unavailable.', 'error');
+  if ([caseBarcode, packBarcode, pieceBarcode].every((code) => code.toUpperCase() === 'N/A')) {
+    return toast('At least one actual barcode must remain registered for the SKU.', 'error');
+  }
+  if (!reason) return toast('Enter the reason for editing this SKU master record.', 'error');
+
+  const button = event.submitter;
+  setBusy(button, true, 'Saving…');
+  const { error } = await supabase.rpc('owner_edit_sku_master', {
+    p_sku_id: $('sku-master-edit-id').value,
+    p_brand: brand,
+    p_description: description,
+    p_variant: variant,
+    p_size: size,
+    p_case_barcode: caseBarcode,
+    p_pack_barcode: packBarcode,
+    p_piece_barcode: pieceBarcode,
+    p_reason: reason
+  });
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  $('sku-master-edit-dialog').close();
+  invalidateReports();
+  await loadSkuMaster(true);
+  toast('SKU Masterlist record updated. Audit record saved.', 'success');
+}
+
 async function loadContainers(force = false) {
   if (!force && state.data.containers.length) return renderContainers();
   const { data, error } = await supabase.from('v_container_summary').select('*').order('container_no').limit(10000);
@@ -2042,6 +2204,7 @@ function exportDataset(name) {
   let rows = [];
   let filename = `${name}-${new Date().toISOString().slice(0, 10)}.csv`;
   if (name === 'inventory') rows = state.data.inventory;
+  if (name === 'skumaster') rows = state.data.skuMaster;
   if (name === 'containers') rows = state.data.containers;
   if (name === 'expiry') rows = state.data.expiry;
   if (name === 'history') rows = state.data.history;

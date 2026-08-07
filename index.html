@@ -56,6 +56,7 @@
         <button data-screen="picking">Picking</button>
         <button data-screen="transfer">Stock transfer</button>
         <button data-screen="inventory">Inventory</button>
+        <button data-screen="skumaster" data-role-min="supervisor">SKU Masterlist</button>
         <button data-screen="containers">Containers</button>
         <button data-screen="rackmap">Rack map</button>
         <button data-screen="expiry">Expiry alerts</button>
@@ -201,6 +202,19 @@
         </article>
       </section>
 
+      <section id="screen-skumaster" class="screen">
+        <article class="card">
+          <div class="card-head">
+            <div><h3>SKU Masterlist</h3><p>Permanent SKU details used by Put-away barcode lookup. Supervisors can view; only the Owner can edit.</p></div>
+            <button class="secondary export-btn" data-export="skumaster">Export CSV</button>
+          </div>
+          <div class="filters"><input id="sku-master-search" placeholder="Search brand, description, variant, size, barcode, or creator..." /></div>
+          <div class="info-box"><strong>Access:</strong> Supervisor = view only · Owner = view and edit. Owner edits are written to Audit History and affect future barcode lookups immediately.</div>
+          <p id="sku-master-count" class="small-note">0 SKU record(s) shown</p>
+          <div id="sku-master-table" class="table-wrap"></div>
+        </article>
+      </section>
+
       <section id="screen-containers" class="screen">
         <article class="card">
           <div class="card-head"><div><h3>Container report</h3><p>Remaining contents, SKUs, expiry dates, and locations</p></div><button class="secondary export-btn" data-export="containers">Export CSV</button></div>
@@ -330,6 +344,26 @@
       </div>
       <label>Reason for adjustment *<textarea id="inventory-adjust-reason" required placeholder="Example: physical count correction, wrong rack encoded, wrong container number"></textarea></label>
       <button class="primary" type="submit">Save inventory adjustment</button>
+    </form>
+  </dialog>
+
+  <dialog id="sku-master-edit-dialog" class="edit-dialog">
+    <div class="scanner-head"><div><h3>Edit SKU Masterlist</h3><p>Owner only. Every edit requires a reason and is saved to Audit History.</p></div><button id="sku-master-edit-close" class="icon-button" type="button">✕</button></div>
+    <form id="sku-master-edit-form" class="stack">
+      <input id="sku-master-edit-id" type="hidden" />
+      <div id="sku-master-edit-current" class="info-box"></div>
+      <div class="form-grid two">
+        <label>Brand *<input id="sku-master-edit-brand" required /></label>
+        <label>Description *<input id="sku-master-edit-description" required /></label>
+        <label>Variant *<input id="sku-master-edit-variant" required /></label>
+        <label>Size *<input id="sku-master-edit-size" required /></label>
+        <label>CASE barcode *<input id="sku-master-edit-case" required /></label>
+        <label>PACK barcode *<input id="sku-master-edit-pack" required /></label>
+        <label>PIECE barcode *<input id="sku-master-edit-piece" required /></label>
+      </div>
+      <p class="small-note">Enter N/A when a barcode type is unavailable. At least one actual barcode must remain registered.</p>
+      <label>Reason for edit *<textarea id="sku-master-edit-reason" required placeholder="Example: corrected barcode, corrected variant, corrected size"></textarea></label>
+      <button class="primary" type="submit">Save SKU master edit</button>
     </form>
   </dialog>
 
