@@ -72,6 +72,7 @@ const state = {
   realtimeChannel: null,
   scanner: { reader: null, controls: null, target: null, kind: null },
   putaway: { locationCode: null, cart: [], matchedSkuId: null, duplicateDetailsSkuId: null, lookupSequence: 0 },
+  shipperPutaway: freshShipperPutawayState(),
   pick: freshOperationState(),
   pickOrder: { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false },
   pickOrderLookupSequence: 0,
@@ -83,6 +84,18 @@ const state = {
 
 function freshOperationState() {
   return { lockToken: null, locationCode: null, heartbeat: null, cart: [], lots: [], rackLots: [], sku: null, naMode: false };
+}
+
+function freshShipperPutawayState() {
+  return {
+    matchedShipperSku: null,
+    shipperLookupSequence: 0,
+    duplicateShipperSkuId: null,
+    contents: [],
+    contentSku: null,
+    contentLookupSequence: 0,
+    duplicateContentSkuId: null
+  };
 }
 
 const screenMeta = {
@@ -167,6 +180,23 @@ function setupStaticEvents() {
     putawayDetailsTimer = setTimeout(checkPutawayDuplicateDetails, 350);
   }));
 
+  $('pa-mode-select').addEventListener('change', switchPutawayMode);
+  $('shipper-putaway-form').addEventListener('submit', (event) => event.preventDefault());
+  $('sp-case').addEventListener('change', resolveShipperSku);
+  $('sp-content-pack').addEventListener('change', resolveShipperContentSku);
+  ['sp-brand', 'sp-description', 'sp-variant', 'sp-size'].forEach((id) => $(id).addEventListener('input', () => {
+    clearTimeout(putawayDetailsTimer);
+    putawayDetailsTimer = setTimeout(checkShipperDuplicateDetails, 350);
+  }));
+  ['sp-content-brand', 'sp-content-description', 'sp-content-variant', 'sp-content-size'].forEach((id) => $(id).addEventListener('input', () => {
+    clearTimeout(putawayDetailsTimer);
+    putawayDetailsTimer = setTimeout(checkShipperContentDuplicateDetails, 350);
+  }));
+  $('sp-add-content-btn').addEventListener('click', addShipperContentLine);
+  $('sp-clear-content-btn').addEventListener('click', clearShipperContentLine);
+  $('sp-cancel-btn').addEventListener('click', resetShipperPutaway);
+  $('sp-complete-btn').addEventListener('click', completeShipperPutaway);
+
   $('pick-lock-btn').addEventListener('click', lockPickLocation);
   $('pick-so').addEventListener('change', refreshPickSalesOrderStatus);
   $('pick-so').addEventListener('blur', refreshPickSalesOrderStatus);
@@ -225,6 +255,8 @@ function setupStaticEvents() {
     if (remove) removeCartItem(remove.dataset.operation, Number(remove.dataset.removeCart));
     const removePutaway = event.target.closest('[data-remove-putaway]');
     if (removePutaway) removePutawayItem(Number(removePutaway.dataset.removePutaway));
+    const removeShipperContent = event.target.closest('[data-remove-shipper-content]');
+    if (removeShipperContent) removeShipperContentLine(Number(removeShipperContent.dataset.removeShipperContent));
     const detail = event.target.closest('[data-container-detail]');
     if (detail) showContainerDetail(detail.dataset.containerDetail);
     const edit = event.target.closest('[data-edit-transaction]');
@@ -301,6 +333,7 @@ async function signup(event) {
 
 async function logout() {
   resetPutawaySession();
+  resetShipperPutaway();
   await cancelOperation('pick', true);
   await cancelOperation('transfer', true);
   await supabase.auth.signOut();
@@ -358,6 +391,8 @@ function applyMode(mode) {
   $('tr-lock-btn').disabled = !active || Boolean(state.transfer.lockToken);
   const putawaySubmit = $('putaway-form').querySelector('button[type="submit"]');
   putawaySubmit.disabled = !active;
+  $('sp-add-content-btn').disabled = !active;
+  $('sp-complete-btn').disabled = !active || !state.shipperPutaway.contents.length;
   if (state.putaway.cart.length) $('pa-complete-btn').disabled = !active;
   if (state.pick.lockToken) $('pick-complete-btn').disabled = !active;
   updatePickSalesOrderControls();
@@ -504,6 +539,24 @@ function expiryPill(status) {
   return '<span class="pill">OK</span>';
 }
 
+function shipperDescriptor(lot) {
+  if (!lot?.shipper_box_id) return 'Loose / standard stock';
+  const role = lot.shipper_lot_role === 'HEADER' ? 'Complete Shipper' : 'Inside Shipper';
+  return `${lot.shipper_box_no || 'Shipper'} · ${lot.shipper_status || '—'} · ${role}`;
+}
+
+function shipperBadge(lot) {
+  if (!lot?.shipper_box_id) return '<span class="pill">Loose</span>';
+  const role = lot.shipper_lot_role === 'HEADER' ? 'Complete' : 'Content';
+  return `<span class="pill near">${escapeHtml(lot.shipper_box_no || 'Shipper')} · ${escapeHtml(role)}</span><br><small>${escapeHtml(lot.shipper_status || '')}</small>`;
+}
+
+function shipperOptionSuffix(lot) {
+  if (!lot?.shipper_box_id) return ' · Loose stock';
+  const role = lot.shipper_lot_role === 'HEADER' ? 'Complete Shipper' : 'Inside Shipper';
+  return ` · ${lot.shipper_box_no || 'Shipper'} · ${role} · ${lot.shipper_status || ''}`;
+}
+
 function setPutawayDetailsReadonly(readonly) {
   ['pa-brand', 'pa-description', 'pa-variant', 'pa-size'].forEach((id) => { $(id).readOnly = readonly; });
 }
@@ -554,6 +607,16 @@ async function resolvePutawaySku() {
     $('pa-match-note').classList.add('hidden');
     await checkPutawayDuplicateDetails();
     return 'new';
+  }
+
+  const { data: skuTypeRow, error: skuTypeError } = await supabase.from('skus').select('sku_type').eq('id', sku.id).single();
+  if (skuTypeError) { toast(friendlyError(skuTypeError), 'error'); return 'error'; }
+  if (String(skuTypeRow?.sku_type || 'STANDARD').toUpperCase() === 'SHIPPER') {
+    state.putaway.matchedSkuId = null;
+    setPutawayDetailsReadonly(false);
+    $('pa-match-note').innerHTML = '<strong>Shipper CASE barcode detected.</strong> Change Put-away type to <strong>Shipper Box</strong> so the physical box contents and expiry lots can be encoded.';
+    $('pa-match-note').classList.remove('hidden');
+    return 'error';
   }
 
   $('pa-piece').value = sku.piece_barcode;
@@ -740,6 +803,325 @@ async function completePutaway() {
   resetPutawaySession();
 }
 
+
+function switchPutawayMode() {
+  const mode = $('pa-mode-select').value;
+  const changingWithData = state.putaway.cart.length || state.shipperPutaway.contents.length;
+  if (changingWithData) {
+    const ok = window.confirm('Changing Put-away type will clear the current unsaved Put-away session. Continue?');
+    if (!ok) {
+      $('pa-mode-select').value = $('shipper-putaway-form').classList.contains('hidden') ? 'STANDARD' : 'SHIPPER';
+      return;
+    }
+    resetPutawaySession();
+    resetShipperPutaway();
+  }
+  $('putaway-form').classList.toggle('hidden', mode !== 'STANDARD');
+  $('shipper-putaway-form').classList.toggle('hidden', mode !== 'SHIPPER');
+  if (mode === 'SHIPPER') $('sp-case').focus();
+  else $('pa-case').focus();
+}
+
+function setShipperDetailsReadonly(readonly) {
+  ['sp-brand','sp-description','sp-variant','sp-size'].forEach((id) => { $(id).readOnly = readonly; });
+}
+
+function setShipperContentDetailsReadonly(readonly) {
+  ['sp-content-brand','sp-content-description','sp-content-variant','sp-content-size'].forEach((id) => { $(id).readOnly = readonly; });
+}
+
+function hideShipperDuplicateWarning() {
+  state.shipperPutaway.duplicateShipperSkuId = null;
+  $('sp-duplicate-warning').classList.add('hidden');
+  $('sp-duplicate-details').textContent = '';
+  $('sp-still-add').checked = false;
+}
+
+function hideShipperContentDuplicateWarning() {
+  state.shipperPutaway.duplicateContentSkuId = null;
+  $('sp-content-duplicate-warning').classList.add('hidden');
+  $('sp-content-duplicate-details').textContent = '';
+  $('sp-content-still-add').checked = false;
+}
+
+async function resolveShipperSku() {
+  const sequence = ++state.shipperPutaway.shipperLookupSequence;
+  const barcode = normalizeBarcode($('sp-case').value);
+  $('sp-case').value = barcode;
+  if (!barcode || barcode === 'N/A') {
+    state.shipperPutaway.matchedShipperSku = null;
+    setShipperDetailsReadonly(false);
+    $('sp-match-note').classList.add('hidden');
+    if (barcode === 'N/A') toast('A Shipper Box requires an actual CASE barcode; N/A is not valid for the Shipper CASE.', 'error');
+    return null;
+  }
+
+  const { data, error } = await supabase.rpc('find_sku_by_barcode', { p_barcode: barcode });
+  if (sequence !== state.shipperPutaway.shipperLookupSequence) return null;
+  if (error) return toast(friendlyError(error), 'error');
+  const sku = data?.[0];
+  if (!sku) {
+    state.shipperPutaway.matchedShipperSku = null;
+    setShipperDetailsReadonly(false);
+    $('sp-match-note').innerHTML = '<strong>New Shipper CASE barcode.</strong> Enter the Shipper brand, description, variant, and size. Its contents will be entered separately below.';
+    $('sp-match-note').classList.remove('hidden');
+    await checkShipperDuplicateDetails();
+    return null;
+  }
+
+  const matchedType = String(sku.matched_type || sku.barcode_type || '').toUpperCase();
+  const { data: row, error: typeError } = await supabase.from('skus').select('sku_type').eq('id', sku.id).single();
+  if (typeError) return toast(friendlyError(typeError), 'error');
+  if (matchedType !== 'CASE') {
+    state.shipperPutaway.matchedShipperSku = null;
+    setShipperDetailsReadonly(false);
+    $('sp-match-note').innerHTML = `<strong>Wrong barcode type:</strong> this code is registered as ${escapeHtml(matchedType || 'another')} barcode. A Shipper must use its CASE barcode.`;
+    $('sp-match-note').classList.remove('hidden');
+    return toast('Use the registered CASE barcode for the Shipper Box.', 'error');
+  }
+  if (String(row?.sku_type || 'STANDARD').toUpperCase() !== 'SHIPPER') {
+    state.shipperPutaway.matchedShipperSku = null;
+    setShipperDetailsReadonly(false);
+    $('sp-match-note').innerHTML = '<strong>STANDARD SKU detected.</strong> This CASE barcode belongs to a normal SKU, not a Shipper master record.';
+    $('sp-match-note').classList.remove('hidden');
+    return toast('This CASE barcode is registered as a STANDARD SKU.', 'error');
+  }
+
+  state.shipperPutaway.matchedShipperSku = { ...sku, sku_type: 'SHIPPER' };
+  $('sp-brand').value = sku.brand;
+  $('sp-description').value = sku.description;
+  $('sp-variant').value = sku.variant;
+  $('sp-size').value = sku.size;
+  setShipperDetailsReadonly(true);
+  hideShipperDuplicateWarning();
+  $('sp-match-note').innerHTML = `<strong>Existing Shipper SKU found.</strong> ${escapeHtml([sku.brand,sku.description,sku.variant,sku.size].join(' '))}. Enter the contents of this incoming physical box fresh; previous box compositions are not reused.`;
+  $('sp-match-note').classList.remove('hidden');
+  return sku;
+}
+
+async function checkShipperDuplicateDetails() {
+  if (state.shipperPutaway.matchedShipperSku) { hideShipperDuplicateWarning(); return null; }
+  const details = {
+    p_brand: $('sp-brand').value.trim(),
+    p_description: $('sp-description').value.trim(),
+    p_variant: $('sp-variant').value.trim(),
+    p_size: $('sp-size').value.trim()
+  };
+  if (Object.values(details).some((v) => !v)) { hideShipperDuplicateWarning(); return null; }
+  const { data, error } = await supabase.rpc('find_sku_by_details', details);
+  if (error) { toast(friendlyError(error), 'error'); return null; }
+  const match = data?.[0];
+  if (!match) { hideShipperDuplicateWarning(); return null; }
+  state.shipperPutaway.duplicateShipperSkuId = match.id;
+  $('sp-duplicate-details').textContent = `Existing barcodes — CASE: ${match.case_barcode}; PACK: ${match.pack_barcode}; PIECE: ${match.piece_barcode}. Added by: ${match.created_by_username || 'unknown user'}.`;
+  $('sp-duplicate-warning').classList.remove('hidden');
+  return match;
+}
+
+async function resolveShipperContentSku() {
+  const sequence = ++state.shipperPutaway.contentLookupSequence;
+  const barcode = normalizeBarcode($('sp-content-pack').value);
+  $('sp-content-pack').value = barcode;
+  if (!barcode || barcode === 'N/A') {
+    state.shipperPutaway.contentSku = null;
+    setShipperContentDetailsReadonly(false);
+    $('sp-content-match-note').classList.add('hidden');
+    if (barcode === 'N/A') toast('Shipper contents in this enhancement require an actual PACK barcode.', 'error');
+    return null;
+  }
+
+  const { data, error } = await supabase.rpc('find_sku_by_barcode', { p_barcode: barcode });
+  if (sequence !== state.shipperPutaway.contentLookupSequence) return null;
+  if (error) return toast(friendlyError(error), 'error');
+  const sku = data?.[0];
+  if (!sku) {
+    state.shipperPutaway.contentSku = null;
+    setShipperContentDetailsReadonly(false);
+    $('sp-content-match-note').innerHTML = '<strong>New PACK barcode.</strong> Enter brand, description, variant, and size. The new SKU will be stored in the permanent SKU Masterlist with CASE/PIECE = N/A.';
+    $('sp-content-match-note').classList.remove('hidden');
+    await checkShipperContentDuplicateDetails();
+    return null;
+  }
+
+  const matchedType = String(sku.matched_type || sku.barcode_type || '').toUpperCase();
+  const { data: row, error: typeError } = await supabase.from('skus').select('sku_type').eq('id', sku.id).single();
+  if (typeError) return toast(friendlyError(typeError), 'error');
+  if (matchedType !== 'PACK') {
+    state.shipperPutaway.contentSku = null;
+    setShipperContentDetailsReadonly(false);
+    $('sp-content-match-note').innerHTML = `<strong>Wrong barcode type:</strong> this code is registered as ${escapeHtml(matchedType || 'another')} barcode. Shipper contents must use the PACK barcode.`;
+    $('sp-content-match-note').classList.remove('hidden');
+    return toast('Use the registered PACK barcode for the Shipper content SKU.', 'error');
+  }
+  if (String(row?.sku_type || 'STANDARD').toUpperCase() !== 'STANDARD') {
+    return toast('A Shipper Box cannot contain another SHIPPER SKU as a child item.', 'error');
+  }
+
+  state.shipperPutaway.contentSku = { ...sku, sku_type: 'STANDARD' };
+  $('sp-content-brand').value = sku.brand;
+  $('sp-content-description').value = sku.description;
+  $('sp-content-variant').value = sku.variant;
+  $('sp-content-size').value = sku.size;
+  setShipperContentDetailsReadonly(true);
+  hideShipperContentDuplicateWarning();
+  $('sp-content-match-note').innerHTML = `<strong>Existing PACK SKU found.</strong> ${escapeHtml([sku.brand,sku.description,sku.variant,sku.size].join(' '))}. Enter this physical box's expiry date and PACK quantity.`;
+  $('sp-content-match-note').classList.remove('hidden');
+  return sku;
+}
+
+async function checkShipperContentDuplicateDetails() {
+  if (state.shipperPutaway.contentSku) { hideShipperContentDuplicateWarning(); return null; }
+  const details = {
+    p_brand: $('sp-content-brand').value.trim(),
+    p_description: $('sp-content-description').value.trim(),
+    p_variant: $('sp-content-variant').value.trim(),
+    p_size: $('sp-content-size').value.trim()
+  };
+  if (Object.values(details).some((v) => !v)) { hideShipperContentDuplicateWarning(); return null; }
+  const { data, error } = await supabase.rpc('find_sku_by_details', details);
+  if (error) { toast(friendlyError(error), 'error'); return null; }
+  const match = data?.[0];
+  if (!match) { hideShipperContentDuplicateWarning(); return null; }
+  state.shipperPutaway.duplicateContentSkuId = match.id;
+  $('sp-content-duplicate-details').textContent = `Existing barcodes — CASE: ${match.case_barcode}; PACK: ${match.pack_barcode}; PIECE: ${match.piece_barcode}. Added by: ${match.created_by_username || 'unknown user'}.`;
+  $('sp-content-duplicate-warning').classList.remove('hidden');
+  return match;
+}
+
+async function addShipperContentLine() {
+  const button = $('sp-add-content-btn');
+  const duplicateConfirmedBeforeLookup = $('sp-content-still-add').checked;
+  setBusy(button, true, 'Checking…');
+  try {
+    await resolveShipperContentSku();
+    const pack = normalizeBarcode($('sp-content-pack').value);
+    const expiry = $('sp-content-expiry').value;
+    const rawQty = String($('sp-content-qty').value || '').trim();
+    const qty = Number(rawQty);
+    const brand = $('sp-content-brand').value.trim();
+    const description = $('sp-content-description').value.trim();
+    const variant = $('sp-content-variant').value.trim();
+    const size = $('sp-content-size').value.trim();
+    if (!pack || pack === 'N/A') return toast('Enter the actual PACK barcode for this Shipper content line.', 'error');
+    if (!expiry) return toast('Enter the expiry date for this Shipper content line.', 'error');
+    if (!/^\d+$/.test(rawQty) || !Number.isSafeInteger(qty) || qty <= 0) return toast('PACK quantity must be a whole number greater than zero.', 'error');
+    if (!brand || !description || !variant || !size) return toast('Brand, description, variant, and size are required for the content SKU.', 'error');
+
+    const duplicate = await checkShipperContentDuplicateDetails();
+    const normalizedDetails = [brand, description, variant, size].map((v) => v.trim().toLowerCase()).join('|');
+    const localDuplicate = state.shipperPutaway.contents.find((x) =>
+      [x.brand, x.description, x.variant, x.size].map((v) => String(v || '').trim().toLowerCase()).join('|') === normalizedDetails
+      && x.pack_barcode.toLowerCase() !== pack.toLowerCase()
+    );
+    const allowDuplicateDetails = duplicateConfirmedBeforeLookup || $('sp-content-still-add').checked;
+    if (localDuplicate && !allowDuplicateDetails) {
+      state.shipperPutaway.duplicateContentSkuId = 'CURRENT_SHIPPER';
+      $('sp-content-duplicate-details').textContent = `The same Brand / Description / Variant / Size is already queued in this physical Shipper Box under PACK barcode ${localDuplicate.pack_barcode}.`;
+      $('sp-content-duplicate-warning').classList.remove('hidden');
+      return toast('ITEM WITH THE SAME DETAILS EXISTED in this Shipper Box. Please check BARCODE, or select Still Add to Database.', 'error');
+    }
+    if (duplicate && !allowDuplicateDetails) return toast('ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE, or select Still Add to Database.', 'error');
+
+    const line = {
+      pack_barcode: pack, brand, description, variant, size,
+      expiry_date: expiry, pack_qty: qty,
+      allow_duplicate_details: allowDuplicateDetails
+    };
+    const existing = state.shipperPutaway.contents.find((x) => x.pack_barcode.toLowerCase() === pack.toLowerCase() && x.expiry_date === expiry);
+    if (existing) existing.pack_qty += qty;
+    else state.shipperPutaway.contents.push(line);
+    renderShipperContents();
+    clearShipperContentLine();
+    $('sp-complete-btn').disabled = state.mode !== 'ACTIVE' || !state.shipperPutaway.contents.length;
+    toast(existing ? 'Same SKU + expiry consolidated in this Shipper Box.' : 'PACK content added to this physical Shipper Box.', 'success');
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function clearShipperContentLine() {
+  ['sp-content-pack','sp-content-brand','sp-content-description','sp-content-variant','sp-content-size','sp-content-expiry','sp-content-qty'].forEach((id) => { $(id).value = ''; });
+  state.shipperPutaway.contentSku = null;
+  state.shipperPutaway.contentLookupSequence += 1;
+  setShipperContentDetailsReadonly(false);
+  $('sp-content-match-note').classList.add('hidden');
+  hideShipperContentDuplicateWarning();
+  $('sp-content-pack').focus();
+}
+
+function renderShipperContents() {
+  const rows = state.shipperPutaway.contents;
+  $('sp-content-cart').innerHTML = rows.length ? `<table><thead><tr><th>Content SKU</th><th>PACK barcode</th><th>Expiry</th><th>PACK qty</th><th></th></tr></thead><tbody>${rows.map((r,i) => `<tr>
+    <td class="wrap"><strong>${escapeHtml([r.brand,r.description,r.variant,r.size].join(' '))}</strong></td>
+    <td>${escapeHtml(r.pack_barcode)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.pack_qty,'PACK')}</td>
+    <td><button class="link-btn" type="button" data-remove-shipper-content="${i}">Remove</button></td></tr>`).join('')}</tbody></table>` : emptyState('No Shipper contents added yet.');
+}
+
+function removeShipperContentLine(index) {
+  state.shipperPutaway.contents.splice(index,1);
+  renderShipperContents();
+  $('sp-complete-btn').disabled = state.mode !== 'ACTIVE' || !state.shipperPutaway.contents.length;
+}
+
+function resetShipperPutaway(preserveResult = false) {
+  state.shipperPutaway = freshShipperPutawayState();
+  $('shipper-putaway-form').reset();
+  if (!preserveResult) { $('sp-result').classList.add('hidden'); $('sp-result').innerHTML = ''; }
+  setShipperDetailsReadonly(false);
+  setShipperContentDetailsReadonly(false);
+  $('sp-match-note').classList.add('hidden');
+  $('sp-content-match-note').classList.add('hidden');
+  hideShipperDuplicateWarning();
+  hideShipperContentDuplicateWarning();
+  $('sp-complete-btn').disabled = true;
+  renderShipperContents();
+}
+
+async function completeShipperPutaway() {
+  const location = normalizeLocation($('sp-location').value);
+  const shipperCase = normalizeBarcode($('sp-case').value);
+  const container = $('sp-container').value.trim();
+  if (!location) return toast('Scan or enter the rack location.', 'error');
+  if (!shipperCase || shipperCase === 'N/A') return toast('A Shipper Box requires an actual CASE barcode.', 'error');
+  if (!container) return toast('Container number is required.', 'error');
+  if (!state.shipperPutaway.contents.length) return toast('Add at least one PACK content line inside this Shipper Box.', 'error');
+
+  await resolveShipperSku();
+  const brand = $('sp-brand').value.trim();
+  const description = $('sp-description').value.trim();
+  const variant = $('sp-variant').value.trim();
+  const size = $('sp-size').value.trim();
+  if (!brand || !description || !variant || !size) return toast('Shipper brand, description, variant, and size are required.', 'error');
+  const duplicate = await checkShipperDuplicateDetails();
+  if (duplicate && !$('sp-still-add').checked && !state.shipperPutaway.matchedShipperSku) {
+    return toast('ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE, or select Still Add Shipper to Database.', 'error');
+  }
+
+  const button = $('sp-complete-btn');
+  setBusy(button, true, 'Completing…');
+  const { data, error } = await supabase.rpc('complete_shipper_putaway', {
+    p_location_code: location,
+    p_shipper_case_barcode: shipperCase,
+    p_shipper_brand: brand,
+    p_shipper_description: description,
+    p_shipper_variant: variant,
+    p_shipper_size: size,
+    p_container_no: container,
+    p_contents: state.shipperPutaway.contents,
+    p_allow_duplicate_shipper_details: $('sp-still-add').checked,
+    p_note: $('sp-note').value.trim() || null
+  });
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+  const row = data?.[0];
+  const boxNo = row?.shipper_box_no || 'physical box';
+  toast(`Shipper put-away saved: ${boxNo} · ${row?.transaction_no || 'transaction completed'}`, 'success');
+  invalidateReports();
+  resetShipperPutaway(true);
+  $('sp-result').innerHTML = `<strong>Physical Shipper ID created: ${escapeHtml(boxNo)}</strong><br>Write or attach this SB number to the physical box so users can distinguish it from another box with the same manufacturer CASE barcode.`;
+  $('sp-result').classList.remove('hidden');
+}
+
 async function lockPickLocation() {
   const so = $('pick-so').value.trim();
   const location = normalizeLocation($('pick-location').value);
@@ -900,7 +1282,7 @@ function renderPickRackContents() {
     return;
   }
 
-  container.innerHTML = `<table><thead><tr><th>Item</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Available</th><th>Queued</th><th></th></tr></thead><tbody>${rows.map((lot) => {
+  container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Available</th><th>Queued</th><th></th></tr></thead><tbody>${rows.map((lot) => {
     const queued = state.pick.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
     const remaining = Math.max(Number(lot.qty) - queued, 0);
     const bypassAction = isSupervisor()
@@ -908,6 +1290,7 @@ function renderPickRackContents() {
       : '<small>Correct barcode required</small>';
     return `<tr>
       <td class="wrap"><strong>${escapeHtml(lot.sku_name)}</strong></td>
+      <td>${shipperBadge(lot)}</td>
       <td>${escapeHtml(lot.container_no)}</td>
       <td>${fmtDate(lot.expiry_date)} ${expiryPill(lot.expiry_status)}</td>
       <td><span class="pill">${escapeHtml(lot.uom)}</span></td>
@@ -960,11 +1343,12 @@ function renderTransferRackContents() {
     return;
   }
 
-  container.innerHTML = `<table><thead><tr><th>Item</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Available</th><th>Queued</th></tr></thead><tbody>${rows.map((lot) => {
+  container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Available</th><th>Queued</th></tr></thead><tbody>${rows.map((lot) => {
     const queued = state.transfer.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
     const remaining = Math.max(Number(lot.qty) - queued, 0);
     return `<tr>
       <td class="wrap"><strong>${escapeHtml(lot.sku_name)}</strong></td>
+      <td>${shipperBadge(lot)}</td>
       <td>${escapeHtml(lot.container_no)}</td>
       <td>${fmtDate(lot.expiry_date)} ${expiryPill(lot.expiry_status)}</td>
       <td><span class="pill">${escapeHtml(lot.uom)}</span></td>
@@ -1010,6 +1394,7 @@ function renderNaSelectedLot(operation) {
       <tr><th>Brand</th><td>${escapeHtml(lot.brand)}</td><th>Description</th><td>${escapeHtml(lot.description)}</td></tr>
       <tr><th>Variant</th><td>${escapeHtml(lot.variant)}</td><th>Size</th><td>${escapeHtml(lot.size)}</td></tr>
       <tr><th>Container</th><td>${escapeHtml(lot.container_no)}</td><th>Expiry</th><td>${fmtDate(lot.expiry_date)}</td></tr>
+      <tr><th>Shipper box</th><td colspan="3">${escapeHtml(shipperDescriptor(lot))}</td></tr>
       <tr><th>Source rack</th><td>${escapeHtml(opState.locationCode || '—')}</td><th>Available ${escapeHtml(lot.uom)}</th><td>${fmtQtyUom(remaining, lot.uom)}</td></tr>
     </tbody></table></div>`;
 }
@@ -1038,12 +1423,17 @@ function renderPickBarcodeMatch(sku, expectedUom, lots) {
   const panel = $('pick-barcode-match');
   if (!panel || !sku) return;
   const available = (lots || []).reduce((sum, lot) => sum + Number(lot.effectiveQty ?? lot.qty ?? 0), 0);
+  const shipperLots = (lots || []).filter((lot) => lot.shipper_box_id);
+  const shipperContext = shipperLots.length
+    ? `<tr><th>Shipper context</th><td colspan="3">${escapeHtml(shipperLots.map((lot) => `${lot.shipper_box_no || 'Shipper'} ${lot.shipper_lot_role === 'HEADER' ? '(complete SEALED box)' : '(content)'}`).join(' · '))}</td></tr>`
+    : '';
   panel.classList.remove('hidden');
   panel.innerHTML = `<strong>Barcode confirmed as ${escapeHtml(expectedUom)}</strong>
     <div class="table-wrap"><table><tbody>
       <tr><th>Brand</th><td>${escapeHtml(sku.brand)}</td><th>Description</th><td>${escapeHtml(sku.description)}</td></tr>
       <tr><th>Variant</th><td>${escapeHtml(sku.variant)}</td><th>Size</th><td>${escapeHtml(sku.size)}</td></tr>
       <tr><th>Source rack</th><td>${escapeHtml(state.pick.locationCode || '—')}</td><th>Available ${escapeHtml(expectedUom)}</th><td>${fmtQtyUom(available, expectedUom)}</td></tr>
+      ${shipperContext}
     </tbody></table></div>`;
 }
 
@@ -1099,12 +1489,17 @@ function renderTransferBarcodeMatch(sku, expectedUom, lots) {
   const panel = $('tr-barcode-match');
   if (!panel || !sku) return;
   const available = (lots || []).reduce((sum, lot) => sum + Number(lot.qty || 0), 0);
+  const shipperLots = (lots || []).filter((lot) => lot.shipper_box_id);
+  const shipperContext = shipperLots.length
+    ? `<tr><th>Shipper context</th><td colspan="3">${escapeHtml(shipperLots.map((lot) => `${lot.shipper_box_no || 'Shipper'} ${lot.shipper_lot_role === 'HEADER' ? '(complete SEALED box)' : '(content)'}`).join(' · '))}</td></tr>`
+    : '';
   panel.classList.remove('hidden');
   panel.innerHTML = `<strong>Barcode confirmed as ${escapeHtml(expectedUom)}</strong>
     <div class="table-wrap"><table><tbody>
       <tr><th>Brand</th><td>${escapeHtml(sku.brand)}</td><th>Description</th><td>${escapeHtml(sku.description)}</td></tr>
       <tr><th>Variant</th><td>${escapeHtml(sku.variant)}</td><th>Size</th><td>${escapeHtml(sku.size)}</td></tr>
       <tr><th>Source rack</th><td>${escapeHtml(state.transfer.locationCode || '—')}</td><th>Available ${escapeHtml(expectedUom)}</th><td>${fmtQtyUom(available, expectedUom)}</td></tr>
+      ${shipperContext}
     </tbody></table></div>`;
 }
 
@@ -1201,7 +1596,7 @@ async function loadOperationLots(operation) {
     });
 
     lotSelect.innerHTML = opState.lots.length
-      ? `<option value="">Select N/A item / expiry / container / unit</option>${opState.lots.map((lot, i) => `<option value="${i}" ${Number(lot.effectiveQty) <= 0 ? 'disabled' : ''}>${escapeHtml(lot.sku_name)} · ${escapeHtml(lot.uom)} · ${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)} · Available ${fmtQtyUom(lot.effectiveQty, lot.uom)}</option>`).join('')}`
+      ? `<option value="">Select N/A item / expiry / container / unit</option>${opState.lots.map((lot, i) => `<option value="${i}" ${Number(lot.effectiveQty) <= 0 ? 'disabled' : ''}>${escapeHtml(lot.sku_name)} · ${escapeHtml(lot.uom)} · ${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)}${escapeHtml(shipperOptionSuffix(lot))} · Available ${fmtQtyUom(lot.effectiveQty, lot.uom)}</option>`).join('')}`
       : '<option value="">No stock in this rack uses N/A for its active stock unit</option>';
 
     $(pick ? 'pick-unit-label' : 'tr-unit-label').textContent = 'selected unit';
@@ -1319,7 +1714,7 @@ async function loadOperationLots(operation) {
   }
 
   lotSelect.innerHTML = opState.lots.length
-    ? `<option value="">Select expiry / container</option>${opState.lots.map((lot, i) => `<option value="${i}" ${pick && Number(lot.effectiveQty) <= 0 ? 'disabled' : ''}>${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)} · Available ${fmtQtyUom(pick ? lot.effectiveQty : lot.qty, lot.uom)}</option>`).join('')}`
+    ? `<option value="">Select expiry / container</option>${opState.lots.map((lot, i) => `<option value="${i}" ${pick && Number(lot.effectiveQty) <= 0 ? 'disabled' : ''}>${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)}${escapeHtml(shipperOptionSuffix(lot))} · Available ${fmtQtyUom(pick ? lot.effectiveQty : lot.qty, lot.uom)}</option>`).join('')}`
     : `<option value="">No ${expectedUom} stock for this SKU in the locked location</option>`;
 
   if (opState.lots.length === 1) lotSelect.value = '0';
@@ -1358,6 +1753,13 @@ async function addSupervisorBarcodeBypass(lotId) {
     return toast('Pick quantity must be a whole number greater than zero.', 'error');
   }
 
+  if (lot.shipper_box_id) {
+    const sameBox = state.pick.cart.filter((x) => x.shipper_box_id === lot.shipper_box_id);
+    if (lot.shipper_lot_role === 'HEADER' && qty !== 1) return toast('A complete SEALED Shipper Box is picked as exactly 1 CASE.', 'error');
+    if (lot.shipper_lot_role === 'HEADER' && sameBox.some((x) => x.shipper_lot_role === 'CONTENT')) return toast('Individual contents from this Shipper are already queued.', 'error');
+    if (lot.shipper_lot_role === 'CONTENT' && sameBox.some((x) => x.shipper_lot_role === 'HEADER')) return toast('The complete Shipper Box is already queued.', 'error');
+  }
+
   const already = state.pick.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
   if (qty + already > Number(lot.qty)) return toast(`Cannot exceed available stock of ${fmtQtyUom(lot.qty, lot.uom)}.`, 'error');
 
@@ -1390,7 +1792,11 @@ async function addSupervisorBarcodeBypass(lotId) {
     earliest_location: earliestRow?.location_code || state.pick.locationCode,
     earliest_container: earliestRow?.container_no || lot.container_no,
     available: Number(lot.qty),
-    uom: lot.uom
+    uom: lot.uom,
+    shipper_box_id: lot.shipper_box_id || null,
+    shipper_box_no: lot.shipper_box_no || null,
+    shipper_status: lot.shipper_status || null,
+    shipper_lot_role: lot.shipper_lot_role || null
   });
   renderOperationCart('pick');
   renderPickRackContents();
@@ -1430,6 +1836,17 @@ function addOperationItem(operation) {
     if (!Number.isFinite(qty) || qty <= 0 || !Number.isInteger(qty)) return toast(`Enter a whole-number ${lot.uom} transfer quantity greater than zero.`, 'error');
   }
 
+  if (lot.shipper_box_id) {
+    const sameBox = opState.cart.filter((x) => x.shipper_box_id === lot.shipper_box_id);
+    if (lot.shipper_lot_role === 'HEADER' && sameBox.some((x) => x.shipper_lot_role === 'CONTENT')) {
+      return toast(`Cannot add complete Shipper ${lot.shipper_box_no || ''}: individual contents from this same box are already queued.`, 'error');
+    }
+    if (lot.shipper_lot_role === 'CONTENT' && sameBox.some((x) => x.shipper_lot_role === 'HEADER')) {
+      return toast(`Cannot add content from ${lot.shipper_box_no || 'this Shipper'} because the complete box is already queued.`, 'error');
+    }
+    if (lot.shipper_lot_role === 'HEADER' && qty !== 1) return toast('A complete SEALED Shipper Box is picked/transferred as exactly 1 CASE.', 'error');
+  }
+
   const already = opState.cart.filter((x) => x.lot_id === lot.lot_id).reduce((a, x) => a + Number(x.qty), 0);
   if (qty + already > Number(lot.qty)) return toast(`Cannot exceed available stock of ${fmtQtyUom(lot.qty, lot.uom)}.`, 'error');
 
@@ -1449,6 +1866,10 @@ function addOperationItem(operation) {
     earliest_container: lot.earliestContainer || null,
     available: Number(lot.qty),
     uom: lot.uom,
+    shipper_box_id: lot.shipper_box_id || null,
+    shipper_box_no: lot.shipper_box_no || null,
+    shipper_status: lot.shipper_status || null,
+    shipper_lot_role: lot.shipper_lot_role || null,
     supervisor_bypass: false,
     bypass_reason: null
   });
@@ -1477,9 +1898,9 @@ function renderOperationCart(operation) {
   }, { PIECE: 0, PACK: 0, CASE: 0 });
   const transferHeader = pick ? '' : `<div class="info-box"><strong>Transfer summary:</strong> ${rows.length.toLocaleString()} line(s) queued from ${escapeHtml(state.transfer.locationCode || '—')} · ${formatBalances(totals)}. Review these items before clicking Complete transfer.</div>`;
 
-  container.innerHTML = `${transferHeader}<table><thead><tr>${pick ? '' : '<th>Item details</th>'}<th>SKU</th><th>Container</th><th>Expiry</th><th>Quantity</th><th>Barcode control</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
+  container.innerHTML = `${transferHeader}<table><thead><tr>${pick ? '' : '<th>Item details</th>'}<th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Quantity</th><th>Barcode control</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
     ${pick ? '' : `<td class="wrap"><strong>${escapeHtml([r.brand, r.description, r.variant, r.size].filter(Boolean).join(' '))}</strong><br><small>Source: ${escapeHtml(state.transfer.locationCode || '—')}</small></td>`}
-    <td class="wrap">${escapeHtml(r.sku_name)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td>
+    <td class="wrap">${escapeHtml(r.sku_name)}</td><td>${r.shipper_box_id ? `<span class="pill near">${escapeHtml(r.shipper_box_no || 'Shipper')} · ${escapeHtml(r.shipper_lot_role === 'HEADER' ? 'Complete' : 'Content')}</span>` : '<span class="pill">Loose</span>'}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td>
     <td class="wrap">${pick
       ? (r.supervisor_bypass
         ? `<span class="pill override">Supervisor bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>`
@@ -1789,7 +2210,7 @@ async function loadInventory(force = false) {
 
 function renderInventory() {
   const term = $('inventory-search').value.trim().toLowerCase();
-  const rows = state.data.inventory.filter((r) => [r.sku_name, r.brand, r.description, r.variant, r.size, r.container_no, r.location_code, r.expiry_date, r.uom, r.putaway_remarks].join(' ').toLowerCase().includes(term));
+  const rows = state.data.inventory.filter((r) => [r.sku_name, r.brand, r.description, r.variant, r.size, r.container_no, r.location_code, r.expiry_date, r.uom, r.putaway_remarks, r.shipper_box_no, r.shipper_status, r.shipper_lot_role].join(' ').toLowerCase().includes(term));
   const grouped = new Map();
   rows.forEach((r) => {
     const item = grouped.get(r.sku_id) || { sku_name: r.sku_name, balances: { PIECE: 0, PACK: 0, CASE: 0 }, containers: new Set(), locations: new Set(), earliest: r.expiry_date };
@@ -1802,9 +2223,9 @@ function renderInventory() {
   const summaryRows = [...grouped.values()].sort((a, b) => a.sku_name.localeCompare(b.sku_name));
   $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
   const actionHeader = isSupervisor() ? '<th>Actions</th>' : '';
-  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => `<tr>
-    <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td>
-    ${isSupervisor() ? `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button> <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button></td>` : ''}
+  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => `<tr>
+    <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td>
+    ${isSupervisor() ? (r.shipper_box_id ? `<td><small>Protected Shipper lot<br>${escapeHtml(r.shipper_box_no || '')}</small></td>` : `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button> <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button></td>`) : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching inventory.');
 }
 
@@ -1812,6 +2233,7 @@ async function openInventoryLotEdit(lotId) {
   if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
+  if (row.shipper_box_id) return toast('This lot belongs to a physical Shipper Box. Use Shipper Picking/Transfer so the box status and contents remain consistent.', 'error');
 
   const [skuRes, locationRes] = await Promise.all([
     supabase.from('skus').select('id,brand,description,variant,size').order('brand').order('description').order('variant').order('size').limit(10000),
@@ -1877,6 +2299,7 @@ async function deleteInventoryLot(lotId) {
   if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
+  if (row.shipper_box_id) return toast('This lot belongs to a physical Shipper Box and cannot be deleted through generic Detailed Lots.', 'error');
 
   const reason = window.prompt(`Reason for deleting this active inventory lot:
 
@@ -1923,16 +2346,17 @@ function renderSkuMaster() {
   const term = $('sku-master-search').value.trim().toLowerCase();
   const rows = state.data.skuMaster.filter((r) => [
     r.brand, r.description, r.variant, r.size,
-    r.case_barcode, r.pack_barcode, r.piece_barcode,
+    r.case_barcode, r.pack_barcode, r.piece_barcode, r.sku_type,
     r.created_by_username
   ].join(' ').toLowerCase().includes(term));
 
   const actionHeader = isOwner() ? '<th>Owner action</th>' : '';
   $('sku-master-table').innerHTML = rows.length ? `<table><thead><tr>
-    <th>Brand</th><th>Description</th><th>Variant</th><th>Size</th>
+    <th>Type</th><th>Brand</th><th>Description</th><th>Variant</th><th>Size</th>
     <th>CASE barcode</th><th>PACK barcode</th><th>PIECE barcode</th>
     <th>Added by</th><th>Date added</th>${actionHeader}
   </tr></thead><tbody>${rows.map((r) => `<tr>
+    <td><span class="pill ${r.sku_type === 'SHIPPER' ? 'near' : ''}">${escapeHtml(r.sku_type || 'STANDARD')}</span></td>
     <td>${escapeHtml(r.brand)}</td>
     <td class="wrap">${escapeHtml(r.description)}</td>
     <td>${escapeHtml(r.variant)}</td>
@@ -1960,8 +2384,12 @@ function openSkuMasterEdit(skuId) {
   $('sku-master-edit-case').value = sku.case_barcode || 'N/A';
   $('sku-master-edit-pack').value = sku.pack_barcode || 'N/A';
   $('sku-master-edit-piece').value = sku.piece_barcode || 'N/A';
+  const isShipperSku = String(sku.sku_type || 'STANDARD').toUpperCase() === 'SHIPPER';
+  $('sku-master-edit-pack').readOnly = isShipperSku;
+  $('sku-master-edit-piece').readOnly = isShipperSku;
+  if (isShipperSku) { $('sku-master-edit-pack').value = 'N/A'; $('sku-master-edit-piece').value = 'N/A'; }
   $('sku-master-edit-reason').value = '';
-  $('sku-master-edit-current').innerHTML = `<strong>Editing SKU:</strong> ${escapeHtml([sku.brand, sku.description, sku.variant, sku.size].filter(Boolean).join(' '))}`;
+  $('sku-master-edit-current').innerHTML = `<strong>Editing ${escapeHtml(sku.sku_type || 'STANDARD')} SKU:</strong> ${escapeHtml([sku.brand, sku.description, sku.variant, sku.size].filter(Boolean).join(' '))}${isShipperSku ? '<br><small>Shipper master records use CASE barcode only; PACK and PIECE remain N/A.</small>' : ''}`;
   $('sku-master-edit-dialog').showModal();
 }
 
@@ -2029,7 +2457,7 @@ async function showContainerDetail(containerNo) {
   panel.innerHTML = '<div class="empty-state">Loading container details…</div>';
   const { data, error } = await supabase.from('v_inventory_details').select('*').eq('container_no', containerNo).order('location_sort_order', { ascending: true, nullsFirst: false }).order('location_code').order('expiry_date');
   if (error) return panel.innerHTML = `<div class="warning-box">${escapeHtml(friendlyError(error))}</div>`;
-  panel.innerHTML = `<div class="card-head"><div><h3>Container ${escapeHtml(containerNo)}</h3><p>All remaining contents and locations</p></div></div>${data?.length ? `<table><thead><tr><th>SKU</th><th>Location</th><th>Expiry</th><th>Quantity</th></tr></thead><tbody>${data.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${escapeHtml(r.location_code)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td></tr>`).join('')}</tbody></table>` : emptyState('This container has no remaining stock. It has been fully consumed or never received.')}`;
+  panel.innerHTML = `<div class="card-head"><div><h3>Container ${escapeHtml(containerNo)}</h3><p>All remaining contents and locations</p></div></div>${data?.length ? `<table><thead><tr><th>SKU</th><th>Shipper box</th><th>Location</th><th>Expiry</th><th>Quantity</th></tr></thead><tbody>${data.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.location_code)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td></tr>`).join('')}</tbody></table>` : emptyState('This container has no remaining stock. It has been fully consumed or never received.')}`;
 }
 
 async function loadRackMap(force = false) {
@@ -2127,7 +2555,7 @@ function renderHistory() {
   const term = $('history-search').value.trim().toLowerCase();
   const type = $('history-type').value;
   const rows = state.data.history.filter((r) => {
-    const haystack = [r.tx_no, r.created_by_username, r.sales_order, r.sku_name, r.container_no, r.location_code, r.override_reason, r.edit_reason].join(' ').toLowerCase();
+    const haystack = [r.tx_no, r.created_by_username, r.sales_order, r.sku_name, r.container_no, r.location_code, r.override_reason, r.edit_reason, r.line_note, r.shipper_box_no, r.shipper_status, r.shipper_action].join(' ').toLowerCase();
     return (!type || r.transaction_type === type) && haystack.includes(term);
   });
   const firstLineByTx = new Set();
@@ -2140,9 +2568,9 @@ function renderHistory() {
     ].filter(Boolean).join(' ');
     return `<tr><td><strong>${escapeHtml(r.tx_no)}</strong><br><small>${first ? escapeHtml(r.transaction_note || '') : ''}</small></td><td>${escapeHtml(r.transaction_type)}</td>
       <td>${escapeHtml(r.created_by_username)}<br><small>${fmtDateTime(r.created_at)}</small></td><td>${escapeHtml(r.sales_order || '—')}</td><td>${escapeHtml(r.location_code || '—')}</td>
-      <td class="wrap">${escapeHtml(r.sku_name || 'System action')}<br><small>${escapeHtml(r.container_no || '')} ${r.expiry_date ? `· ${fmtDate(r.expiry_date)}` : ''}</small></td>
-      <td>${r.signed_qty == null ? '—' : fmtQtyUom(r.signed_qty, r.uom)}</td><td class="wrap">${flags}${r.barcode_bypassed ? `<br><small>Bypass by ${escapeHtml(r.bypassed_by_username || r.created_by_username)}: ${escapeHtml(r.bypass_reason || '')}</small>` : ''}${first && r.override_reason ? `<br><small>${escapeHtml(r.override_reason)}</small>` : ''}${first && r.edit_reason ? `<br><small>Edit: ${escapeHtml(r.edit_reason)}</small>` : ''}</td>
-      <td>${first && isSupervisor() && ['PUTAWAY','PICK','TRANSFER'].includes(r.transaction_type) ? `<button class="link-btn" data-edit-transaction="${r.transaction_id}">Correct</button>` : ''}</td></tr>`;
+      <td class="wrap">${escapeHtml(r.sku_name || 'System action')}<br><small>${escapeHtml(r.container_no || '')} ${r.expiry_date ? `· ${fmtDate(r.expiry_date)}` : ''}${r.shipper_box_no ? ` · ${escapeHtml(r.shipper_box_no)}` : ''}</small>${r.line_note ? `<br><small>${escapeHtml(r.line_note)}</small>` : ''}</td>
+      <td>${r.signed_qty == null ? '—' : fmtQtyUom(r.signed_qty, r.uom)}</td><td class="wrap">${flags}${r.shipper_action ? `<br><span class="pill near">${escapeHtml(r.shipper_action)}</span>` : ''}${r.barcode_bypassed ? `<br><small>Bypass by ${escapeHtml(r.bypassed_by_username || r.created_by_username)}: ${escapeHtml(r.bypass_reason || '')}</small>` : ''}${first && r.override_reason ? `<br><small>${escapeHtml(r.override_reason)}</small>` : ''}${first && r.edit_reason ? `<br><small>Edit: ${escapeHtml(r.edit_reason)}</small>` : ''}</td>
+      <td>${first && isSupervisor() && ['PUTAWAY','PICK','TRANSFER'].includes(r.transaction_type) && !rows.some((x) => x.transaction_id === r.transaction_id && x.shipper_box_id) ? `<button class="link-btn" data-edit-transaction="${r.transaction_id}">Correct</button>` : (first && r.shipper_box_id ? '<small>Shipper transaction protected</small>' : '')}</td></tr>`;
   }).join('')}</tbody></table>` : emptyState('No matching history.');
 }
 
@@ -2159,6 +2587,7 @@ async function openSupervisorEdit(transactionId) {
   if (error) return toast(friendlyError(error), 'error');
   const rows = data || [];
   if (!rows.length) return;
+  if (rows.some((r) => r.shipper_box_id)) return toast('Shipper Box transactions are protected from the generic correction screen so the physical-box status and contents cannot become inconsistent.', 'error');
   $('edit-transaction-id').value = transactionId;
   $('edit-sales-order').value = rows[0].sales_order || '';
   $('edit-sales-order').disabled = rows[0].transaction_type !== 'PICK';
@@ -2402,6 +2831,7 @@ function csvCell(value) {
 }
 
 renderPutawayCart();
+renderShipperContents();
 renderOperationCart('pick');
 renderOperationCart('transfer');
 clearPickBarcodeMatch();

@@ -103,8 +103,13 @@
       </section>
 
       <section id="screen-putaway" class="screen">
+        <article class="card">
+          <div class="card-head"><div><h3>Put-away type</h3><p>Use Standard SKU for normal pallet stock. Use Shipper Box when one CASE barcode represents a physical box containing multiple PACK-level SKUs and expiry dates.</p></div></div>
+          <label>Transaction type<select id="pa-mode-select"><option value="STANDARD">Standard SKU / pallet</option><option value="SHIPPER">Shipper Box</option></select></label>
+        </article>
+
         <form id="putaway-form" class="card form-card">
-          <div class="card-head"><div><h3>Put-away transaction</h3><p>CASE, PACK, and PIECE barcode fields are all required. Use N/A only when a barcode is unavailable. Container, expiry, and quantities are always entered manually.</p></div></div>
+          <div class="card-head"><div><h3>Standard SKU put-away</h3><p>CASE, PACK, and PIECE barcode fields are all required. Use N/A only when a barcode is unavailable. Container, expiry, and quantities are always entered manually.</p></div></div>
           <div class="form-grid three">
             <label>Rack location / QR *<div class="scan-field"><input id="pa-location" required /><button type="button" class="scan-btn" data-scan-target="pa-location" data-scan-kind="location">Scan</button></div></label>
             <label>Case barcode *<div class="scan-field with-na"><input id="pa-case" required autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="pa-case">Scan</button><button type="button" class="na-btn" data-na-target="pa-case">N/A</button></div></label>
@@ -131,6 +136,48 @@
           <div id="pa-cart" class="table-wrap"></div>
           <div class="form-actions split"><button id="pa-cancel-btn" type="button" class="danger ghost" disabled>Cancel pallet session</button><button id="pa-complete-btn" class="primary" type="button" disabled>Complete put-away</button></div>
         </form>
+
+        <form id="shipper-putaway-form" class="card form-card hidden">
+          <div class="card-head"><div><h3>Shipper Box put-away</h3><p>The Shipper CASE barcode identifies the Shipper product only. Every physical incoming box receives its own internal SB number and its contents are encoded fresh for this delivery.</p></div></div>
+          <div class="info-box"><strong>Important:</strong> Contents are not copied from earlier deliveries. The same Shipper CASE barcode may contain different SKUs, quantities, and expiry dates every time it arrives.</div>
+          <div id="sp-result" class="info-box hidden"></div>
+          <div class="form-grid three">
+            <label>Rack location / QR *<div class="scan-field"><input id="sp-location" required /><button type="button" class="scan-btn" data-scan-target="sp-location" data-scan-kind="location">Scan</button></div></label>
+            <label>Shipper CASE barcode *<div class="scan-field"><input id="sp-case" required autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="sp-case">Scan</button></div></label>
+            <label>Container number *<input id="sp-container" required /></label>
+            <label>Brand *<input id="sp-brand" required /></label>
+            <label>Description *<input id="sp-description" required /></label>
+            <label>Variant *<input id="sp-variant" required /></label>
+            <label>Size *<input id="sp-size" required /></label>
+            <label>Remarks<textarea id="sp-note" rows="2"></textarea></label>
+          </div>
+          <div id="sp-match-note" class="info-box hidden"></div>
+          <div id="sp-duplicate-warning" class="warning-box hidden">
+            <strong>ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE</strong>
+            <p id="sp-duplicate-details"></p>
+            <label class="check-line"><input id="sp-still-add" type="checkbox" /> Still Add Shipper to Database</label>
+          </div>
+
+          <div class="card-head compact"><div><h3>Contents of this physical Shipper Box</h3><p>Encode each PACK-level SKU lot. Different expiry dates remain separate. Same SKU + same expiry is consolidated automatically when saved.</p></div></div>
+          <div class="form-grid three">
+            <label>Content PACK barcode *<div class="scan-field"><input id="sp-content-pack" autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="sp-content-pack">Scan</button></div></label>
+            <label>Expiry date *<input id="sp-content-expiry" type="date" /></label>
+            <label>PACK quantity — whole number *<input id="sp-content-qty" type="number" min="1" step="1" inputmode="numeric" /></label>
+            <label>Brand *<input id="sp-content-brand" /></label>
+            <label>Description *<input id="sp-content-description" /></label>
+            <label>Variant *<input id="sp-content-variant" /></label>
+            <label>Size *<input id="sp-content-size" /></label>
+          </div>
+          <div id="sp-content-match-note" class="info-box hidden"></div>
+          <div id="sp-content-duplicate-warning" class="warning-box hidden">
+            <strong>ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE</strong>
+            <p id="sp-content-duplicate-details"></p>
+            <label class="check-line"><input id="sp-content-still-add" type="checkbox" /> Still Add to Database</label>
+          </div>
+          <div class="form-actions"><button id="sp-clear-content-btn" type="button" class="ghost">Clear content line</button><button id="sp-add-content-btn" type="button" class="secondary">Add PACK content</button></div>
+          <div id="sp-content-cart" class="table-wrap"><div class="empty-state">No Shipper contents added yet.</div></div>
+          <div class="form-actions split"><button id="sp-cancel-btn" type="button" class="danger ghost">Cancel Shipper Box</button><button id="sp-complete-btn" type="button" class="primary" disabled>Complete Shipper put-away</button></div>
+        </form>
       </section>
 
       <section id="screen-picking" class="screen">
@@ -151,7 +198,7 @@
             <label><input id="pick-so-override" type="checkbox" /> Supervisor override: reopen this sales order if it was already completed</label>
             <label>Override reason<input id="pick-so-override-reason" type="text" placeholder="Required only when reusing a completed sales order" disabled /></label>
           </div>
-          <div class="info-box"><strong>Barcode-controlled deduction:</strong> a CASE barcode deducts CASE stock, a PACK barcode deducts PACK stock, and a PIECE barcode deducts PIECE stock. If the required unit barcode is stored as N/A, enter N/A and select the exact eligible item from the locked source rack.</div>
+          <div class="info-box"><strong>Barcode-controlled deduction:</strong> a CASE barcode deducts CASE stock, a PACK barcode deducts PACK stock, and a PIECE barcode deducts PIECE stock. If the required unit barcode is stored as N/A, enter N/A and select the exact eligible item. <strong>Shipper:</strong> scanning a Shipper CASE selects a complete SEALED physical box; scanning a child PACK barcode selects a specific content SKU/expiry and opens that box when picked.</div>
           <div class="card-head compact"><div><h3 id="pick-rack-title">Source rack contents</h3><p>Displayed for reference. Regular users must still scan or type the correct registered barcode.</p></div></div>
           <div id="pick-rack-contents" class="table-wrap"><div class="empty-state">Lock a source rack to display its available items.</div></div>
           <div id="pick-fefo-note" class="warning-box hidden"></div>
@@ -183,7 +230,7 @@
           </div>
           <div id="tr-barcode-match" class="info-box hidden"></div>
           <div id="tr-qty-note" class="info-box hidden"></div>
-          <div class="info-box"><strong>Barcode-controlled transfer:</strong> a CASE barcode transfers CASE stock, a PACK barcode transfers PACK stock, and a PIECE barcode transfers PIECE stock. If the required unit barcode is stored as N/A, enter N/A and select the exact eligible item from the locked source rack.</div>
+          <div class="info-box"><strong>Barcode-controlled transfer:</strong> a CASE barcode transfers CASE stock, a PACK barcode transfers PACK stock, and a PIECE barcode transfers PIECE stock. If the required unit barcode is stored as N/A, enter N/A and select the exact eligible item. <strong>Shipper:</strong> a Shipper CASE moves the complete SEALED physical box and all contents together; a child PACK transfer removes only that content and opens the source box.</div>
           <div class="card-head compact"><div><h3 id="tr-rack-title">Source rack contents</h3><p>Displayed for reference so the user can see what is currently available in the locked source rack.</p></div></div>
           <div id="tr-rack-contents" class="table-wrap"><div class="empty-state">Lock a source rack to display its available items.</div></div>
           <div class="form-actions split"><button id="tr-add-btn" class="secondary" type="button" disabled>Add item</button><div><button id="tr-cancel-btn" class="danger ghost" type="button" disabled>Cancel / restart</button><button id="tr-complete-btn" class="primary" type="button" disabled>Complete transfer</button></div></div>
@@ -207,7 +254,7 @@
       <section id="screen-skumaster" class="screen">
         <article class="card">
           <div class="card-head">
-            <div><h3>SKU Masterlist</h3><p>Permanent SKU details used by Put-away barcode lookup. Supervisors can view; only the Owner can edit.</p></div>
+            <div><h3>SKU Masterlist</h3><p>Permanent STANDARD and SHIPPER SKU details used by Put-away barcode lookup. Supervisors can view; only the Owner can edit.</p></div>
             <button class="secondary export-btn" data-export="skumaster">Export CSV</button>
           </div>
           <div class="filters"><input id="sku-master-search" placeholder="Search brand, description, variant, size, barcode, or creator..." /></div>
