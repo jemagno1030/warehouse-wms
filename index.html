@@ -174,21 +174,25 @@
           <div class="form-grid three">
             <label>Source rack / QR *<div class="scan-field"><input id="tr-source" /><button type="button" class="scan-btn" data-scan-target="tr-source" data-scan-kind="location">Scan</button></div></label>
             <div class="field-action"><button id="tr-lock-btn" class="secondary" type="button">Lock source location</button></div>
-            <label>SKU barcode<div class="scan-field"><input id="tr-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="tr-barcode" disabled>Scan</button></div></label>
-            <label>Available lot<select id="tr-lot" disabled><option value="">Scan a barcode first</option></select></label>
-            <label>Transfer quantity (selected unit)<input id="tr-qty" type="number" min="0.001" step="0.001" disabled /></label>
+            <label>CASE, PACK, or PIECE barcode *<div class="scan-field"><input id="tr-barcode" disabled /><button type="button" class="scan-btn" data-scan-target="tr-barcode" disabled>Scan</button></div></label>
+            <label>Matching expiry / container<select id="tr-lot" disabled><option value="">Scan a barcode first</option></select></label>
+            <label>Transfer quantity (<span id="tr-unit-label">matched unit</span>)<input id="tr-qty" type="number" min="0.001" step="0.001" disabled /></label>
             <label>New location / QR *<div class="scan-field"><input id="tr-destination" disabled /><button type="button" class="scan-btn" data-scan-target="tr-destination" data-scan-kind="location" disabled>Scan</button></div></label>
             <label>Remarks<textarea id="tr-note" rows="2"></textarea></label>
           </div>
+          <div id="tr-barcode-match" class="info-box hidden"></div>
+          <div id="tr-qty-note" class="info-box hidden"></div>
+          <div class="info-box"><strong>Barcode-controlled transfer:</strong> a CASE barcode transfers CASE stock, a PACK barcode transfers PACK stock, and a PIECE barcode transfers PIECE stock from the locked source rack.</div>
           <div class="form-actions split"><button id="tr-add-btn" class="secondary" type="button" disabled>Add item</button><div><button id="tr-cancel-btn" class="danger ghost" type="button" disabled>Cancel / restart</button><button id="tr-complete-btn" class="primary" type="button" disabled>Complete transfer</button></div></div>
-          <div id="tr-cart" class="table-wrap"></div>
+          <div class="card-head compact"><div><h3>Transfer summary</h3><p>All items queued for this transfer remain here until you click Complete transfer.</p></div></div>
+          <div id="tr-cart" class="table-wrap"><div class="empty-state">No items queued for transfer yet.</div></div>
         </div>
       </section>
 
       <section id="screen-inventory" class="screen">
         <article class="card">
           <div class="card-head"><div><h3>Inventory by lot and location</h3><p>Current positive stock only</p></div><button class="secondary export-btn" data-export="inventory">Export CSV</button></div>
-          <div class="filters"><input id="inventory-search" placeholder="Search SKU, container, location..." /></div>
+          <div class="filters"><input id="inventory-search" placeholder="Search SKU, container, location, or put-away remarks..." /></div>
           <h4>SKU summary</h4>
           <div id="inventory-summary-table" class="table-wrap"></div>
           <h4>Detailed lots</h4>
