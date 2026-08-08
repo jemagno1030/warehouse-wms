@@ -85,8 +85,9 @@ const state = {
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
   transfer: freshOperationState(),
-  data: { inventory: [], skuMaster: [], containers: [], expiry: [], nonFefo: [], history: [], audit: [], locations: [], rackMap: [] },
-  selectedQrLocations: new Set()
+  data: { inventory: [], skuMaster: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], locations: [], rackMap: [] },
+  selectedQrLocations: new Set(),
+  accountAccessTimer: null
 };
 
 function freshOperationState() {
@@ -116,6 +117,7 @@ const screenMeta = {
   rackmap: ['Rack map', 'Visual location occupancy and active locks'],
   expiry: ['Expiry alerts', 'Expired and near-expiry stock'],
   nonfefo: ['Non-FEFO Compliance', 'Confirmed picking transactions that disregarded FEFO'],
+  users: ['User Management', 'Registered users, roles, and account access'],
   history: ['History', 'Complete transaction and correction trail'],
   locations: ['Locations & QR', 'Rack master data and printable labels'],
   control: ['System control', 'Discreet global operational control']
@@ -152,6 +154,10 @@ function isSupervisor() {
 
 function isOwner() {
   return state.profile?.role === 'owner';
+}
+
+function isAdminOrOwner() {
+  return ['admin', 'owner'].includes(state.profile?.role);
 }
 
 function setupStaticEvents() {
@@ -252,6 +258,9 @@ function setupStaticEvents() {
   $('nonfefo-search').addEventListener('input', renderNonFefoCompliance);
   $('nonfefo-from').addEventListener('change', renderNonFefoCompliance);
   $('nonfefo-to').addEventListener('change', renderNonFefoCompliance);
+  $('users-search').addEventListener('input', renderUsers);
+  $('users-role').addEventListener('change', renderUsers);
+  $('users-status').addEventListener('change', renderUsers);
   $('rack-map-row').addEventListener('change', renderRackMap);
   $('rack-map-search').addEventListener('input', renderRackMap);
 
@@ -278,6 +287,9 @@ function setupStaticEvents() {
   $('inventory-adjust-form').addEventListener('submit', submitInventoryLotEdit);
   $('sku-master-edit-close').addEventListener('click', () => $('sku-master-edit-dialog').close());
   $('sku-master-edit-form').addEventListener('submit', submitSkuMasterEdit);
+  $('user-role-close').addEventListener('click', () => $('user-role-dialog').close());
+  $('user-role-form').addEventListener('submit', submitUserRoleChange);
+  $('user-role-select').addEventListener('change', syncOwnerPromotionPasswordField);
 
   document.addEventListener('click', (event) => {
     const remove = event.target.closest('[data-remove-cart]');
@@ -296,6 +308,10 @@ function setupStaticEvents() {
     if (inventoryDelete) deleteInventoryLot(inventoryDelete.dataset.inventoryDelete);
     const skuMasterEdit = event.target.closest('[data-sku-master-edit]');
     if (skuMasterEdit) openSkuMasterEdit(skuMasterEdit.dataset.skuMasterEdit);
+    const userRole = event.target.closest('[data-user-role]');
+    if (userRole) openUserRoleDialog(userRole.dataset.userRole);
+    const userActive = event.target.closest('[data-user-active]');
+    if (userActive) toggleManagedUserActive(userActive.dataset.userActive);
     const bypassPick = event.target.closest('[data-pick-bypass-lot]');
     if (bypassPick) addSupervisorBarcodeBypass(bypassPick.dataset.pickBypassLot);
     const qr = event.target.closest('[data-qr-location]');
@@ -389,19 +405,65 @@ async function handleSession(session) {
     return;
   }
 
-  state.profile = profile;
-  $('current-username').textContent = profile.username;
-  $('current-role').textContent = profile.role;
-  qsa('[data-role-min="supervisor"]').forEach((node) => node.classList.toggle('hidden', !isSupervisor()));
-  const controlNav = document.querySelector('#main-nav [data-screen="control"]');
-  if (controlNav) controlNav.classList.toggle('hidden', !isOwner());
+  applyCurrentProfile(profile);
   $('auth-view').classList.add('hidden');
   $('app-view').classList.remove('hidden');
   await loadSystemMode();
   subscribeRealtime();
+  startAccountAccessWatch();
 
   const savedScreen = getSavedScreen();
   showScreen(canOpenScreen(savedScreen) ? savedScreen : 'dashboard');
+}
+
+function applyCurrentProfile(profile) {
+  state.profile = profile;
+  $('current-username').textContent = profile?.username || '—';
+  $('current-role').textContent = profile?.role || '—';
+  qsa('[data-role-min="supervisor"]').forEach((node) => node.classList.toggle('hidden', !isSupervisor()));
+  qsa('[data-role-min="admin"]').forEach((node) => node.classList.toggle('hidden', !isAdminOrOwner()));
+  const ownerFilterOption = $('users-role')?.querySelector('option[value="owner"]');
+  if (ownerFilterOption) {
+    ownerFilterOption.hidden = !isOwner();
+    if (!isOwner() && $('users-role').value === 'owner') $('users-role').value = '';
+  }
+  const controlNav = document.querySelector('#main-nav [data-screen="control"]');
+  if (controlNav) controlNav.classList.toggle('hidden', !isOwner());
+}
+
+async function refreshOwnAccountAccess() {
+  if (!state.session?.user?.id || !supabase) return;
+  const { data: profile, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', state.session.user.id)
+    .single();
+  if (error || !profile) return;
+
+  if (!profile.is_active) {
+    toast('Your account has been kicked out by an administrator.', 'error');
+    stopAccountAccessWatch();
+    await supabase.auth.signOut();
+    return;
+  }
+
+  const roleChanged = state.profile?.role !== profile.role;
+  applyCurrentProfile(profile);
+  if (roleChanged) {
+    state.data.users = [];
+    if (!canOpenScreen(state.currentScreen)) showScreen('dashboard');
+    else if (state.currentScreen === 'users') loadUsers(true);
+  }
+}
+
+function startAccountAccessWatch() {
+  stopAccountAccessWatch();
+  state.accountAccessTimer = window.setInterval(refreshOwnAccountAccess, 15000);
+}
+
+function stopAccountAccessWatch() {
+  if (state.accountAccessTimer) window.clearInterval(state.accountAccessTimer);
+  state.accountAccessTimer = null;
 }
 
 async function loadSystemMode() {
@@ -430,15 +492,25 @@ function applyMode(mode) {
 
 function subscribeRealtime() {
   unsubscribeRealtime();
-  state.realtimeChannel = supabase.channel('wms-global-state')
+  let channel = supabase.channel('wms-global-state')
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_settings', filter: 'id=eq.1' },
-      (payload) => applyMode(payload.new.operational_mode))
-    .subscribe();
+      (payload) => applyMode(payload.new.operational_mode));
+
+  if (state.session?.user?.id) {
+    channel = channel.on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'profiles', filter: `id=eq.${state.session.user.id}` },
+      () => refreshOwnAccountAccess()
+    );
+  }
+
+  state.realtimeChannel = channel.subscribe();
 }
 
 function unsubscribeRealtime() {
   if (state.realtimeChannel && supabase) supabase.removeChannel(state.realtimeChannel);
   state.realtimeChannel = null;
+  stopAccountAccessWatch();
 }
 
 function screenStorageKey() {
@@ -466,6 +538,7 @@ function canOpenScreen(name) {
   if (name === 'locations' && !isSupervisor()) return false;
   if (name === 'skumaster' && !isSupervisor()) return false;
   if (name === 'nonfefo' && !isSupervisor()) return false;
+  if (name === 'users' && !isAdminOrOwner()) return false;
   if (name === 'control' && !isOwner()) return false;
   return true;
 }
@@ -473,6 +546,7 @@ function canOpenScreen(name) {
 function showScreen(name) {
   if (!canOpenScreen(name)) {
     if ((name === 'locations' || name === 'skumaster' || name === 'nonfefo') && !isSupervisor()) toast('Supervisor access is required.', 'error');
+    if (name === 'users' && !isAdminOrOwner()) toast('Admin or Owner access is required.', 'error');
     if (name === 'control' && !isOwner()) toast('Owner access is required.', 'error');
     name = 'dashboard';
   }
@@ -497,6 +571,7 @@ async function loadScreen(name, force = false) {
     if (name === 'rackmap') await loadRackMap(force);
     if (name === 'expiry') await loadExpiry(force);
     if (name === 'nonfefo') await loadNonFefoCompliance(force);
+    if (name === 'users') await loadUsers(force);
     if (name === 'history') await loadHistory(force);
     if (name === 'locations') await loadLocations(force);
   } catch (error) {
@@ -2931,6 +3006,186 @@ function renderNonFefoCompliance() {
     <td>${fmtQtyUom(r.qty, r.uom)}</td>
     <td class="wrap">${escapeHtml(r.override_reason || '—')}</td>
   </tr>`).join('')}</tbody></table>` : emptyState('No Non-FEFO compliance records match the current filters.');
+}
+
+async function loadUsers(force = false) {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+  if (!force && state.data.users.length) return renderUsers();
+
+  const { data, error } = await supabase.rpc('list_managed_users');
+  if (error) throw error;
+  state.data.users = data || [];
+  renderUsers();
+}
+
+function userRoleRank(role) {
+  return ({ owner: 4, admin: 3, supervisor: 2, user: 1 })[String(role || '').toLowerCase()] || 0;
+}
+
+function userRoleLabel(role) {
+  const value = String(role || 'user').toLowerCase();
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function renderUsers() {
+  if (!isAdminOrOwner()) return;
+  const term = $('users-search').value.trim().toLowerCase();
+  const roleFilter = $('users-role').value;
+  const statusFilter = $('users-status').value;
+
+  const visible = state.data.users.filter((row) => {
+    if (roleFilter && row.role !== roleFilter) return false;
+    if (statusFilter === 'ACTIVE' && !row.is_active) return false;
+    if (statusFilter === 'INACTIVE' && row.is_active) return false;
+    return [row.username, row.email, row.role, row.is_active ? 'active' : 'kicked out']
+      .join(' ').toLowerCase().includes(term);
+  }).sort((a, b) => userRoleRank(b.role) - userRoleRank(a.role)
+    || String(a.username).localeCompare(String(b.username)));
+
+  const all = state.data.users;
+  const active = all.filter((row) => row.is_active).length;
+  const inactive = all.length - active;
+  const roleCounts = ['owner','admin','supervisor','user']
+    .map((role) => [role, all.filter((row) => row.role === role).length])
+    .filter(([, count]) => count > 0)
+    .map(([role, count]) => `${userRoleLabel(role)} ${count}`)
+    .join(' · ') || 'No users';
+
+  $('users-kpis').innerHTML = [
+    ['Visible registered users', all.length],
+    ['Active', active],
+    ['Kicked out', inactive],
+    ['Role mix', roleCounts]
+  ].map(([label, value]) => `<div class="kpi"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
+
+  $('users-count').textContent = `${visible.length} shown of ${all.length} visible account(s)`;
+  $('users-table').innerHTML = visible.length ? `<table><thead><tr>
+    <th>Username</th><th>Email</th><th>Role</th><th>Status</th><th>Registered</th><th>Last sign-in</th><th>Actions</th>
+  </tr></thead><tbody>${visible.map((row) => {
+    const rolePill = `<span class="pill${row.role === 'owner' ? ' near' : ''}">${escapeHtml(userRoleLabel(row.role))}</span>`;
+    const status = row.is_active ? '<span class="pill">Active</span>' : '<span class="pill expired">Kicked out</span>';
+    let actions = '<small>Read only</small>';
+    if (row.is_self) actions = '<small>Current account</small>';
+    else if (row.can_manage) actions = `<div class="button-cluster">
+      <button type="button" class="link-btn" data-user-role="${escapeHtml(row.user_id)}">Change role</button>
+      <button type="button" class="link-btn" data-user-active="${escapeHtml(row.user_id)}">${row.is_active ? 'Kick out' : 'Reactivate'}</button>
+    </div>`;
+    return `<tr>
+      <td><strong>${escapeHtml(row.username)}</strong>${row.is_self ? '<br><small>You</small>' : ''}</td>
+      <td class="wrap">${escapeHtml(row.email || '—')}</td>
+      <td>${rolePill}</td>
+      <td>${status}</td>
+      <td>${fmtDateTime(row.registered_at)}</td>
+      <td>${fmtDateTime(row.last_sign_in_at)}</td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join('')}</tbody></table>` : emptyState('No registered users match the current filters.');
+}
+
+function openUserRoleDialog(userId) {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+  const row = state.data.users.find((user) => user.user_id === userId);
+  if (!row) return toast('User account not found. Refresh User Management and try again.', 'error');
+  if (row.is_self || !row.can_manage) return toast('This account cannot be changed by your current role.', 'error');
+
+  $('user-role-target-id').value = row.user_id;
+  $('user-role-current-role').value = row.role;
+  $('user-role-target-info').innerHTML = `<strong>${escapeHtml(row.username)}</strong> · ${escapeHtml(row.email || '—')}<br>Current role: <strong>${escapeHtml(userRoleLabel(row.role))}</strong> · Status: <strong>${row.is_active ? 'Active' : 'Kicked out'}</strong>`;
+
+  const allowedRoles = isOwner()
+    ? ['user','supervisor','admin','owner']
+    : ['user','supervisor'];
+  const currentAllowed = allowedRoles.includes(row.role);
+  $('user-role-select').innerHTML = `${currentAllowed ? '' : '<option value="" selected disabled>Choose demotion role</option>'}${allowedRoles.map((role) =>
+    `<option value="${role}" ${row.role === role ? 'selected' : ''}>${escapeHtml(userRoleLabel(role))}</option>`
+  ).join('')}`;
+  $('user-owner-password').value = '';
+  syncOwnerPromotionPasswordField();
+  $('user-role-dialog').showModal();
+}
+
+function syncOwnerPromotionPasswordField() {
+  const currentRole = $('user-role-current-role').value;
+  const newRole = $('user-role-select').value;
+  const required = isOwner() && newRole === 'owner' && currentRole !== 'owner';
+  $('user-owner-password-wrap').classList.toggle('hidden', !required);
+  $('user-owner-password').required = required;
+  if (!required) $('user-owner-password').value = '';
+}
+
+async function submitUserRoleChange(event) {
+  event.preventDefault();
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+
+  const targetId = $('user-role-target-id').value;
+  const row = state.data.users.find((user) => user.user_id === targetId);
+  if (!row) return toast('User account not found. Refresh and try again.', 'error');
+  const newRole = $('user-role-select').value;
+  const ownerPassword = $('user-owner-password').value;
+  if (!newRole) return toast('Choose the new role first.', 'error');
+
+  if (newRole === row.role) {
+    $('user-role-dialog').close();
+    return toast('No role change was needed.');
+  }
+
+  if (isOwner() && newRole === 'owner' && row.role !== 'owner' && !ownerPassword) {
+    return toast('Enter the Owner-promotion password.', 'error');
+  }
+
+  if (!window.confirm(`Change ${row.username} from ${userRoleLabel(row.role)} to ${userRoleLabel(newRole)}?`)) return;
+
+  const button = event.submitter;
+  setBusy(button, true, 'Saving…');
+  const { error } = await supabase.rpc('set_managed_user_role', {
+    p_target_user_id: targetId,
+    p_new_role: newRole,
+    p_owner_password: ownerPassword || null
+  });
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  $('user-role-dialog').close();
+  $('user-owner-password').value = '';
+  state.data.users = [];
+  state.data.audit = [];
+  await loadUsers(true);
+  toast(`${row.username} is now ${userRoleLabel(newRole)}.`, 'success');
+}
+
+async function toggleManagedUserActive(userId) {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+  const row = state.data.users.find((user) => user.user_id === userId);
+  if (!row) return toast('User account not found. Refresh User Management and try again.', 'error');
+  if (row.is_self || !row.can_manage) return toast('This account cannot be changed by your current role.', 'error');
+
+  const nextActive = !row.is_active;
+  const action = nextActive ? 'reactivate' : 'kick out';
+  const message = nextActive
+    ? `Reactivate ${row.username}? They will be able to sign in and use the system again.`
+    : `Kick out ${row.username}? Their transaction history will be preserved. Active rack locks will be released. Empty open Sales Orders will be released, while partially picked open Sales Orders will be reassigned to you.`;
+  if (!window.confirm(message)) return;
+
+  const { data, error } = await supabase.rpc('set_managed_user_active', {
+    p_target_user_id: userId,
+    p_is_active: nextActive
+  });
+  if (error) return toast(friendlyError(error), 'error');
+
+  state.data.users = [];
+  state.data.audit = [];
+  await loadUsers(true);
+
+  const result = data?.[0] || {};
+  if (nextActive) {
+    toast(`${row.username} has been reactivated.`, 'success');
+  } else {
+    const details = [];
+    if (Number(result.released_lock_count || 0)) details.push(`${result.released_lock_count} rack lock(s) released`);
+    if (Number(result.released_empty_order_count || 0)) details.push(`${result.released_empty_order_count} empty SO(s) released`);
+    if (Number(result.reassigned_open_order_count || 0)) details.push(`${result.reassigned_open_order_count} partial SO(s) reassigned to you`);
+    toast(`${row.username} has been kicked out${details.length ? ` · ${details.join(' · ')}` : ''}.`, 'success');
+  }
 }
 
 async function loadHistory(force = false) {

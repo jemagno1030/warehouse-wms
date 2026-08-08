@@ -65,6 +65,7 @@
         <button data-screen="rackmap">Rack map</button>
         <button data-screen="expiry">Expiry alerts</button>
         <button data-screen="nonfefo" data-role-min="supervisor">Non-FEFO Compliance</button>
+        <button data-screen="users" data-role-min="admin">User Management</button>
         <button data-screen="history">History</button>
         <button data-screen="locations" data-role-min="supervisor">Locations & QR</button>
         <button data-screen="control">System control</button>
@@ -319,6 +320,24 @@
         </article>
       </section>
 
+
+      <section id="screen-users" class="screen">
+        <article class="card">
+          <div class="card-head">
+            <div><h3>Registered Users</h3><p>Manage WMS roles and account access. Admin sees non-owner accounts only; Owner sees every registered account.</p></div>
+          </div>
+          <div class="info-box"><strong>Authority:</strong> Admin can assign User or Supervisor roles and can demote/kick out any non-owner account. Owner can assign User, Supervisor, Admin, or Owner and can manage every other account. Promoting someone to Owner requires the Owner-promotion password.</div>
+          <div id="users-kpis" class="kpi-grid" style="margin-top:16px"></div>
+          <div class="filters grid">
+            <input id="users-search" placeholder="Search username, email, role, or status..." />
+            <select id="users-role"><option value="">All visible roles</option><option value="owner">Owner</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option><option value="user">User</option></select>
+            <select id="users-status"><option value="">All statuses</option><option value="ACTIVE">Active</option><option value="INACTIVE">Kicked out</option></select>
+          </div>
+          <p id="users-count" class="small-note">0 registered users</p>
+          <div id="users-table" class="table-wrap"></div>
+        </article>
+      </section>
+
       <section id="screen-history" class="screen">
         <article class="card">
           <div class="card-head"><div><h3>Transaction history</h3><p>Every movement, FEFO override, edit, and system-control action</p></div><button class="secondary export-btn" data-export="history">Export CSV</button></div>
@@ -444,6 +463,20 @@
       <p class="small-note">Enter N/A when a barcode type is unavailable. At least one actual barcode must remain registered.</p>
       <label>Reason for edit *<textarea id="sku-master-edit-reason" required placeholder="Example: corrected barcode, corrected variant, corrected size"></textarea></label>
       <button class="primary" type="submit">Save SKU master edit</button>
+    </form>
+  </dialog>
+
+
+  <dialog id="user-role-dialog" class="edit-dialog">
+    <div class="scanner-head"><div><h3>Change User Role</h3><p>Promotion and demotion are enforced by your own role in Supabase.</p></div><button id="user-role-close" class="icon-button" type="button">✕</button></div>
+    <form id="user-role-form" class="stack">
+      <input id="user-role-target-id" type="hidden" />
+      <input id="user-role-current-role" type="hidden" />
+      <div id="user-role-target-info" class="info-box"></div>
+      <label>New role<select id="user-role-select" required></select></label>
+      <label id="user-owner-password-wrap" class="hidden">Owner-promotion password *<input id="user-owner-password" type="password" autocomplete="off" /></label>
+      <p class="small-note">The Owner-promotion password is required only when a non-owner account is being promoted to Owner. The password is validated against a hash in Supabase and is not written to Audit History.</p>
+      <button class="primary" type="submit">Save role change</button>
     </form>
   </dialog>
 
