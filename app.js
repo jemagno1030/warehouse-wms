@@ -506,7 +506,7 @@ async function loadScreen(name, force = false) {
 
 async function loadDashboard() {
   const [inventoryRes, locationRes, historyRes] = await Promise.all([
-    supabase.from('v_inventory_details').select('*').limit(5000),
+    supabase.from('v_inventory_details').select('*').limit(10000),
     supabase.from('v_location_summary').select('*').limit(5000),
     supabase.from('v_history_details').select('*').order('created_at', { ascending: false }).limit(12)
   ]);
@@ -541,7 +541,95 @@ async function loadDashboard() {
     ['Time', (r) => fmtDateTime(r.created_at)]
   ]) : emptyState('No transactions yet.');
 
+  renderDashboardConsolidation(inventory);
+
   if (locked) toast(`${locked} location${locked === 1 ? '' : 's'} currently locked for active work.`);
+}
+
+function normalizedConsolidationText(value) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function renderDashboardConsolidation(inventory) {
+  const container = $('dashboard-consolidation');
+  if (!container) return;
+
+  // Physical stock only. PENDING is not a rack and a Shipper HEADER is a virtual
+  // 1-CASE representation of the sealed physical box, not an additional SKU lot.
+  const physicalRows = (inventory || []).filter((r) =>
+    !r.is_pending &&
+    Number(r.qty || 0) > 0 &&
+    String(r.shipper_lot_role || '').toUpperCase() !== 'HEADER'
+  );
+
+  const groups = new Map();
+  physicalRows.forEach((r) => {
+    const key = [
+      normalizedConsolidationText(r.brand),
+      normalizedConsolidationText(r.description),
+      normalizedConsolidationText(r.variant),
+      normalizedConsolidationText(r.size),
+      normalizedConsolidationText(r.container_no),
+      String(r.expiry_date || '')
+    ].join('|');
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        sku_name: [r.brand, r.description, r.variant, r.size].filter(Boolean).join(' '),
+        container_no: r.container_no,
+        expiry_date: r.expiry_date,
+        balances: { PIECE: 0, PACK: 0, CASE: 0 },
+        locations: new Map()
+      });
+    }
+
+    const group = groups.get(key);
+    const uom = String(r.uom || '').toUpperCase();
+    group.balances[uom] = (group.balances[uom] || 0) + Number(r.qty || 0);
+
+    if (!group.locations.has(r.location_code)) {
+      group.locations.set(r.location_code, {
+        code: r.location_code,
+        sort_order: Number(r.location_sort_order ?? Number.MAX_SAFE_INTEGER),
+        balances: { PIECE: 0, PACK: 0, CASE: 0 },
+        shipper_boxes: new Set()
+      });
+    }
+    const loc = group.locations.get(r.location_code);
+    loc.balances[uom] = (loc.balances[uom] || 0) + Number(r.qty || 0);
+    if (r.shipper_box_no) loc.shipper_boxes.add(r.shipper_box_no);
+  });
+
+  const opportunities = [...groups.values()]
+    .filter((g) => g.locations.size > 1)
+    .sort((a, b) => b.locations.size - a.locations.size || a.sku_name.localeCompare(b.sku_name) || String(a.container_no).localeCompare(String(b.container_no)));
+
+  $('dashboard-consolidation-count').textContent = `${opportunities.length} opportunit${opportunities.length === 1 ? 'y' : 'ies'}`;
+
+  if (!opportunities.length) {
+    container.innerHTML = emptyState('No current stock with the same SKU details, container, and expiry is spread across multiple physical rack locations.');
+    return;
+  }
+
+  container.innerHTML = `<div class="table-wrap"><table><thead><tr>
+    <th>SKU</th><th>Container</th><th>Expiry</th><th>Total stock</th><th>Rack locations to consolidate</th><th>Rack count</th>
+  </tr></thead><tbody>${opportunities.map((g) => {
+    const locations = [...g.locations.values()]
+      .sort((a, b) => a.sort_order - b.sort_order || String(a.code).localeCompare(String(b.code), undefined, { numeric: true }))
+      .map((loc) => {
+        const boxes = [...loc.shipper_boxes].sort();
+        const shipperText = boxes.length ? ` · ${boxes.map((box) => escapeHtml(box)).join(', ')}` : '';
+        return `<strong>${escapeHtml(loc.code)}</strong> — ${formatBalances(loc.balances)}${shipperText}`;
+      }).join('<br>');
+    return `<tr>
+      <td class="wrap"><strong>${escapeHtml(g.sku_name)}</strong></td>
+      <td>${escapeHtml(g.container_no)}</td>
+      <td>${fmtDate(g.expiry_date)}</td>
+      <td>${formatBalances(g.balances)}</td>
+      <td class="wrap">${locations}</td>
+      <td><strong>${g.locations.size}</strong></td>
+    </tr>`;
+  }).join('')}</tbody></table></div>`;
 }
 
 function miniTable(rows, columns) {
@@ -2765,10 +2853,19 @@ function renderRackMap() {
     return `<section class="rack-row-group">
       <div class="rack-row-heading"><h4>${escapeHtml(groupTitle)}</h4><span>${occupiedCount} occupied · ${groupRows.length} locations</span></div>
       <div class="rack-row-grid">${groupRows.map((r) => {
-        const occupied = Number(r.total_piece_qty) > 0 || Number(r.total_pack_qty) > 0 || Number(r.total_case_qty) > 0;
-        const cls = r.is_pending ? 'pending' : r.is_locked ? 'locked' : occupied ? 'occupied' : '';
+        const pieceQty = Number(r.total_piece_qty || 0);
+        const packQty = Number(r.total_pack_qty || 0);
+        const caseQty = Number(r.total_case_qty || 0);
+        const occupied = pieceQty > 0 || packQty > 0 || caseQty > 0;
+        const lowVolumeReasons = [];
+        if (caseQty > 0 && caseQty < 20) lowVolumeReasons.push(`${caseQty} CASE < 20`);
+        if (packQty > 0 && packQty < 200) lowVolumeReasons.push(`${packQty} PACK < 200`);
+        if (pieceQty > 0 && pieceQty < 500) lowVolumeReasons.push(`${pieceQty} PIECE < 500`);
+        const lowVolume = occupied && !r.is_pending && !r.is_locked && lowVolumeReasons.length > 0;
+        const cls = r.is_pending ? 'pending' : r.is_locked ? 'locked' : lowVolume ? 'low-volume' : occupied ? 'occupied' : '';
         return `<div class="rack-cell ${cls}"><h4>${escapeHtml(r.location_code)}</h4>
-          <p>${r.is_locked ? `Locked by ${escapeHtml(r.locked_by)} for ${escapeHtml(r.lock_operation)}` : occupied ? `${r.sku_count} SKU(s) · ${formatBalances({ PIECE: r.total_piece_qty, PACK: r.total_pack_qty, CASE: r.total_case_qty })}` : 'Empty location'}</p>
+          <p>${r.is_locked ? `Locked by ${escapeHtml(r.locked_by)} for ${escapeHtml(r.lock_operation)}` : occupied ? `${r.sku_count} SKU(s) · ${formatBalances({ PIECE: pieceQty, PACK: packQty, CASE: caseQty })}` : 'Empty location'}</p>
+          ${lowVolume ? `<p><strong>Low-volume:</strong> ${escapeHtml(lowVolumeReasons.join(' · '))}</p>` : ''}
           <p>${r.containers ? `Containers: ${escapeHtml(r.containers)}` : r.is_pending ? 'Virtual pending area' : 'No container'}</p></div>`;
       }).join('')}</div>
     </section>`;

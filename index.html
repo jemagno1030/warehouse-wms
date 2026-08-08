@@ -9,6 +9,10 @@
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="styles.css" />
+  <style>
+    .dot.low-volume { background: #0b84a5; }
+    .rack-cell.low-volume { border-left-color: #0b84a5; background: #eef9fc; }
+  </style>
 </head>
 <body>
   <div id="toast-root" aria-live="polite"></div>
@@ -101,6 +105,10 @@
             <div id="dashboard-history"></div>
           </article>
         </div>
+        <article class="card" style="margin-top:18px">
+          <div class="card-head"><div><h3>SKU consolidation opportunities</h3><p>Same Brand + Description + Variant + Size + Container + Expiry currently spread across two or more physical racks</p></div><span id="dashboard-consolidation-count" class="pill">0 opportunities</span></div>
+          <div id="dashboard-consolidation" class="table-wrap"></div>
+        </article>
       </section>
 
       <section id="screen-putaway" class="screen">
@@ -278,7 +286,7 @@
       <section id="screen-rackmap" class="screen">
         <article class="card">
           <div class="card-head"><div><h3>Rack occupancy map</h3><p>Empty, occupied, locked, and pending locations</p></div></div>
-          <div class="legend"><span><i class="dot empty"></i>Empty</span><span><i class="dot occupied"></i>Occupied</span><span><i class="dot locked"></i>Locked</span><span><i class="dot pending"></i>Pending</span></div>
+          <div class="legend"><span><i class="dot empty"></i>Empty</span><span><i class="dot occupied"></i>Occupied</span><span><i class="dot low-volume"></i>Low volume (1–19 CASE / 1–199 PACK / 1–499 PIECE)</span><span><i class="dot locked"></i>Locked</span><span><i class="dot pending"></i>Pending</span></div>
           <div class="filters rack-filters">
             <select id="rack-map-row"><option value="">All rack rows</option></select>
             <input id="rack-map-search" placeholder="Search rack, container, or user..." />
