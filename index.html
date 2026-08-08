@@ -106,6 +106,16 @@
             <div id="dashboard-history"></div>
           </article>
         </div>
+        <div class="content-grid two" style="margin-top:18px">
+          <article class="card">
+            <div class="card-head"><div><h3>Pending / unfinished Sales Orders</h3><p>Sales Orders with at least one saved rack pick but not yet finished. The picker shown is the user the Sales Order remains locked to.</p></div><span id="dashboard-pending-sales-orders-count" class="pill">0 pending</span></div>
+            <div id="dashboard-pending-sales-orders" class="table-wrap"></div>
+          </article>
+          <article class="card">
+            <div class="card-head"><div><h3>Current rack locks</h3><p>Active rack locations currently locked for Picking or Stock Transfer. Use Refresh for the latest status.</p></div><span id="dashboard-active-rack-locks-count" class="pill">0 active</span></div>
+            <div id="dashboard-active-rack-locks" class="table-wrap"></div>
+          </article>
+        </div>
         <article class="card" style="margin-top:18px">
           <div class="card-head"><div><h3>SKU consolidation opportunities</h3><p>Same Brand + Description + Variant + Size + Container + Expiry currently spread across two or more physical racks</p></div><span id="dashboard-consolidation-count" class="pill">0 opportunities</span></div>
           <div id="dashboard-consolidation" class="table-wrap"></div>

@@ -580,12 +580,14 @@ async function loadScreen(name, force = false) {
 }
 
 async function loadDashboard() {
-  const [inventoryRes, locationRes, historyRes] = await Promise.all([
+  const [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes] = await Promise.all([
     supabase.from('v_inventory_details').select('*').limit(10000),
     supabase.from('v_location_summary').select('*').limit(5000),
-    supabase.from('v_history_details').select('*').order('created_at', { ascending: false }).limit(12)
+    supabase.from('v_history_details').select('*').order('created_at', { ascending: false }).limit(12),
+    supabase.rpc('get_dashboard_pending_pick_sales_orders'),
+    supabase.rpc('get_dashboard_active_location_locks')
   ]);
-  [inventoryRes, locationRes, historyRes].forEach((r) => { if (r.error) throw r.error; });
+  [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes].forEach((r) => { if (r.error) throw r.error; });
   const inventory = inventoryRes.data || [];
   const locations = locationRes.data || [];
   const attention = inventory.filter((r) => r.expiry_status !== 'OK');
@@ -616,9 +618,56 @@ async function loadDashboard() {
     ['Time', (r) => fmtDateTime(r.created_at)]
   ]) : emptyState('No transactions yet.');
 
+  renderDashboardPendingSalesOrders(pendingSoRes.data || []);
+  renderDashboardActiveLocks(activeLocksRes.data || []);
   renderDashboardConsolidation(inventory);
 
   if (locked) toast(`${locked} location${locked === 1 ? '' : 's'} currently locked for active work.`);
+}
+
+function renderDashboardPendingSalesOrders(rows) {
+  const container = $('dashboard-pending-sales-orders');
+  const count = $('dashboard-pending-sales-orders-count');
+  if (!container || !count) return;
+
+  count.textContent = `${rows.length} pending`;
+  if (!rows.length) {
+    container.innerHTML = emptyState('No Sales Order has saved rack picks waiting for Finish Sales Order.');
+    return;
+  }
+
+  container.innerHTML = `<div class="table-wrap"><table><thead><tr>
+    <th>Sales Order</th><th>Picker / locked to</th><th>Completed rack picks</th><th>Started</th><th>Last saved pick</th>
+  </tr></thead><tbody>${rows.map((r) => `<tr>
+    <td><strong>${escapeHtml(r.sales_order)}</strong></td>
+    <td>${escapeHtml(r.picker_username || '—')}</td>
+    <td>${Number(r.completed_rack_picks || 0).toLocaleString()}</td>
+    <td>${fmtDateTime(r.started_at)}</td>
+    <td>${fmtDateTime(r.last_pick_at)}</td>
+  </tr>`).join('')}</tbody></table></div>`;
+}
+
+function renderDashboardActiveLocks(rows) {
+  const container = $('dashboard-active-rack-locks');
+  const count = $('dashboard-active-rack-locks-count');
+  if (!container || !count) return;
+
+  count.textContent = `${rows.length} active`;
+  if (!rows.length) {
+    container.innerHTML = emptyState('No rack location is currently locked for Picking or Stock Transfer.');
+    return;
+  }
+
+  container.innerHTML = `<div class="table-wrap"><table><thead><tr>
+    <th>Rack</th><th>Operation</th><th>User</th><th>Sales Order</th><th>Locked at</th><th>Lock expires</th>
+  </tr></thead><tbody>${rows.map((r) => `<tr>
+    <td><strong>${escapeHtml(r.location_code)}</strong></td>
+    <td>${escapeHtml(r.operation === 'PICK' ? 'Picking' : r.operation === 'TRANSFER' ? 'Stock Transfer' : r.operation)}</td>
+    <td>${escapeHtml(r.username || '—')}</td>
+    <td>${escapeHtml(r.sales_order || '—')}</td>
+    <td>${fmtDateTime(r.acquired_at)}</td>
+    <td>${fmtDateTime(r.expires_at)}</td>
+  </tr>`).join('')}</tbody></table></div>`;
 }
 
 function normalizedConsolidationText(value) {
