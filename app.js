@@ -200,11 +200,13 @@ function setupStaticEvents() {
   // Barcode entry must always remain exactly what the user typed/scanned.
   // Disable browser form-history/autocomplete so a partial code such as 12345
   // is never expanded to a previously used longer barcode.
-  ['pick-barcode', 'tr-barcode'].forEach((id) => {
+  ['pa-case', 'pa-pack', 'pa-piece', 'sp-case', 'sp-content-pack', 'pick-barcode', 'tr-barcode'].forEach((id) => {
     const input = $(id);
     input.setAttribute('autocomplete', 'off');
     // A unique field name prevents Chrome/form-history from treating this barcode
-    // field as the same previously completed input across visits.
+    // field as the same previously completed input across visits. This is important
+    // for real short barcodes such as 12345, which must never be expanded to a
+    // previously entered longer code.
     input.name = `wms-${id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     input.setAttribute('autocorrect', 'off');
     input.setAttribute('autocapitalize', 'off');
