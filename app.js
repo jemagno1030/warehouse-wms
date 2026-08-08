@@ -2369,7 +2369,7 @@ async function loadInventory(force = false) {
 
 function renderInventory() {
   const term = $('inventory-search').value.trim().toLowerCase();
-  const rows = state.data.inventory.filter((r) => [r.sku_name, r.brand, r.description, r.variant, r.size, r.container_no, r.location_code, r.expiry_date, r.uom, r.putaway_remarks, r.shipper_box_no, r.shipper_status, r.shipper_lot_role].join(' ').toLowerCase().includes(term));
+  const rows = state.data.inventory.filter((r) => [r.sku_name, r.brand, r.description, r.variant, r.size, r.container_no, r.location_code, r.expiry_date, r.uom, r.putaway_remarks, r.transfer_remarks, r.shipper_box_no, r.shipper_status, r.shipper_lot_role].join(' ').toLowerCase().includes(term));
   const grouped = new Map();
   rows.forEach((r) => {
     const item = grouped.get(r.sku_id) || { sku_name: r.sku_name, balances: { PIECE: 0, PACK: 0, CASE: 0 }, containers: new Set(), locations: new Set(), earliest: r.expiry_date };
@@ -2382,8 +2382,8 @@ function renderInventory() {
   const summaryRows = [...grouped.values()].sort((a, b) => a.sku_name.localeCompare(b.sku_name));
   $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
   const actionHeader = isSupervisor() ? '<th>Actions</th>' : '';
-  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => `<tr>
-    <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td>
+  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => `<tr>
+    <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
     ${isSupervisor() ? (r.shipper_box_id ? `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button><br><small>Shipper-safe correction · ${escapeHtml(r.shipper_box_no || '')}</small></td>` : `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button> <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button></td>`) : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching inventory.');
 }
