@@ -18,6 +18,13 @@ const qsa = (selector, root = document) => [...root.querySelectorAll(selector)];
 const fmtQty = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 3 });
 const fmtDate = (value) => value ? new Date(`${value}T00:00:00`).toLocaleDateString() : '—';
 const fmtDateTime = (value) => value ? new Date(value).toLocaleString() : '—';
+const localDateKey = (value) => {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
 const normalizeLocation = (value) => String(value || '').trim().replace(/^LOC:/i, '').toUpperCase();
 const normalizeBarcode = (value) => String(value || '').trim().toUpperCase() === 'N/A' ? 'N/A' : String(value || '').trim();
 const uomLabel = (uom) => ({ PIECE: 'piece', PACK: 'pack', CASE: 'case' }[String(uom || '').toUpperCase()] || String(uom || 'unit').toLowerCase());
@@ -78,7 +85,7 @@ const state = {
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
   transfer: freshOperationState(),
-  data: { inventory: [], skuMaster: [], containers: [], expiry: [], history: [], audit: [], locations: [], rackMap: [] },
+  data: { inventory: [], skuMaster: [], containers: [], expiry: [], nonFefo: [], history: [], audit: [], locations: [], rackMap: [] },
   selectedQrLocations: new Set()
 };
 
@@ -108,6 +115,7 @@ const screenMeta = {
   containers: ['Containers', 'Container consumption and remaining contents'],
   rackmap: ['Rack map', 'Visual location occupancy and active locks'],
   expiry: ['Expiry alerts', 'Expired and near-expiry stock'],
+  nonfefo: ['Non-FEFO Compliance', 'Confirmed picking transactions that disregarded FEFO'],
   history: ['History', 'Complete transaction and correction trail'],
   locations: ['Locations & QR', 'Rack master data and printable labels'],
   control: ['System control', 'Discreet global operational control']
@@ -241,6 +249,9 @@ function setupStaticEvents() {
   $('container-search').addEventListener('input', renderContainers);
   $('history-search').addEventListener('input', renderHistory);
   $('history-type').addEventListener('change', renderHistory);
+  $('nonfefo-search').addEventListener('input', renderNonFefoCompliance);
+  $('nonfefo-from').addEventListener('change', renderNonFefoCompliance);
+  $('nonfefo-to').addEventListener('change', renderNonFefoCompliance);
   $('rack-map-row').addEventListener('change', renderRackMap);
   $('rack-map-search').addEventListener('input', renderRackMap);
 
@@ -454,13 +465,14 @@ function canOpenScreen(name) {
   if (!name || !screenMeta[name] || !$(`screen-${name}`)) return false;
   if (name === 'locations' && !isSupervisor()) return false;
   if (name === 'skumaster' && !isSupervisor()) return false;
+  if (name === 'nonfefo' && !isSupervisor()) return false;
   if (name === 'control' && !isOwner()) return false;
   return true;
 }
 
 function showScreen(name) {
   if (!canOpenScreen(name)) {
-    if ((name === 'locations' || name === 'skumaster') && !isSupervisor()) toast('Supervisor access is required.', 'error');
+    if ((name === 'locations' || name === 'skumaster' || name === 'nonfefo') && !isSupervisor()) toast('Supervisor access is required.', 'error');
     if (name === 'control' && !isOwner()) toast('Owner access is required.', 'error');
     name = 'dashboard';
   }
@@ -484,6 +496,7 @@ async function loadScreen(name, force = false) {
     if (name === 'containers') await loadContainers(force);
     if (name === 'rackmap') await loadRackMap(force);
     if (name === 'expiry') await loadExpiry(force);
+    if (name === 'nonfefo') await loadNonFefoCompliance(force);
     if (name === 'history') await loadHistory(force);
     if (name === 'locations') await loadLocations(force);
   } catch (error) {
@@ -545,6 +558,7 @@ function invalidateReports() {
   state.data.skuMaster = [];
   state.data.containers = [];
   state.data.expiry = [];
+  state.data.nonFefo = [];
   state.data.history = [];
   state.data.audit = [];
   state.data.rackMap = [];
@@ -1847,6 +1861,10 @@ async function addSupervisorBarcodeBypass(lotId) {
   const effectiveRows = (fefoRows || []).filter((row) => Number(row.qty || 0) - (queuedByLot.get(row.lot_id) || 0) > 0);
   const earliestRow = effectiveRows?.[0] || null;
   const earliestSameUnit = earliestRow?.expiry_date || lot.expiry_date;
+  const fefoOverrideConfirmed = Boolean(earliestRow?.expiry_date && lot.expiry_date > earliestRow.expiry_date);
+  if (fefoOverrideConfirmed && !window.confirm('Are you sure you want to disregard the FEFO warning?')) {
+    return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
+  }
 
   state.pick.cart.push({
     lot_id: lot.lot_id,
@@ -1860,6 +1878,7 @@ async function addSupervisorBarcodeBypass(lotId) {
     earliest_expiry: earliestSameUnit,
     earliest_location: earliestRow?.location_code || state.pick.locationCode,
     earliest_container: earliestRow?.container_no || lot.container_no,
+    fefo_override_confirmed: fefoOverrideConfirmed,
     available: Number(lot.qty),
     uom: lot.uom,
     shipper_box_id: lot.shipper_box_id || null,
@@ -1886,7 +1905,7 @@ function updatePickFefoNote() {
   note.classList.remove('hidden');
 }
 
-function addOperationItem(operation) {
+async function addOperationItem(operation) {
   const pick = operation === 'pick';
   const opState = state[operation];
   const lotSelect = $(pick ? 'pick-lot' : 'tr-lot');
@@ -1919,6 +1938,11 @@ function addOperationItem(operation) {
   const already = opState.cart.filter((x) => x.lot_id === lot.lot_id).reduce((a, x) => a + Number(x.qty), 0);
   if (qty + already > Number(lot.qty)) return toast(`Cannot exceed available stock of ${fmtQtyUom(lot.qty, lot.uom)}.`, 'error');
 
+  const fefoOverrideConfirmed = Boolean(pick && lot.earliestExpiry && lot.expiry_date > lot.earliestExpiry);
+  if (fefoOverrideConfirmed && !window.confirm('Are you sure you want to disregard the FEFO warning?')) {
+    return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
+  }
+
   opState.cart.push({
     lot_id: lot.lot_id,
     qty,
@@ -1933,6 +1957,7 @@ function addOperationItem(operation) {
     earliest_expiry: lot.earliestExpiry,
     earliest_location: lot.earliestLocation || null,
     earliest_container: lot.earliestContainer || null,
+    fefo_override_confirmed: fefoOverrideConfirmed,
     available: Number(lot.qty),
     uom: lot.uom,
     shipper_box_id: lot.shipper_box_id || null,
@@ -1973,9 +1998,9 @@ function renderOperationCart(operation) {
     <td class="wrap">${pick
       ? (r.supervisor_bypass
         ? `<span class="pill override">Supervisor bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>`
-        : (normalizeBarcode(r.barcode) === 'N/A'
+        : `${normalizeBarcode(r.barcode) === 'N/A'
           ? `<span class="pill near">N/A ${escapeHtml((r.uom || '').toUpperCase())} selected</span>`
-          : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span>`))
+          : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span>`}${r.fefo_override_confirmed ? '<br><span class="pill override">FEFO override confirmed</span>' : ''}`)
       : (normalizeBarcode(r.barcode) === 'N/A'
         ? `<span class="pill near">N/A ${escapeHtml((r.uom || '').toUpperCase())} selected</span>`
         : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span><br><small>${escapeHtml(r.barcode || '')}</small>`)}</td>
@@ -2295,8 +2320,9 @@ async function completePicking() {
     p_location_code: state.pick.locationCode,
     p_lock_token: state.pick.lockToken,
     p_sales_order: $('pick-so').value.trim(),
-    p_items: state.pick.cart.map(({ lot_id, qty, barcode, supervisor_bypass, bypass_reason }) => ({
-      lot_id, qty, barcode, supervisor_bypass: Boolean(supervisor_bypass), bypass_reason: bypass_reason || null
+    p_items: state.pick.cart.map(({ lot_id, qty, barcode, supervisor_bypass, bypass_reason, fefo_override_confirmed }) => ({
+      lot_id, qty, barcode, supervisor_bypass: Boolean(supervisor_bypass), bypass_reason: bypass_reason || null,
+      fefo_override_confirmed: Boolean(fefo_override_confirmed)
     })),
     p_allow_fefo_override: requiresOverride,
     p_override_reason: reason,
@@ -2764,6 +2790,52 @@ function renderExpiry() {
   </tr>`).join('')}</tbody></table>` : emptyState('No expired or near-expiry stock.');
 }
 
+async function loadNonFefoCompliance(force = false) {
+  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+  if (!force && state.data.nonFefo.length) return renderNonFefoCompliance();
+  const { data, error } = await supabase
+    .from('v_non_fefo_compliance')
+    .select('*')
+    .order('confirmed_at', { ascending: false })
+    .limit(5000);
+  if (error) throw error;
+  state.data.nonFefo = data || [];
+  renderNonFefoCompliance();
+}
+
+function renderNonFefoCompliance() {
+  const term = $('nonfefo-search').value.trim().toLowerCase();
+  const from = $('nonfefo-from').value;
+  const to = $('nonfefo-to').value;
+  const rows = state.data.nonFefo.filter((r) => {
+    const date = localDateKey(r.confirmed_at);
+    const dateMatch = (!from || date >= from) && (!to || date <= to);
+    const haystack = [
+      r.transaction_no, r.sales_order, r.username, r.sku_name, r.uom,
+      r.selected_location_code, r.selected_container_no, r.selected_expiry,
+      r.recommended_location_code, r.recommended_container_no, r.recommended_expiry,
+      r.override_reason, r.shipper_box_no
+    ].join(' ').toLowerCase();
+    return dateMatch && haystack.includes(term);
+  });
+
+  const userCount = new Set(rows.map((r) => r.user_id)).size;
+  const txCount = new Set(rows.map((r) => r.transaction_id)).size;
+  $('nonfefo-count').textContent = `${rows.length.toLocaleString()} override line(s) · ${txCount.toLocaleString()} transaction(s) · ${userCount.toLocaleString()} user(s)`;
+  $('nonfefo-table').innerHTML = rows.length ? `<table><thead><tr>
+    <th>Confirmation time</th><th>Transaction / SO</th><th>User</th><th>SKU</th><th>Picked stock</th><th>FEFO stock that was bypassed</th><th>Qty</th><th>Reason</th>
+  </tr></thead><tbody>${rows.map((r) => `<tr>
+    <td>${fmtDateTime(r.confirmed_at)}</td>
+    <td><strong>${escapeHtml(r.transaction_no)}</strong><br><small>SO: ${escapeHtml(r.sales_order || '—')}</small></td>
+    <td>${escapeHtml(r.username || '—')}</td>
+    <td class="wrap"><strong>${escapeHtml(r.sku_name || '—')}</strong>${r.shipper_box_no ? `<br><small>${escapeHtml(r.shipper_box_no)}</small>` : ''}</td>
+    <td class="wrap"><strong>${fmtDate(r.selected_expiry)}</strong><br><small>${escapeHtml(r.selected_location_code || '—')} / ${escapeHtml(r.selected_container_no || '—')}</small></td>
+    <td class="wrap"><strong>${fmtDate(r.recommended_expiry)}</strong><br><small>${escapeHtml(r.recommended_location_code || '—')} / ${escapeHtml(r.recommended_container_no || '—')}</small></td>
+    <td>${fmtQtyUom(r.qty, r.uom)}</td>
+    <td class="wrap">${escapeHtml(r.override_reason || '—')}</td>
+  </tr>`).join('')}</tbody></table>` : emptyState('No Non-FEFO compliance records match the current filters.');
+}
+
 async function loadHistory(force = false) {
   if (!force && state.data.history.length && state.data.audit.length) { renderHistory(); return renderAuditHistory(); }
   const [historyRes, auditRes] = await Promise.all([
@@ -3039,6 +3111,7 @@ function exportDataset(name) {
   if (name === 'skumaster') rows = state.data.skuMaster;
   if (name === 'containers') rows = state.data.containers;
   if (name === 'expiry') rows = state.data.expiry;
+  if (name === 'nonfefo') rows = state.data.nonFefo;
   if (name === 'history') rows = state.data.history;
   if (name === 'audit') rows = state.data.audit;
   if (!rows.length) return toast('Load the report first; there is no data to export.', 'error');

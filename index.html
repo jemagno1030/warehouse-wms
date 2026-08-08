@@ -60,6 +60,7 @@
         <button data-screen="containers">Containers</button>
         <button data-screen="rackmap">Rack map</button>
         <button data-screen="expiry">Expiry alerts</button>
+        <button data-screen="nonfefo" data-role-min="supervisor">Non-FEFO Compliance</button>
         <button data-screen="history">History</button>
         <button data-screen="locations" data-role-min="supervisor">Locations & QR</button>
         <button data-screen="control">System control</button>
@@ -290,6 +291,23 @@
         <article class="card">
           <div class="card-head"><div><h3>Expiry alerts</h3><p>Expired items and items expiring within six months</p></div><button class="secondary export-btn" data-export="expiry">Export CSV</button></div>
           <div id="expiry-table" class="table-wrap"></div>
+        </article>
+      </section>
+
+      <section id="screen-nonfefo" class="screen">
+        <article class="card">
+          <div class="card-head">
+            <div><h3>Non-FEFO Compliance Report</h3><p>Confirmed picking lines where a user deliberately selected later-expiring stock while earlier non-expired stock remained available.</p></div>
+            <button class="secondary export-btn" data-export="nonfefo">Export CSV</button>
+          </div>
+          <div class="info-box"><strong>Access:</strong> Supervisors and Owner. Each record is created only after the picker confirms the FEFO warning and the rack pick is successfully completed.</div>
+          <div class="filters grid">
+            <input id="nonfefo-search" placeholder="Search transaction, SO, user, SKU, rack, container, or reason..." />
+            <label>From date<input id="nonfefo-from" type="date" /></label>
+            <label>To date<input id="nonfefo-to" type="date" /></label>
+          </div>
+          <p id="nonfefo-count" class="small-note">0 override line(s)</p>
+          <div id="nonfefo-table" class="table-wrap"></div>
         </article>
       </section>
 
