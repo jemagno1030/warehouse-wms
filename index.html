@@ -43,7 +43,7 @@
         <label>Email<input id="signup-email" type="email" autocomplete="email" required /></label>
         <label>Password<input id="signup-password" type="password" minlength="8" autocomplete="new-password" required /></label>
         <button class="primary" type="submit">Create account</button>
-        <p class="hint">New accounts start as regular users. A supervisor can promote accounts using the supplied SQL command.</p>
+        <p class="hint">New accounts start as regular users. Admins and Owners can manage account roles from User Management.</p>
       </form>
     </div>
   </section>
@@ -204,8 +204,8 @@
           <div id="pick-barcode-match" class="info-box hidden"></div>
           <div id="pick-qty-note" class="info-box hidden"></div>
           <div id="pick-so-status" class="info-box"><strong>Sales order status:</strong> enter a sales order number. A completed sales order cannot be reused by a regular user.</div>
-          <div id="pick-so-override-panel" class="warning-box hidden" data-role-min="supervisor">
-            <label><input id="pick-so-override" type="checkbox" /> Supervisor override: reopen this sales order if it was already completed</label>
+          <div id="pick-so-override-panel" class="warning-box hidden" data-role-min="admin">
+            <label><input id="pick-so-override" type="checkbox" /> Admin override: reopen this sales order if it was already completed</label>
             <label>Override reason<input id="pick-so-override-reason" type="text" placeholder="Required only when reusing a completed sales order" disabled /></label>
           </div>
           <div class="info-box"><strong>Barcode-controlled deduction:</strong> a CASE barcode deducts CASE stock, a PACK barcode deducts PACK stock, and a PIECE barcode deducts PIECE stock. If the required unit barcode is stored as N/A, enter N/A and select the exact eligible item. <strong>Shipper:</strong> scanning a Shipper CASE selects a complete SEALED physical box; scanning a child PACK barcode selects a specific content SKU/expiry and opens that box when picked.</div>
@@ -257,7 +257,7 @@
           <h4>SKU summary</h4>
           <div id="inventory-summary-table" class="table-wrap"></div>
           <h4>Detailed lots</h4>
-          <div class="info-box" data-role-min="supervisor"><strong>Owner / Supervisor inventory adjustment:</strong> Standard lots can be Edit/Delete. Shipper-linked lots can also be safely edited; the physical Shipper Box relationship is preserved. Every change requires a reason and is recorded in Audit History.</div>
+          <div class="info-box" data-role-min="admin"><strong>Admin / Owner inventory adjustment:</strong> Standard lots can be Edit/Delete. Shipper-linked lots can also be safely edited; the physical Shipper Box relationship is preserved. Every change requires a reason and is recorded in Audit History.</div>
           <div id="inventory-table" class="table-wrap"></div>
         </article>
       </section>
@@ -265,11 +265,11 @@
       <section id="screen-skumaster" class="screen">
         <article class="card">
           <div class="card-head">
-            <div><h3>SKU Masterlist</h3><p>Permanent STANDARD and SHIPPER SKU details used by Put-away barcode lookup. Supervisors can view; only the Owner can edit.</p></div>
+            <div><h3>SKU Masterlist</h3><p>Permanent STANDARD and SHIPPER SKU details used by Put-away barcode lookup. Supervisors can view; Admin and Owner can edit.</p></div>
             <button class="secondary export-btn" data-export="skumaster">Export CSV</button>
           </div>
           <div class="filters"><input id="sku-master-search" placeholder="Search brand, description, variant, size, barcode, or creator..." /></div>
-          <div class="info-box"><strong>Access:</strong> Supervisor = view only · Owner = view and edit. Owner edits are written to Audit History and affect future barcode lookups immediately.</div>
+          <div class="info-box"><strong>Access:</strong> Supervisor = view only · Admin / Owner = view and edit. Every edit requires a reason, is written to Audit History, and affects future barcode lookups immediately.</div>
           <p id="sku-master-count" class="small-note">0 SKU record(s) shown</p>
           <div id="sku-master-table" class="table-wrap"></div>
         </article>
@@ -309,7 +309,7 @@
             <div><h3>Non-FEFO Compliance Report</h3><p>Confirmed picking lines where a user deliberately selected later-expiring stock while earlier non-expired stock remained available.</p></div>
             <button class="secondary export-btn" data-export="nonfefo">Export CSV</button>
           </div>
-          <div class="info-box"><strong>Access:</strong> Supervisors and Owner. Each record is created only after the picker confirms the FEFO warning and the rack pick is successfully completed.</div>
+          <div class="info-box"><strong>Access:</strong> Supervisor and above. Each record is created only after the picker confirms the FEFO warning and the rack pick is successfully completed.</div>
           <div class="filters grid">
             <input id="nonfefo-search" placeholder="Search transaction, SO, user, SKU, rack, container, or reason..." />
             <label>From date<input id="nonfefo-from" type="date" /></label>
@@ -326,7 +326,7 @@
           <div class="card-head">
             <div><h3>Registered Users</h3><p>Manage WMS roles and account access. Admin sees non-owner accounts only; Owner sees every registered account.</p></div>
           </div>
-          <div class="info-box"><strong>Authority:</strong> Admin can assign User or Supervisor roles and can demote/kick out any non-owner account. Owner can assign User, Supervisor, Admin, or Owner and can manage every other account. Promoting someone to Owner requires the Owner-promotion password.</div>
+          <div class="info-box"><strong>Authority:</strong> Admin can assign User, Supervisor, or Admin roles and can demote/kick out any non-owner account. Owner can assign User, Supervisor, Admin, or Owner and can manage every other account. Only Owner can promote someone to Owner, and the Owner-promotion password is required.</div>
           <div id="users-kpis" class="kpi-grid" style="margin-top:16px"></div>
           <div class="filters grid">
             <input id="users-search" placeholder="Search username, email, role, or status..." />
@@ -393,7 +393,7 @@
           <article class="card">
             <h3>How it behaves</h3>
             <p>The pause and resume codes are different. The database validates them securely; the codes are not stored in this website.</p>
-            <p>Administrative Pause blocks put-away, picking, transfers, and supervisor corrections. Viewing reports remains available.</p>
+            <p>Administrative Pause blocks put-away, picking, transfers, and Admin/Owner corrections. Viewing reports remains available.</p>
             <p class="hint">Change the two placeholder codes in <code>supabase-schema.sql</code> before running it.</p>
           </article>
         </div>
@@ -414,7 +414,7 @@
   </dialog>
 
   <dialog id="edit-dialog" class="edit-dialog">
-    <div class="scanner-head"><div><h3>Supervisor correction</h3><p>Corrections update inventory while preserving the audit trail.</p></div><button id="edit-close" class="icon-button">✕</button></div>
+    <div class="scanner-head"><div><h3>Admin transaction correction</h3><p>Admin/Owner only. Corrections update inventory while preserving the audit trail.</p></div><button id="edit-close" class="icon-button">✕</button></div>
     <form id="edit-transaction-form" class="stack">
       <input id="edit-transaction-id" type="hidden" />
       <label>Sales order<input id="edit-sales-order" /></label>
@@ -425,7 +425,7 @@
   </dialog>
 
   <dialog id="inventory-adjust-dialog" class="edit-dialog">
-    <div class="scanner-head"><div><h3>Inventory lot adjustment</h3><p>Owner/Supervisor only. Changes are written to Audit History.</p></div><button id="inventory-adjust-close" class="icon-button" type="button">✕</button></div>
+    <div class="scanner-head"><div><h3>Inventory lot adjustment</h3><p>Admin/Owner only. Changes are written to Audit History.</p></div><button id="inventory-adjust-close" class="icon-button" type="button">✕</button></div>
     <form id="inventory-adjust-form" class="stack">
       <input id="inventory-adjust-lot-id" type="hidden" />
       <input id="inventory-adjust-shipper-box-id" type="hidden" />
@@ -447,7 +447,7 @@
   </dialog>
 
   <dialog id="sku-master-edit-dialog" class="edit-dialog">
-    <div class="scanner-head"><div><h3>Edit SKU Masterlist</h3><p>Owner only. Every edit requires a reason and is saved to Audit History.</p></div><button id="sku-master-edit-close" class="icon-button" type="button">✕</button></div>
+    <div class="scanner-head"><div><h3>Edit SKU Masterlist</h3><p>Admin/Owner only. Every edit requires a reason and is saved to Audit History.</p></div><button id="sku-master-edit-close" class="icon-button" type="button">✕</button></div>
     <form id="sku-master-edit-form" class="stack">
       <input id="sku-master-edit-id" type="hidden" />
       <div id="sku-master-edit-current" class="info-box"></div>

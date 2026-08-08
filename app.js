@@ -1368,17 +1368,17 @@ async function lockPickLocation() {
   if (!so || !location) return toast('Enter the sales order and scan the source location first.', 'error');
 
   // Verify the sales order immediately before locking. This prevents a stale status
-  // or a supervisor override left checked from a previously entered sales order.
+  // or an Admin override left checked from a previously entered sales order.
   const statusOk = await refreshPickSalesOrderStatus();
   if (!statusOk || !['NEW', 'OPEN', 'COMPLETED'].includes(state.pickOrder.status)) {
     return toast('The sales order status could not be verified. Please try again.', 'error');
   }
 
   const isCompletedOrder = state.pickOrder.status === 'COMPLETED';
-  const overrideCompleted = isSupervisor() && isCompletedOrder && $('pick-so-override').checked;
+  const overrideCompleted = isAdminOrOwner() && isCompletedOrder && $('pick-so-override').checked;
   const overrideReason = overrideCompleted ? $('pick-so-override-reason').value.trim() : '';
   if (overrideCompleted && !overrideReason) {
-    return toast('Enter the supervisor override reason before reopening a completed sales order.', 'error');
+    return toast('Enter the Admin override reason before reopening a completed sales order.', 'error');
   }
 
   const locked = await acquireOperationLock('pick', location, 'PICK', so, {
@@ -1412,11 +1412,11 @@ async function acquireOperationLock(operation, location, type, salesOrder, optio
   setBusy(button, false);
   if (error) {
     const message = friendlyError(error);
-    if (message.includes('SALES_ORDER_ALREADY_COMPLETED') && isSupervisor()) {
+    if (message.includes('SALES_ORDER_ALREADY_COMPLETED') && isAdminOrOwner()) {
       $('pick-so-override').checked = true;
       $('pick-so-override-reason').disabled = false;
       $('pick-so-override-reason').focus();
-      toast('This sales order is completed. Enter a supervisor override reason, then lock the rack again.', 'error');
+      toast('This sales order is completed. Enter an Admin override reason, then lock the rack again.', 'error');
       await refreshPickSalesOrderStatus();
       return false;
     }
@@ -2320,7 +2320,7 @@ function syncPickOverrideControls() {
   if (!checkbox || !reason) return;
 
   const completed = state.pickOrder.status === 'COMPLETED';
-  const available = isSupervisor() && completed && !state.pick.lockToken;
+  const available = isAdminOrOwner() && completed && !state.pick.lockToken;
 
   // The override belongs only to the completed sales order currently displayed.
   // Clear it as soon as the user switches to a NEW or OPEN sales order.
@@ -2375,7 +2375,7 @@ async function refreshPickSalesOrderStatus() {
       isCurrentOwner: Boolean(row.is_current_owner)
     };
     if (row.order_status === 'COMPLETED') {
-      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was completed ${row.completed_at ? `on ${escapeHtml(fmtDateTime(row.completed_at))}` : ''}. It cannot be reused unless a supervisor checks the override and records a reason.`;
+      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was completed ${row.completed_at ? `on ${escapeHtml(fmtDateTime(row.completed_at))}` : ''}. It cannot be reused unless an Admin or Owner checks the override and records a reason.`;
     } else {
       const lockMessage = row.is_current_owner
         ? ' · Sales Order number is locked until you finish this Sales Order.'
@@ -2544,15 +2544,15 @@ function renderInventory() {
   });
   const summaryRows = [...grouped.values()].sort((a, b) => a.sku_name.localeCompare(b.sku_name));
   $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
-  const actionHeader = isSupervisor() ? '<th>Actions</th>' : '';
+  const actionHeader = isAdminOrOwner() ? '<th>Actions</th>' : '';
   $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => `<tr>
     <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
-    ${isSupervisor() ? (r.shipper_box_id ? `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button><br><small>Shipper-safe correction · ${escapeHtml(r.shipper_box_no || '')}</small></td>` : `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button> <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button></td>`) : ''}
+    ${isAdminOrOwner() ? (r.shipper_box_id ? `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button><br><small>Shipper-safe correction · ${escapeHtml(r.shipper_box_no || '')}</small></td>` : `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button> <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button></td>`) : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching inventory.');
 }
 
 async function openInventoryLotEdit(lotId) {
-  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
 
@@ -2651,7 +2651,7 @@ async function openInventoryLotEdit(lotId) {
 
 async function submitInventoryLotEdit(event) {
   event.preventDefault();
-  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
 
   const lotId = $('inventory-adjust-lot-id').value;
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
@@ -2711,7 +2711,7 @@ async function submitInventoryLotEdit(event) {
 }
 
 async function deleteInventoryLot(lotId) {
-  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
   if (row.shipper_box_id) return toast('Shipper-linked lots can be corrected with Edit, but direct Delete remains protected so the physical box status cannot be broken.', 'error');
@@ -2765,7 +2765,7 @@ function renderSkuMaster() {
     r.created_by_username
   ].join(' ').toLowerCase().includes(term));
 
-  const actionHeader = isOwner() ? '<th>Owner action</th>' : '';
+  const actionHeader = isAdminOrOwner() ? '<th>Admin / Owner action</th>' : '';
   $('sku-master-table').innerHTML = rows.length ? `<table><thead><tr>
     <th>Type</th><th>Brand</th><th>Description</th><th>Variant</th><th>Size</th>
     <th>CASE barcode</th><th>PACK barcode</th><th>PIECE barcode</th>
@@ -2781,13 +2781,13 @@ function renderSkuMaster() {
     <td>${escapeHtml(r.piece_barcode)}</td>
     <td>${escapeHtml(r.created_by_username || '—')}</td>
     <td>${fmtDateTime(r.created_at)}</td>
-    ${isOwner() ? `<td><button class="link-btn" type="button" data-sku-master-edit="${escapeHtml(r.id)}">Edit</button></td>` : ''}
+    ${isAdminOrOwner() ? `<td><button class="link-btn" type="button" data-sku-master-edit="${escapeHtml(r.id)}">Edit</button></td>` : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching SKU master records.');
   $('sku-master-count').textContent = `${rows.length.toLocaleString()} of ${state.data.skuMaster.length.toLocaleString()} SKU record(s) shown`;
 }
 
 function openSkuMasterEdit(skuId) {
-  if (!isOwner()) return toast('Owner access is required to edit the SKU Masterlist.', 'error');
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required to edit the SKU Masterlist.', 'error');
   const sku = state.data.skuMaster.find((row) => row.id === skuId);
   if (!sku) return toast('SKU master record was not found. Refresh the SKU Masterlist and try again.', 'error');
 
@@ -2810,7 +2810,7 @@ function openSkuMasterEdit(skuId) {
 
 async function submitSkuMasterEdit(event) {
   event.preventDefault();
-  if (!isOwner()) return toast('Owner access is required to edit the SKU Masterlist.', 'error');
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required to edit the SKU Masterlist.', 'error');
 
   const brand = $('sku-master-edit-brand').value.trim();
   const description = $('sku-master-edit-description').value.trim();
@@ -3094,7 +3094,7 @@ function openUserRoleDialog(userId) {
 
   const allowedRoles = isOwner()
     ? ['user','supervisor','admin','owner']
-    : ['user','supervisor'];
+    : ['user','supervisor','admin'];
   const currentAllowed = allowedRoles.includes(row.role);
   $('user-role-select').innerHTML = `${currentAllowed ? '' : '<option value="" selected disabled>Choose demotion role</option>'}${allowedRoles.map((role) =>
     `<option value="${role}" ${row.role === role ? 'selected' : ''}>${escapeHtml(userRoleLabel(role))}</option>`
@@ -3220,7 +3220,7 @@ function renderHistory() {
       <td>${escapeHtml(r.created_by_username)}<br><small>${fmtDateTime(r.created_at)}</small></td><td>${escapeHtml(r.sales_order || '—')}</td><td>${escapeHtml(r.location_code || '—')}</td>
       <td class="wrap">${escapeHtml(r.sku_name || 'System action')}<br><small>${escapeHtml(r.container_no || '')} ${r.expiry_date ? `· ${fmtDate(r.expiry_date)}` : ''}${r.shipper_box_no ? ` · ${escapeHtml(r.shipper_box_no)}` : ''}</small>${r.line_note ? `<br><small>${escapeHtml(r.line_note)}</small>` : ''}</td>
       <td>${r.signed_qty == null ? '—' : fmtQtyUom(r.signed_qty, r.uom)}</td><td class="wrap">${flags}${r.shipper_action ? `<br><span class="pill near">${escapeHtml(r.shipper_action)}</span>` : ''}${r.barcode_bypassed ? `<br><small>Bypass by ${escapeHtml(r.bypassed_by_username || r.created_by_username)}: ${escapeHtml(r.bypass_reason || '')}</small>` : ''}${first && r.override_reason ? `<br><small>${escapeHtml(r.override_reason)}</small>` : ''}${first && r.edit_reason ? `<br><small>Edit: ${escapeHtml(r.edit_reason)}</small>` : ''}</td>
-      <td>${first && isSupervisor() && ['PUTAWAY','PICK','TRANSFER'].includes(r.transaction_type) && !rows.some((x) => x.transaction_id === r.transaction_id && x.shipper_box_id) ? `<button class="link-btn" data-edit-transaction="${r.transaction_id}">Correct</button>` : (first && r.shipper_box_id ? '<small>Shipper transaction protected</small>' : '')}</td></tr>`;
+      <td>${first && isAdminOrOwner() && ['PUTAWAY','PICK','TRANSFER'].includes(r.transaction_type) && !rows.some((x) => x.transaction_id === r.transaction_id && x.shipper_box_id) ? `<button class="link-btn" data-edit-transaction="${r.transaction_id}">Correct</button>` : (first && r.shipper_box_id ? '<small>Shipper transaction protected</small>' : '')}</td></tr>`;
   }).join('')}</tbody></table>` : emptyState('No matching history.');
 }
 
@@ -3232,7 +3232,7 @@ function renderAuditHistory() {
 }
 
 async function openSupervisorEdit(transactionId) {
-  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
   const { data, error } = await supabase.from('v_history_details').select('*').eq('transaction_id', transactionId).order('line_no');
   if (error) return toast(friendlyError(error), 'error');
   const rows = data || [];
@@ -3258,6 +3258,7 @@ async function openSupervisorEdit(transactionId) {
 
 async function submitSupervisorEdit(event) {
   event.preventDefault();
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
   const button = event.submitter;
   const lineCorrections = qsa('[data-edit-card]', $('edit-lines')).map((card) => ({
     line_id: card.dataset.lineId,
