@@ -1648,6 +1648,7 @@ async function loadOperationLots(operation) {
         .select('lot_id,sku_id,expiry_date,location_code,container_no,qty,uom')
         .in('sku_id', skuIds)
         .gt('qty', 0)
+        .neq('expiry_status', 'EXPIRED')
         .order('expiry_date');
       if (error) return toast(friendlyError(error), 'error');
       fefoRows = data || [];
@@ -1721,7 +1722,7 @@ async function loadOperationLots(operation) {
   const [{ data: rackRows, error: rackError }, fefoResult] = await Promise.all([
     supabase.from('v_inventory_details').select('*').eq('location_code', opState.locationCode).in('sku_id', skuIds).order('sku_name').order('uom').order('expiry_date').order('container_no'),
     pick
-      ? supabase.from('v_inventory_details').select('lot_id,sku_id,expiry_date,location_code,container_no,qty,uom').in('sku_id', skuIds).gt('qty', 0).order('expiry_date')
+      ? supabase.from('v_inventory_details').select('lot_id,sku_id,expiry_date,location_code,container_no,qty,uom').in('sku_id', skuIds).gt('qty', 0).neq('expiry_status', 'EXPIRED').order('expiry_date')
       : Promise.resolve({ data: [], error: null })
   ]);
   if (rackError || fefoResult.error) return toast(friendlyError(rackError || fefoResult.error), 'error');
@@ -1836,6 +1837,7 @@ async function addSupervisorBarcodeBypass(lotId) {
     .eq('sku_id', lot.sku_id)
     .eq('uom', lot.uom)
     .gt('qty', 0)
+    .neq('expiry_status', 'EXPIRED')
     .order('expiry_date');
   if (earliestError) return toast(friendlyError(earliestError), 'error');
   const queuedByLot = new Map();
@@ -1880,7 +1882,7 @@ function updatePickFefoNote() {
   const where = lot.earliestLocation
     ? ` at <strong>${escapeHtml(lot.earliestLocation)}</strong>${lot.earliestContainer ? ` / container <strong>${escapeHtml(lot.earliestContainer)}</strong>` : ''}`
     : '';
-  note.innerHTML = `FEFO warning: selected expiry <strong>${fmtDate(lot.expiry_date)}</strong>, but the earliest CURRENT positive stock expires <strong>${fmtDate(lot.earliestExpiry)}</strong>${where}. Completing this line will be recorded as an override.`;
+  note.innerHTML = `FEFO warning: selected expiry <strong>${fmtDate(lot.expiry_date)}</strong>, but the earliest CURRENT non-expired positive stock expires <strong>${fmtDate(lot.earliestExpiry)}</strong>${where}. Completing this line will be recorded as an override.`;
   note.classList.remove('hidden');
 }
 
