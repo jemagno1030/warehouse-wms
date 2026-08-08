@@ -588,14 +588,20 @@ function hidePutawayDuplicateWarning() {
 
 async function resolvePutawaySku() {
   const sequence = ++state.putaway.lookupSequence;
-  const entered = ['pa-piece', 'pa-pack', 'pa-case'].map((id) => {
-    const value = normalizeBarcode($(id).value);
-    $(id).value = value;
-    return value;
-  });
-  const actualBarcodes = [...new Set(entered.filter((value) => value && value !== 'N/A').map((value) => value.toLowerCase()))];
+  const fields = [
+    { id: 'pa-piece', expectedType: 'PIECE', label: 'PIECE' },
+    { id: 'pa-pack', expectedType: 'PACK', label: 'PACK' },
+    { id: 'pa-case', expectedType: 'CASE', label: 'CASE' }
+  ];
 
-  if (!actualBarcodes.length) {
+  const entered = fields.map((field) => {
+    const value = normalizeBarcode($(field.id).value);
+    $(field.id).value = value;
+    return { ...field, value };
+  });
+  const actualEntries = entered.filter((entry) => entry.value && entry.value !== 'N/A');
+
+  if (!actualEntries.length) {
     state.putaway.matchedSkuId = null;
     setPutawayDetailsReadonly(false);
     $('pa-match-note').classList.add('hidden');
@@ -603,53 +609,95 @@ async function resolvePutawaySku() {
     return 'new';
   }
 
-  const responses = await Promise.all(actualBarcodes.map((barcode) => supabase.rpc('find_sku_by_barcode', { p_barcode: barcode })));
+  // Barcode uniqueness is category-scoped: CASE is unique among CASE codes,
+  // PACK among PACK codes, and PIECE among PIECE codes. The same text may
+  // legitimately exist in another barcode category, so cross-category matches
+  // are warnings only and never rewrite the user's field.
+  const responses = await Promise.all(actualEntries.map(async (entry) => {
+    const [typed, all] = await Promise.all([
+      supabase.rpc('find_sku_by_barcode_type', { p_barcode: entry.value, p_barcode_type: entry.expectedType }),
+      supabase.rpc('find_sku_barcode_matches', { p_barcode: entry.value })
+    ]);
+    return { entry, typed, all };
+  }));
   if (sequence !== state.putaway.lookupSequence) return 'stale';
-  const failed = responses.find((response) => response.error);
-  if (failed) { toast(friendlyError(failed.error), 'error'); return 'error'; }
 
-  const matches = uniqueBy(responses.flatMap((response) => response.data || []), (row) => row.id);
+  const failed = responses.find((response) => response.typed.error || response.all.error);
+  if (failed) return toast(friendlyError(failed.typed.error || failed.all.error), 'error') || 'error';
+
+  const typedRows = responses.flatMap((response) => response.typed.data?.[0] ? [response.typed.data[0]] : []);
+  const matches = uniqueBy(typedRows, (row) => row.id);
+
   if (matches.length > 1) {
     state.putaway.matchedSkuId = null;
     setPutawayDetailsReadonly(false);
-    $('pa-match-note').innerHTML = '<strong>Barcode conflict:</strong> the entered codes point to different stored SKUs. Check all three barcodes.';
+    $('pa-match-note').innerHTML = '<strong>Barcode conflict:</strong> the entered CASE/PACK/PIECE codes belong to different stored SKUs in their respective barcode categories. Nothing was auto-filled; check the entered barcodes.';
     $('pa-match-note').classList.remove('hidden');
-    toast('The entered barcodes point to different stored SKUs.', 'error');
+    toast('The entered barcodes belong to different stored SKUs.', 'error');
     return 'conflict';
   }
 
   const sku = matches[0];
-  if (!sku) {
-    state.putaway.matchedSkuId = null;
-    setPutawayDetailsReadonly(false);
-    $('pa-match-note').classList.add('hidden');
-    await checkPutawayDuplicateDetails();
-    return 'new';
-  }
+  if (sku) {
+    // Once any correctly categorized barcode identifies an existing SKU, every
+    // manually entered category must agree with that SKU's stored master record.
+    for (const entry of actualEntries) {
+      const stored = normalizeBarcode(sku[`${entry.expectedType.toLowerCase()}_barcode`]);
+      if (entry.value.toLowerCase() !== stored.toLowerCase()) {
+        state.putaway.matchedSkuId = null;
+        setPutawayDetailsReadonly(false);
+        $('pa-match-note').innerHTML = `<strong>Barcode conflict:</strong> the entered ${escapeHtml(entry.expectedType)} barcode ${escapeHtml(entry.value)} does not match the stored ${escapeHtml(entry.expectedType)} barcode for the SKU identified by the other field(s). Nothing was auto-filled.`;
+        $('pa-match-note').classList.remove('hidden');
+        toast(`The entered ${entry.expectedType} barcode does not match the stored SKU.`, 'error');
+        return 'conflict';
+      }
+    }
 
-  const { data: skuTypeRow, error: skuTypeError } = await supabase.from('skus').select('sku_type').eq('id', sku.id).single();
-  if (skuTypeError) { toast(friendlyError(skuTypeError), 'error'); return 'error'; }
-  if (String(skuTypeRow?.sku_type || 'STANDARD').toUpperCase() === 'SHIPPER') {
-    state.putaway.matchedSkuId = null;
-    setPutawayDetailsReadonly(false);
-    $('pa-match-note').innerHTML = '<strong>Shipper CASE barcode detected.</strong> Change Put-away type to <strong>Shipper Box</strong> so the physical box contents and expiry lots can be encoded.';
+    if (String(sku.sku_type || 'STANDARD').toUpperCase() === 'SHIPPER') {
+      state.putaway.matchedSkuId = null;
+      setPutawayDetailsReadonly(false);
+      $('pa-match-note').innerHTML = '<strong>Shipper CASE barcode detected.</strong> Change Put-away type to <strong>Shipper Box</strong> so the physical box contents and expiry lots can be encoded.';
+      $('pa-match-note').classList.remove('hidden');
+      return 'error';
+    }
+
+    $('pa-piece').value = sku.piece_barcode;
+    $('pa-pack').value = sku.pack_barcode;
+    $('pa-case').value = sku.case_barcode;
+    $('pa-brand').value = sku.brand;
+    $('pa-description').value = sku.description;
+    $('pa-variant').value = sku.variant;
+    $('pa-size').value = sku.size;
+    state.putaway.matchedSkuId = sku.id;
+    setPutawayDetailsReadonly(true);
+    hidePutawayDuplicateWarning();
+    $('pa-match-note').innerHTML = 'Existing SKU found through the <strong>matching barcode category</strong>. The stored CASE/PACK/PIECE barcode set and SKU details were loaded from the database.';
     $('pa-match-note').classList.remove('hidden');
-    return 'error';
+    return 'existing';
   }
 
-  $('pa-piece').value = sku.piece_barcode;
-  $('pa-pack').value = sku.pack_barcode;
-  $('pa-case').value = sku.case_barcode;
-  $('pa-brand').value = sku.brand;
-  $('pa-description').value = sku.description;
-  $('pa-variant').value = sku.variant;
-  $('pa-size').value = sku.size;
-  state.putaway.matchedSkuId = sku.id;
-  setPutawayDetailsReadonly(true);
-  hidePutawayDuplicateWarning();
-  $('pa-match-note').innerHTML = `Existing SKU found through a stored barcode. The complete CASE/PACK/PIECE barcode set and SKU details were loaded from the database.`;
-  $('pa-match-note').classList.remove('hidden');
-  return 'existing';
+  // No same-category match exists. Warn about any cross-category use, but allow
+  // the user to continue creating this barcode in its entered category.
+  const crossWarnings = [];
+  responses.forEach((response) => {
+    const other = (response.all.data || []).find((row) => String(row.matched_type || '').toUpperCase() !== response.entry.expectedType);
+    if (other) {
+      const otherType = String(other.matched_type || '').toUpperCase();
+      crossWarnings.push(`Barcode type mismatch. ${response.entry.value} was entered in the ${response.entry.expectedType} field, but it is already registered as a ${otherType} barcode. Double-check before proceeding.`);
+    }
+  });
+
+  state.putaway.matchedSkuId = null;
+  setPutawayDetailsReadonly(false);
+  if (crossWarnings.length) {
+    $('pa-match-note').innerHTML = crossWarnings.map((warning) => `<strong>${escapeHtml(warning)}</strong>`).join('<br>');
+    $('pa-match-note').classList.remove('hidden');
+    toast(crossWarnings[0], 'warning');
+  } else {
+    $('pa-match-note').classList.add('hidden');
+  }
+  await checkPutawayDuplicateDetails();
+  return 'new';
 }
 
 async function checkPutawayDuplicateDetails() {
@@ -728,7 +776,6 @@ async function addPutawayItem(event) {
     if (codes.some((code) => !code)) return toast('CASE, PACK, and PIECE barcode are all required. Enter N/A when unavailable.', 'error');
     const actualCodes = codes.filter((code) => code !== 'N/A').map((code) => code.toLowerCase());
     if (!actualCodes.length) return toast('At least one actual barcode is required; use N/A only for unavailable barcode types.', 'error');
-    if (new Set(actualCodes).size !== actualCodes.length) return toast('The same actual barcode cannot be used as CASE, PACK, or PIECE barcode.', 'error');
     if ([item.case_qty, item.pack_qty, item.piece_qty].some((qty) => qty < 0)) return toast('Quantities cannot be negative.', 'error');
     if ([item.case_qty, item.pack_qty, item.piece_qty].some((qty) => !Number.isInteger(qty))) return toast('CASE, PACK, and PIECE quantities must be whole numbers only (0, 1, 2, 3, ...).', 'error');
     if (item.case_qty <= 0 && item.pack_qty <= 0 && item.piece_qty <= 0) return toast('Enter at least one CASE, PACK, or PIECE quantity.', 'error');
@@ -874,30 +921,29 @@ async function resolveShipperSku() {
     return null;
   }
 
-  const { data, error } = await supabase.rpc('find_sku_by_barcode', { p_barcode: barcode });
+  const [typedResult, allResult] = await Promise.all([
+    supabase.rpc('find_sku_by_barcode_type', { p_barcode: barcode, p_barcode_type: 'CASE' }),
+    supabase.rpc('find_sku_barcode_matches', { p_barcode: barcode })
+  ]);
   if (sequence !== state.shipperPutaway.shipperLookupSequence) return null;
-  if (error) return toast(friendlyError(error), 'error');
-  const sku = data?.[0];
+  if (typedResult.error || allResult.error) return toast(friendlyError(typedResult.error || allResult.error), 'error');
+  const sku = typedResult.data?.[0];
   if (!sku) {
     state.shipperPutaway.matchedShipperSku = null;
     setShipperDetailsReadonly(false);
-    $('sp-match-note').innerHTML = '<strong>New Shipper CASE barcode.</strong> Enter the Shipper brand, description, variant, and size. Its contents will be entered separately below.';
+    const cross = (allResult.data || []).find((row) => String(row.matched_type || '').toUpperCase() !== 'CASE');
+    if (cross) {
+      const otherType = String(cross.matched_type || '').toUpperCase();
+      $('sp-match-note').innerHTML = `<strong>Barcode type mismatch. ${escapeHtml(barcode)} was entered in the CASE field, but it is already registered as a ${escapeHtml(otherType)} barcode. Double-check before proceeding.</strong><br>This CASE value may still be registered for the new Shipper because barcode uniqueness is enforced separately per category.`;
+    } else {
+      $('sp-match-note').innerHTML = '<strong>New Shipper CASE barcode.</strong> Enter the Shipper brand, description, variant, and size. Its contents will be entered separately below.';
+    }
     $('sp-match-note').classList.remove('hidden');
     await checkShipperDuplicateDetails();
     return null;
   }
 
-  const matchedType = String(sku.matched_type || sku.barcode_type || '').toUpperCase();
-  const { data: row, error: typeError } = await supabase.from('skus').select('sku_type').eq('id', sku.id).single();
-  if (typeError) return toast(friendlyError(typeError), 'error');
-  if (matchedType !== 'CASE') {
-    state.shipperPutaway.matchedShipperSku = null;
-    setShipperDetailsReadonly(false);
-    $('sp-match-note').innerHTML = `<strong>Wrong barcode type:</strong> this code is registered as ${escapeHtml(matchedType || 'another')} barcode. A Shipper must use its CASE barcode.`;
-    $('sp-match-note').classList.remove('hidden');
-    return toast('Use the registered CASE barcode for the Shipper Box.', 'error');
-  }
-  if (String(row?.sku_type || 'STANDARD').toUpperCase() !== 'SHIPPER') {
+  if (String(sku.sku_type || 'STANDARD').toUpperCase() !== 'SHIPPER') {
     state.shipperPutaway.matchedShipperSku = null;
     setShipperDetailsReadonly(false);
     $('sp-match-note').innerHTML = '<strong>STANDARD SKU detected.</strong> This CASE barcode belongs to a normal SKU, not a Shipper master record.';
@@ -948,30 +994,29 @@ async function resolveShipperContentSku() {
     return null;
   }
 
-  const { data, error } = await supabase.rpc('find_sku_by_barcode', { p_barcode: barcode });
+  const [typedResult, allResult] = await Promise.all([
+    supabase.rpc('find_sku_by_barcode_type', { p_barcode: barcode, p_barcode_type: 'PACK' }),
+    supabase.rpc('find_sku_barcode_matches', { p_barcode: barcode })
+  ]);
   if (sequence !== state.shipperPutaway.contentLookupSequence) return null;
-  if (error) return toast(friendlyError(error), 'error');
-  const sku = data?.[0];
+  if (typedResult.error || allResult.error) return toast(friendlyError(typedResult.error || allResult.error), 'error');
+  const sku = typedResult.data?.[0];
   if (!sku) {
     state.shipperPutaway.contentSku = null;
     setShipperContentDetailsReadonly(false);
-    $('sp-content-match-note').innerHTML = '<strong>New PACK barcode.</strong> Enter brand, description, variant, and size. The new SKU will be stored in the permanent SKU Masterlist with CASE/PIECE = N/A.';
+    const cross = (allResult.data || []).find((row) => String(row.matched_type || '').toUpperCase() !== 'PACK');
+    if (cross) {
+      const otherType = String(cross.matched_type || '').toUpperCase();
+      $('sp-content-match-note').innerHTML = `<strong>Barcode type mismatch. ${escapeHtml(barcode)} was entered in the PACK field, but it is already registered as a ${escapeHtml(otherType)} barcode. Double-check before proceeding.</strong><br>This PACK value may still be registered because barcode uniqueness is enforced separately per category.`;
+    } else {
+      $('sp-content-match-note').innerHTML = '<strong>New PACK barcode.</strong> Enter brand, description, variant, and size. The new SKU will be stored in the permanent SKU Masterlist with CASE/PIECE = N/A.';
+    }
     $('sp-content-match-note').classList.remove('hidden');
     await checkShipperContentDuplicateDetails();
     return null;
   }
 
-  const matchedType = String(sku.matched_type || sku.barcode_type || '').toUpperCase();
-  const { data: row, error: typeError } = await supabase.from('skus').select('sku_type').eq('id', sku.id).single();
-  if (typeError) return toast(friendlyError(typeError), 'error');
-  if (matchedType !== 'PACK') {
-    state.shipperPutaway.contentSku = null;
-    setShipperContentDetailsReadonly(false);
-    $('sp-content-match-note').innerHTML = `<strong>Wrong barcode type:</strong> this code is registered as ${escapeHtml(matchedType || 'another')} barcode. Shipper contents must use the PACK barcode.`;
-    $('sp-content-match-note').classList.remove('hidden');
-    return toast('Use the registered PACK barcode for the Shipper content SKU.', 'error');
-  }
-  if (String(row?.sku_type || 'STANDARD').toUpperCase() !== 'STANDARD') {
+  if (String(sku.sku_type || 'STANDARD').toUpperCase() !== 'STANDARD') {
     return toast('A Shipper Box cannot contain another SHIPPER SKU as a child item.', 'error');
   }
 
@@ -1419,12 +1464,28 @@ function renderNaSelectedLot(operation) {
 
 function handleOperationLotChange(operation) {
   if (state[operation].naMode) renderNaSelectedLot(operation);
+  else if (state[operation].multiBarcodeMode) renderSelectedBarcodeCategoryLot(operation);
   if (operation === 'pick') {
     updatePickFefoNote();
     updatePickQtyNote();
   } else {
     updateTransferQtyNote();
   }
+}
+
+function renderSelectedBarcodeCategoryLot(operation) {
+  const pick = operation === 'pick';
+  const opState = state[operation];
+  const select = $(pick ? 'pick-lot' : 'tr-lot');
+  if (!select || select.value === '') return;
+  const lot = opState.lots[Number(select.value)];
+  if (!lot) return;
+  const sameSkuUnitLots = opState.lots.filter((row) => row.sku_id === lot.sku_id && row.uom === lot.uom);
+  const sku = {
+    brand: lot.brand || '', description: lot.description || '', variant: lot.variant || '', size: lot.size || ''
+  };
+  if (pick) renderPickBarcodeMatch(sku, lot.uom, sameSkuUnitLots);
+  else renderTransferBarcodeMatch(sku, lot.uom, sameSkuUnitLots);
 }
 
 
@@ -1635,10 +1696,11 @@ async function loadOperationLots(operation) {
   }
 
   opState.naMode = false;
-  const { data: skuData, error: skuError } = await supabase.rpc('find_sku_by_barcode', { p_barcode: barcode });
-  if (skuError) return toast(friendlyError(skuError), 'error');
-  const sku = skuData?.[0];
-  if (!sku) {
+  opState.multiBarcodeMode = false;
+  const { data: barcodeMatches, error: matchError } = await supabase.rpc('find_sku_barcode_matches', { p_barcode: barcode });
+  if (matchError) return toast(friendlyError(matchError), 'error');
+  const matches = barcodeMatches || [];
+  if (!matches.length) {
     lotSelect.innerHTML = '<option value="">Barcode is not registered</option>';
     if (pick) {
       $('pick-unit-label').textContent = 'matched unit';
@@ -1651,107 +1713,94 @@ async function loadOperationLots(operation) {
     return toast('This barcode is not registered to a SKU.', 'error');
   }
 
-  const barcodeType = String(sku.barcode_type || sku.matched_type || '').toUpperCase();
-  const expectedUom = ['CASE', 'PACK', 'PIECE'].includes(barcodeType) ? barcodeType : null;
-  if (!expectedUom) {
-    lotSelect.innerHTML = '<option value="">Barcode type could not be identified</option>';
-    if (pick) {
-      $('pick-unit-label').textContent = 'matched unit';
-      clearPickBarcodeMatch(`${sku.brand} ${sku.description} was found, but the barcode type could not be identified.`);
-    }
-    if (transfer) {
-      $('tr-unit-label').textContent = 'matched unit';
-      clearTransferBarcodeMatch(`${sku.brand} ${sku.description} was found, but the barcode type could not be identified.`);
-    }
-    return toast('The barcode could not be matched to CASE, PACK, or PIECE.', 'error');
-  }
-
-  let lotsQuery = supabase.from('v_inventory_details')
-    .select('*')
-    .eq('location_code', opState.locationCode)
-    .eq('sku_id', sku.id)
-    .eq('uom', expectedUom)
-    .order('expiry_date');
-  const fefoQuery = pick
-    ? supabase.from('v_inventory_details')
-        .select('lot_id,expiry_date,location_code,container_no,qty,uom')
-        .eq('sku_id', sku.id)
-        .eq('uom', expectedUom)
-        .gt('qty', 0)
-        .order('expiry_date')
-    : null;
-
-  const [{ data: lots, error: lotsError }, fefoResult] = await Promise.all([
-    lotsQuery,
-    fefoQuery ? fefoQuery : Promise.resolve({ data: [], error: null })
+  // One scanned value can now legally be registered in different barcode
+  // categories. Build the selectable stock list from every matching SKU+unit
+  // pair in the locked rack rather than choosing an arbitrary first match.
+  const pairKeys = new Set(matches.map((m) => `${m.id}|${String(m.matched_type || '').toUpperCase()}`));
+  const skuIds = [...new Set(matches.map((m) => m.id))];
+  const [{ data: rackRows, error: rackError }, fefoResult] = await Promise.all([
+    supabase.from('v_inventory_details').select('*').eq('location_code', opState.locationCode).in('sku_id', skuIds).order('sku_name').order('uom').order('expiry_date').order('container_no'),
+    pick
+      ? supabase.from('v_inventory_details').select('lot_id,sku_id,expiry_date,location_code,container_no,qty,uom').in('sku_id', skuIds).gt('qty', 0).order('expiry_date')
+      : Promise.resolve({ data: [], error: null })
   ]);
-  if (lotsError || fefoResult.error) return toast(friendlyError(lotsError || fefoResult.error), 'error');
+  if (rackError || fefoResult.error) return toast(friendlyError(rackError || fefoResult.error), 'error');
 
-  // FEFO uses CURRENT positive stock only. Quantities already queued in this
-  // picking session are treated as consumed, so a fully picked earlier lot
-  // cannot keep generating a stale FEFO warning.
+  const candidates = (rackRows || []).filter((lot) => pairKeys.has(`${lot.sku_id}|${String(lot.uom || '').toUpperCase()}`));
   const queuedByLot = new Map();
-  if (pick) {
-    opState.cart.forEach((line) => {
-      queuedByLot.set(line.lot_id, (queuedByLot.get(line.lot_id) || 0) + Number(line.qty || 0));
-    });
-  }
-  const effectiveFefoRows = (fefoResult.data || []).filter(
-    (row) => Number(row.qty || 0) - (queuedByLot.get(row.lot_id) || 0) > 0
-  );
-  const earliestFefoRow = effectiveFefoRows[0] || null;
+  opState.cart.forEach((line) => {
+    queuedByLot.set(line.lot_id, (queuedByLot.get(line.lot_id) || 0) + Number(line.qty || 0));
+  });
 
-  opState.sku = sku;
-  opState.lots = (lots || []).map((lot) => ({
-    ...lot,
-    effectiveQty: Math.max(Number(lot.qty || 0) - (queuedByLot.get(lot.lot_id) || 0), 0),
-    earliestExpiry: earliestFefoRow?.expiry_date || lot.expiry_date,
-    earliestLocation: earliestFefoRow?.location_code || opState.locationCode,
-    earliestContainer: earliestFefoRow?.container_no || lot.container_no,
-    scannedBarcode: barcode,
-    scannedBarcodeType: expectedUom
-  }));
-  if (pick) {
-    const lotIds = new Set(opState.lots.map((lot) => lot.lot_id));
-    opState.cart.forEach((line) => {
-      if (lotIds.has(line.lot_id)) {
-        line.earliest_expiry = earliestFefoRow?.expiry_date || line.expiry_date;
-        line.earliest_location = earliestFefoRow?.location_code || opState.locationCode;
-        line.earliest_container = earliestFefoRow?.container_no || line.container_no;
-      }
-    });
-  }
+  opState.lots = candidates.map((lot) => {
+    const effectiveQty = Math.max(Number(lot.qty || 0) - (queuedByLot.get(lot.lot_id) || 0), 0);
+    const earliest = pick
+      ? (fefoResult.data || []).find((row) => row.sku_id === lot.sku_id && row.uom === lot.uom && Number(row.qty || 0) - (queuedByLot.get(row.lot_id) || 0) > 0)
+      : null;
+    return {
+      ...lot,
+      effectiveQty,
+      earliestExpiry: earliest?.expiry_date || lot.expiry_date,
+      earliestLocation: earliest?.location_code || opState.locationCode,
+      earliestContainer: earliest?.container_no || lot.container_no,
+      scannedBarcode: barcode,
+      scannedBarcodeType: lot.uom
+    };
+  });
+
+  const distinctPairs = [...new Set(matches.map((m) => `${m.id}|${String(m.matched_type || '').toUpperCase()}`))];
+  opState.multiBarcodeMode = distinctPairs.length > 1;
+  opState.sku = matches.length === 1 ? matches[0] : null;
 
   if (pick) {
-    $('pick-unit-label').textContent = expectedUom;
-    renderPickBarcodeMatch(sku, expectedUom, opState.lots);
+    opState.lots.forEach((lot) => {
+      const lotIds = new Set(opState.lots.filter((x) => x.sku_id === lot.sku_id && x.uom === lot.uom).map((x) => x.lot_id));
+      opState.cart.forEach((line) => {
+        if (lotIds.has(line.lot_id)) {
+          line.earliest_expiry = lot.earliestExpiry || line.expiry_date;
+          line.earliest_location = lot.earliestLocation || opState.locationCode;
+          line.earliest_container = lot.earliestContainer || line.container_no;
+        }
+      });
+    });
   }
-  if (transfer) {
-    $('tr-unit-label').textContent = expectedUom;
-    renderTransferBarcodeMatch(sku, expectedUom, opState.lots);
+
+  if (opState.multiBarcodeMode) {
+    $(pick ? 'pick-unit-label' : 'tr-unit-label').textContent = 'selected unit';
+    const panel = $(pick ? 'pick-barcode-match' : 'tr-barcode-match');
+    panel.classList.remove('hidden');
+    panel.innerHTML = `<strong>Barcode ${escapeHtml(barcode)} is registered in more than one barcode category.</strong> Select the exact item and CASE/PACK/PIECE unit from the list below. No unit is assumed automatically.`;
+  } else {
+    const match = matches[0];
+    const expectedUom = String(match.matched_type || '').toUpperCase();
+    $(pick ? 'pick-unit-label' : 'tr-unit-label').textContent = expectedUom;
+    if (pick) renderPickBarcodeMatch(match, expectedUom, opState.lots);
+    else renderTransferBarcodeMatch(match, expectedUom, opState.lots);
   }
 
   lotSelect.innerHTML = opState.lots.length
-    ? `<option value="">Select expiry / container</option>${opState.lots.map((lot, i) => `<option value="${i}" ${pick && Number(lot.effectiveQty) <= 0 ? 'disabled' : ''}>${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)}${escapeHtml(shipperOptionSuffix(lot))} · Available ${fmtQtyUom(pick ? lot.effectiveQty : lot.qty, lot.uom)}</option>`).join('')}`
-    : `<option value="">No ${expectedUom} stock for this SKU in the locked location</option>`;
+    ? `<option value="">${opState.multiBarcodeMode ? 'Select exact item / unit / expiry / container' : 'Select expiry / container'}</option>${opState.lots.map((lot, i) => `<option value="${i}" ${(pick || transfer) && Number(lot.effectiveQty ?? lot.qty) <= 0 ? 'disabled' : ''}>${opState.multiBarcodeMode ? `${escapeHtml(lot.sku_name)} · ${escapeHtml(lot.uom)} · ` : ''}${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)}${escapeHtml(shipperOptionSuffix(lot))} · Available ${fmtQtyUom(pick ? lot.effectiveQty : lot.qty, lot.uom)}</option>`).join('')}`
+    : '<option value="">No matching stock for this barcode in the locked location</option>';
 
-  if (opState.lots.length === 1) lotSelect.value = '0';
+  if (opState.lots.length === 1 && Number(opState.lots[0].effectiveQty ?? opState.lots[0].qty) > 0) {
+    lotSelect.value = '0';
+    if (opState.multiBarcodeMode) renderSelectedBarcodeCategoryLot(operation);
+  }
 
   if (!opState.lots.length) {
+    const categories = [...new Set(matches.map((m) => String(m.matched_type || '').toUpperCase()))].join(', ');
     if (pick) {
-      $('pick-qty-note').textContent = `Barcode is valid, but there is no ${expectedUom} balance to deduct in ${opState.locationCode}.`;
-      toast(`This is the correct ${expectedUom} barcode for ${sku.brand} ${sku.description}, but no ${expectedUom} quantity is available in ${opState.locationCode}.`, 'error');
-    }
-    if (transfer) {
+      $('pick-qty-note').classList.remove('hidden');
+      $('pick-qty-note').textContent = `Barcode is registered as ${categories}, but none of those matching stock units are available in ${opState.locationCode}.`;
+      toast(`Barcode is valid, but no matching stock is available in ${opState.locationCode}.`, 'error');
+    } else {
       $('tr-qty-note').classList.remove('hidden');
-      $('tr-qty-note').textContent = `Barcode is valid, but there is no ${expectedUom} balance available for transfer in ${opState.locationCode}.`;
-      toast(`This is the correct ${expectedUom} barcode for ${sku.brand} ${sku.description}, but no ${expectedUom} quantity is available in ${opState.locationCode}.`, 'error');
+      $('tr-qty-note').textContent = `Barcode is registered as ${categories}, but none of those matching stock units are available for transfer in ${opState.locationCode}.`;
+      toast(`Barcode is valid, but no matching stock is available in ${opState.locationCode}.`, 'error');
     }
   }
-  if (pick) {
-    updatePickFefoNote();
-    updatePickQtyNote();
-  }
+
+  if (pick) { updatePickFefoNote(); updatePickQtyNote(); }
   if (transfer) updateTransferQtyNote();
 }
 
