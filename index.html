@@ -66,6 +66,7 @@
         <button data-screen="expiry">Expiry alerts</button>
         <button data-screen="nonfefo" data-role-min="supervisor">Non-FEFO Compliance</button>
         <button data-screen="users" data-role-min="admin">User Management</button>
+        <button data-screen="systemmanager" data-role-min="admin">System Manager</button>
         <button data-screen="history">History</button>
         <button data-screen="locations" data-role-min="supervisor">Locations & QR</button>
         <button data-screen="control">System control</button>
@@ -346,6 +347,49 @@
           <p id="users-count" class="small-note">0 registered users</p>
           <div id="users-table" class="table-wrap"></div>
         </article>
+      </section>
+
+      <section id="screen-systemmanager" class="screen">
+        <article class="card">
+          <div class="card-head">
+            <div>
+              <h3>Supabase Free usage</h3>
+              <p>Current project-side usage snapshot and Free-plan reference limits.</p>
+            </div>
+            <button id="system-manager-refresh-btn" class="secondary" type="button">Refresh usage</button>
+          </div>
+          <div class="info-box">
+            <strong>Important:</strong> Database size and File Storage are read directly from this project when this module is accessed. Supabase's exact billing-cycle <strong>Egress</strong> and <strong>MAU</strong> are platform analytics and are not safely available to a static GitHub Pages app without secret management credentials, so this WMS does not fake those figures. Use the official Usage button for the authoritative numbers.
+          </div>
+          <p id="system-manager-checked-at" class="small-note">Not checked yet.</p>
+          <div id="system-manager-usage-grid" class="kpi-grid"></div>
+          <div class="form-actions">
+            <button id="system-manager-usage-link" class="secondary" type="button">Open exact Supabase Usage</button>
+          </div>
+        </article>
+
+        <div class="content-grid two">
+          <article class="card">
+            <div class="card-head"><div><h3>90-day history retention</h3><p>Automatic cleanup of Transaction History and System Audit Events.</p></div></div>
+            <div id="system-manager-retention-status" class="info-box">Loading retention status…</div>
+            <p class="hint">Records aged 90 days or more are removed automatically. Transaction lines and Non-FEFO detail records tied to deleted transactions are removed with them. Current inventory balances are not deleted.</p>
+          </article>
+
+          <form id="system-history-delete-form" class="card form-card">
+            <div class="card-head"><div><h3>Delete history by date range</h3><p>Admin/Owner only · permanent deletion · inclusive warehouse dates.</p></div></div>
+            <div class="form-grid two">
+              <label>From date *<input id="system-history-start" type="date" required /></label>
+              <label>To date *<input id="system-history-end" type="date" required /></label>
+            </div>
+            <label>Reason *<textarea id="system-history-reason" rows="3" required placeholder="Why is this history being deleted?"></textarea></label>
+            <div id="system-history-preview" class="info-box hidden"></div>
+            <div class="form-actions split">
+              <button id="system-history-preview-btn" class="secondary" type="button">Preview records</button>
+              <button class="danger" type="submit">Delete selected history</button>
+            </div>
+            <p class="hint">If the range contains history for an OPEN Sales Order, deletion is blocked until that Sales Order is finished or cancelled. One new audit event is kept to record the administrative deletion itself.</p>
+          </form>
+        </div>
       </section>
 
       <section id="screen-history" class="screen">

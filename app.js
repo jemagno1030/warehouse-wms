@@ -118,6 +118,7 @@ const screenMeta = {
   expiry: ['Expiry alerts', 'Expired and near-expiry stock'],
   nonfefo: ['Non-FEFO Compliance', 'Confirmed picking transactions that disregarded FEFO'],
   users: ['User Management', 'Registered users, roles, and account access'],
+  systemmanager: ['System Manager', 'Supabase Free usage, retention, and controlled history cleanup'],
   history: ['History', 'Complete transaction and correction trail'],
   locations: ['Locations & QR', 'Rack master data and printable labels'],
   control: ['System control', 'Discreet global operational control']
@@ -271,6 +272,12 @@ function setupStaticEvents() {
   $('clear-qr-btn').addEventListener('click', clearQrSelection);
   $('print-qr-btn').addEventListener('click', printSelectedQrLabels);
   $('admin-code-btn').addEventListener('click', applyAdministrativeCode);
+  $('system-manager-refresh-btn').addEventListener('click', () => loadSystemManager(true));
+  $('system-manager-usage-link').addEventListener('click', () => {
+    window.open('https://supabase.com/dashboard/org/_/usage', '_blank', 'noopener,noreferrer');
+  });
+  $('system-history-preview-btn').addEventListener('click', previewSystemHistoryDelete);
+  $('system-history-delete-form').addEventListener('submit', deleteSystemHistoryRange);
 
   $('scanner-close').addEventListener('click', closeScanner);
   $('camera-start').addEventListener('click', startCamera);
@@ -308,6 +315,10 @@ function setupStaticEvents() {
     if (inventoryDelete) deleteInventoryLot(inventoryDelete.dataset.inventoryDelete);
     const skuMasterEdit = event.target.closest('[data-sku-master-edit]');
     if (skuMasterEdit) openSkuMasterEdit(skuMasterEdit.dataset.skuMasterEdit);
+    const skuMasterDelete = event.target.closest('[data-sku-master-delete]');
+    if (skuMasterDelete) deleteSkuMaster(skuMasterDelete.dataset.skuMasterDelete);
+    const containerDelete = event.target.closest('[data-container-delete]');
+    if (containerDelete) deleteConsumedContainer(containerDelete.dataset.containerDelete);
     const userRole = event.target.closest('[data-user-role]');
     if (userRole) openUserRoleDialog(userRole.dataset.userRole);
     const userActive = event.target.closest('[data-user-active]');
@@ -538,7 +549,7 @@ function canOpenScreen(name) {
   if (name === 'locations' && !isSupervisor()) return false;
   if (name === 'skumaster' && !isSupervisor()) return false;
   if (name === 'nonfefo' && !isSupervisor()) return false;
-  if (name === 'users' && !isAdminOrOwner()) return false;
+  if ((name === 'users' || name === 'systemmanager') && !isAdminOrOwner()) return false;
   if (name === 'control' && !isOwner()) return false;
   return true;
 }
@@ -546,7 +557,7 @@ function canOpenScreen(name) {
 function showScreen(name) {
   if (!canOpenScreen(name)) {
     if ((name === 'locations' || name === 'skumaster' || name === 'nonfefo') && !isSupervisor()) toast('Supervisor access is required.', 'error');
-    if (name === 'users' && !isAdminOrOwner()) toast('Admin or Owner access is required.', 'error');
+    if ((name === 'users' || name === 'systemmanager') && !isAdminOrOwner()) toast('Admin or Owner access is required.', 'error');
     if (name === 'control' && !isOwner()) toast('Owner access is required.', 'error');
     name = 'dashboard';
   }
@@ -572,6 +583,7 @@ async function loadScreen(name, force = false) {
     if (name === 'expiry') await loadExpiry(force);
     if (name === 'nonfefo') await loadNonFefoCompliance(force);
     if (name === 'users') await loadUsers(force);
+    if (name === 'systemmanager') await loadSystemManager(force);
     if (name === 'history') await loadHistory(force);
     if (name === 'locations') await loadLocations(force);
   } catch (error) {
@@ -2830,7 +2842,7 @@ function renderSkuMaster() {
     <td>${escapeHtml(r.piece_barcode)}</td>
     <td>${escapeHtml(r.created_by_username || '—')}</td>
     <td>${fmtDateTime(r.created_at)}</td>
-    ${isAdminOrOwner() ? `<td><button class="link-btn" type="button" data-sku-master-edit="${escapeHtml(r.id)}">Edit</button></td>` : ''}
+    ${isAdminOrOwner() ? `<td><div class="button-cluster"><button class="link-btn" type="button" data-sku-master-edit="${escapeHtml(r.id)}">Edit</button><button class="danger ghost" type="button" data-sku-master-delete="${escapeHtml(r.id)}">Delete</button></div></td>` : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching SKU master records.');
   $('sku-master-count').textContent = `${rows.length.toLocaleString()} of ${state.data.skuMaster.length.toLocaleString()} SKU record(s) shown`;
 }
@@ -2899,9 +2911,33 @@ async function submitSkuMasterEdit(event) {
   toast('SKU Masterlist record updated. Audit record saved.', 'success');
 }
 
+
+async function deleteSkuMaster(skuId) {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required to delete a SKU Masterlist entry.', 'error');
+  const sku = state.data.skuMaster.find((row) => row.id === skuId);
+  if (!sku) return toast('SKU master record was not found. Refresh the SKU Masterlist and try again.', 'error');
+
+  const label = [sku.brand, sku.description, sku.variant, sku.size].filter(Boolean).join(' ');
+  const reason = window.prompt(`Delete this SKU from the active SKU Masterlist?\n\n${label}\n\nThis is allowed only when the SKU has NO current inventory. Historical transaction/audit records will keep the SKU details while those records are retained.\n\nEnter reason:`);
+  if (reason === null) return;
+  if (!reason.trim()) return toast('A reason is required to delete a SKU Masterlist entry.', 'error');
+
+  if (!window.confirm(`Confirm delete from SKU Masterlist:\n\n${label}\n\nThe SKU will disappear from the active masterlist but historical records are preserved until normal history retention deletes them.`)) return;
+
+  const { error } = await supabase.rpc('admin_delete_sku_master', {
+    p_sku_id: skuId,
+    p_reason: reason.trim()
+  });
+  if (error) return toast(friendlyError(error), 'error');
+
+  invalidateReports();
+  await loadSkuMaster(true);
+  toast('SKU deleted from the active SKU Masterlist. Historical references were preserved.', 'success');
+}
+
 async function loadContainers(force = false) {
   if (!force && state.data.containers.length) return renderContainers();
-  const { data, error } = await supabase.from('v_container_summary').select('*').order('container_no').limit(10000);
+  const { data, error } = await supabase.from('v_container_summary_active').select('*').order('container_no').limit(10000);
   if (error) throw error;
   state.data.containers = data || [];
   renderContainers();
@@ -2912,7 +2948,32 @@ function renderContainers() {
   const rows = state.data.containers.filter((r) => r.container_no.toLowerCase().includes(term));
   $('container-summary-table').innerHTML = rows.length ? `<table><thead><tr><th>Container</th><th>Remaining / received</th><th>Consumed</th><th>SKUs</th><th>Locations</th><th>Earliest expiry</th><th></th></tr></thead><tbody>${rows.map((r) => `<tr>
     <td><strong>${escapeHtml(r.container_no)}</strong><br>${r.consumption_status === 'CONSUMED' ? '<span class="pill">Consumed</span>' : '<span class="pill">Active</span>'}</td><td>${formatBalances(balanceColumns(r, 'remaining'))}<br><small>Received: ${formatBalances(balanceColumns(r, 'received'))}</small></td><td>${formatBalances(balanceColumns(r, 'consumed'))}</td><td>${r.sku_count}</td><td class="wrap">${escapeHtml(r.locations || '—')}</td><td>${fmtDate(r.earliest_expiry)} ${r.has_expired ? '<span class="pill expired">Expired stock</span>' : r.has_near_expiry ? '<span class="pill near">Near expiry</span>' : ''}</td>
-    <td><button class="link-btn" data-container-detail="${escapeHtml(r.container_no)}">Details</button></td></tr>`).join('')}</tbody></table>` : emptyState('No matching container history.');
+    <td><div class="button-cluster"><button class="link-btn" data-container-detail="${escapeHtml(r.container_no)}">Details</button>${isAdminOrOwner() && r.consumption_status === 'CONSUMED' ? `<button class="danger ghost" type="button" data-container-delete="${escapeHtml(r.container_no)}">Delete</button>` : ''}</div></td></tr>`).join('')}</tbody></table>` : emptyState('No matching container history.');
+}
+
+
+async function deleteConsumedContainer(containerNo) {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required to delete a consumed container.', 'error');
+  const row = state.data.containers.find((item) => item.container_no === containerNo);
+  if (!row) return toast('Container was not found. Refresh the Containers report and try again.', 'error');
+  if (row.consumption_status !== 'CONSUMED') return toast('Only empty/consumed containers can be deleted from the Containers list.', 'error');
+
+  const reason = window.prompt(`Delete consumed container ${containerNo} from the Containers list?\n\nTransaction and audit history will keep the container number while those history records are retained.\n\nEnter reason:`);
+  if (reason === null) return;
+  if (!reason.trim()) return toast('A reason is required to delete a consumed container.', 'error');
+
+  if (!window.confirm(`Confirm removal of consumed container ${containerNo} from the Containers list?\n\nThis does not erase its retained transaction/audit history.`)) return;
+
+  const { error } = await supabase.rpc('admin_delete_consumed_container', {
+    p_container_no: containerNo,
+    p_reason: reason.trim()
+  });
+  if (error) return toast(friendlyError(error), 'error');
+
+  state.data.containers = [];
+  $('container-detail').classList.add('hidden');
+  await loadContainers(true);
+  toast(`Container ${containerNo} removed from the Containers list. Historical references were preserved.`, 'success');
 }
 
 async function showContainerDetail(containerNo) {
@@ -3235,6 +3296,172 @@ async function toggleManagedUserActive(userId) {
     if (Number(result.reassigned_open_order_count || 0)) details.push(`${result.reassigned_open_order_count} partial SO(s) reassigned to you`);
     toast(`${row.username} has been kicked out${details.length ? ` · ${details.join(' · ')}` : ''}.`, 'success');
   }
+}
+
+
+function fmtBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  return `${(value / (1024 ** index)).toLocaleString(undefined, { maximumFractionDigits: index >= 2 ? 2 : 0 })} ${units[index]}`;
+}
+
+function usagePercent(value, limit) {
+  const n = Number(value || 0);
+  const max = Number(limit || 0);
+  if (!max) return 0;
+  return Math.max(0, Math.min(100, (n / max) * 100));
+}
+
+function usageRow(label, valueText, limitText, percent, note = '') {
+  const safePercent = Number.isFinite(Number(percent)) ? Math.max(0, Math.min(100, Number(percent))) : 0;
+  return `<div class="card" style="padding:16px">
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+      <strong>${escapeHtml(label)}</strong>
+      <span>${escapeHtml(valueText)} / ${escapeHtml(limitText)}</span>
+    </div>
+    <progress max="100" value="${safePercent}" style="width:100%;margin-top:10px"></progress>
+    ${note ? `<p class="small-note" style="margin-bottom:0">${escapeHtml(note)}</p>` : ''}
+  </div>`;
+}
+
+async function loadSystemManager(force = false) {
+  if (!isAdminOrOwner()) return;
+  const button = $('system-manager-refresh-btn');
+  if (force) setBusy(button, true, 'Refreshing…');
+
+  const { data, error } = await supabase.rpc('system_manager_usage_snapshot');
+  if (force) setBusy(button, false);
+  if (error) throw error;
+
+  const row = data?.[0] || {};
+  const databaseBytes = Number(row.database_bytes || 0);
+  const storageBytes = Number(row.storage_bytes || 0);
+  const databaseLimit = Number(row.database_limit_bytes || (500 * 1024 * 1024));
+  const storageLimit = Number(row.storage_limit_bytes || (1024 ** 3));
+  const mauLimit = Number(row.mau_limit || 50000);
+
+  $('system-manager-usage-grid').innerHTML = [
+    usageRow(
+      'Egress',
+      'Supabase Usage page',
+      '5 GB',
+      0,
+      'Exact billing-cycle Egress is platform analytics and is not safely exposed to this browser-only WMS.'
+    ),
+    usageRow(
+      'Database size',
+      fmtBytes(databaseBytes),
+      '500 MB',
+      usagePercent(databaseBytes, databaseLimit),
+      'Exact current PostgreSQL database size when this module was loaded.'
+    ),
+    usageRow(
+      'Monthly active users',
+      `${Number(row.signed_in_last_30_days || 0).toLocaleString()} local indicator`,
+      mauLimit.toLocaleString(),
+      usagePercent(Number(row.signed_in_last_30_days || 0), mauLimit),
+      `Supabase billing MAU must be checked on Usage. Registered Auth users: ${Number(row.registered_users || 0).toLocaleString()}.`
+    ),
+    usageRow(
+      'File storage',
+      fmtBytes(storageBytes),
+      '1 GB',
+      usagePercent(storageBytes, storageLimit),
+      'Exact current size recorded for objects in Supabase Storage.'
+    )
+  ].join('');
+
+  $('system-manager-checked-at').textContent = `Checked: ${fmtDateTime(row.checked_at)} · Values refresh whenever System Manager is opened or Refresh usage is pressed.`;
+  $('system-manager-retention-status').innerHTML = `
+    <strong>Automatic retention:</strong> ${row.retention_job_active ? 'Enabled' : 'Not active'} · ${Number(row.retention_days || 90)} days<br>
+    <strong>Transaction history rows:</strong> ${Number(row.transaction_history_count || 0).toLocaleString()} · Oldest: ${escapeHtml(fmtDateTime(row.oldest_transaction_at))}<br>
+    <strong>System audit rows:</strong> ${Number(row.audit_history_count || 0).toLocaleString()} · Oldest: ${escapeHtml(fmtDateTime(row.oldest_audit_at))}<br>
+    <small>Automatic cleanup runs daily. History belonging to an OPEN Sales Order is protected until that Sales Order is closed.</small>`;
+}
+
+async function getSystemHistoryPreview() {
+  if (!isAdminOrOwner()) throw new Error('Admin or Owner access is required.');
+  const start = $('system-history-start').value;
+  const end = $('system-history-end').value;
+  if (!start || !end) throw new Error('Select both a start date and an end date.');
+  if (end < start) throw new Error('End date cannot be earlier than start date.');
+
+  const { data, error } = await supabase.rpc('admin_preview_history_delete', {
+    p_start_date: start,
+    p_end_date: end
+  });
+  if (error) throw error;
+  return data?.[0] || {};
+}
+
+async function previewSystemHistoryDelete() {
+  const button = $('system-history-preview-btn');
+  setBusy(button, true, 'Checking…');
+  try {
+    const row = await getSystemHistoryPreview();
+    $('system-history-preview').classList.remove('hidden');
+    $('system-history-preview').innerHTML = `<strong>Selected inclusive date range:</strong> ${escapeHtml($('system-history-start').value)} to ${escapeHtml($('system-history-end').value)}<br>
+      Transactions: <strong>${Number(row.transaction_count || 0).toLocaleString()}</strong> ·
+      Transaction lines: <strong>${Number(row.transaction_line_count || 0).toLocaleString()}</strong> ·
+      System audit events: <strong>${Number(row.audit_event_count || 0).toLocaleString()}</strong> ·
+      Non-FEFO detail rows: <strong>${Number(row.non_fefo_event_count || 0).toLocaleString()}</strong>`;
+  } catch (error) {
+    toast(friendlyError(error), 'error');
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function deleteSystemHistoryRange(event) {
+  event.preventDefault();
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+
+  const start = $('system-history-start').value;
+  const end = $('system-history-end').value;
+  const reason = $('system-history-reason').value.trim();
+  if (!start || !end) return toast('Select both a start date and an end date.', 'error');
+  if (end < start) return toast('End date cannot be earlier than start date.', 'error');
+  if (!reason) return toast('Enter a reason for deleting the selected history.', 'error');
+
+  let preview;
+  try {
+    preview = await getSystemHistoryPreview();
+  } catch (error) {
+    return toast(friendlyError(error), 'error');
+  }
+
+  const summary = `${Number(preview.transaction_count || 0).toLocaleString()} transaction(s), ${Number(preview.transaction_line_count || 0).toLocaleString()} transaction line(s), ${Number(preview.audit_event_count || 0).toLocaleString()} audit event(s), and ${Number(preview.non_fefo_event_count || 0).toLocaleString()} Non-FEFO detail row(s)`;
+
+  if (!window.confirm(`PERMANENT HISTORY DELETE\n\nInclusive dates: ${start} through ${end}\n\nThis will delete ${summary}.\n\nCurrent inventory balances are not deleted. An audit event recording this administrative deletion will be created after the purge.\n\nContinue?`)) return;
+
+  const button = event.submitter;
+  setBusy(button, true, 'Deleting…');
+  const { data, error } = await supabase.rpc('admin_delete_history_range', {
+    p_start_date: start,
+    p_end_date: end,
+    p_reason: reason
+  });
+  setBusy(button, false);
+
+  if (error) return toast(friendlyError(error), 'error');
+
+  const result = data?.[0] || {};
+  state.data.history = [];
+  state.data.audit = [];
+  state.data.nonFefo = [];
+  // Container received/consumed figures are partly derived from retained history.
+  state.data.containers = [];
+  $('system-history-preview').classList.remove('hidden');
+  $('system-history-preview').innerHTML = `<strong>Deletion complete.</strong><br>
+    Deleted ${Number(result.deleted_transactions || 0).toLocaleString()} transaction(s),
+    ${Number(result.deleted_transaction_lines || 0).toLocaleString()} transaction line(s),
+    ${Number(result.deleted_audit_events || 0).toLocaleString()} audit event(s), and
+    ${Number(result.deleted_non_fefo_events || 0).toLocaleString()} Non-FEFO detail row(s).`;
+  $('system-history-reason').value = '';
+  await loadSystemManager(true);
+  toast('Selected transaction and audit history permanently deleted.', 'success');
 }
 
 async function loadHistory(force = false) {
