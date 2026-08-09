@@ -451,9 +451,50 @@
             <p class="hint">Change the two placeholder codes in <code>supabase-schema.sql</code> before running it.</p>
           </article>
         </div>
+
+        <article class="card" style="margin-top:18px;border:2px solid rgba(180,35,35,.35)">
+          <div class="card-head">
+            <div>
+              <h3>FULL WMS DATA RESET</h3>
+              <p>Owner only. Permanently clears all warehouse/master/history data and deletes every non-Owner user account.</p>
+            </div>
+          </div>
+          <div class="warning-box">
+            <strong>Destructive operation.</strong> Current inventory, SKU Masterlist, Containers, Shipper Boxes, Sales Orders,
+            Transaction History, System Audit Events, Non-FEFO records, rack locks, and all non-Owner accounts will be removed.
+            <strong>Owner accounts, rack locations, System Control configuration, System Manager/Cron, and database structure are preserved.</strong>
+          </div>
+          <p class="small-note">Create and verify a current V2.1 backup before using Full Reset. The reset leaves the WMS in Administrative Pause.</p>
+          <button id="full-reset-open-btn" class="danger" type="button">FULL RESET PROJECT DATA</button>
+          <div id="full-reset-result" class="info-box hidden" style="margin-top:12px"></div>
+        </article>
       </section>
     </main>
   </div>
+
+
+  <dialog id="full-reset-dialog" class="edit-dialog">
+    <div class="scanner-head">
+      <div><h3>FULL WMS DATA RESET</h3><p>Owner-only permanent reset. Review the live counts before continuing.</p></div>
+      <button id="full-reset-close" class="icon-button" type="button">✕</button>
+    </div>
+    <form id="full-reset-form" class="stack">
+      <div id="full-reset-preview" class="warning-box">Loading reset preview…</div>
+      <div class="warning-box">
+        <strong>What remains:</strong> Owner accounts, physical rack/location master, System Control configuration,
+        System Manager/Cron, functions/RLS/views, and the website/database structure.
+      </div>
+      <label>Full Reset confirmation PIN *
+        <input id="full-reset-pin" type="password" autocomplete="new-password" required />
+      </label>
+      <label style="display:flex;gap:10px;align-items:flex-start">
+        <input id="full-reset-understand" type="checkbox" required style="width:auto;margin-top:4px" />
+        <span>I understand that this permanently deletes the listed WMS data and all non-Owner user accounts.</span>
+      </label>
+      <button id="full-reset-confirm-btn" class="danger" type="submit">PERMANENTLY FULL RESET WMS</button>
+      <p class="small-note">If the PIN is wrong, nothing is reset. Five failed attempts within 10 minutes temporarily lock this reset action.</p>
+    </form>
+  </dialog>
 
   <dialog id="scanner-dialog" class="scanner-dialog">
     <div class="scanner-head"><div><h3 id="scanner-title">Scan code</h3><p>Point the camera at the barcode or QR code.</p></div><button id="scanner-close" class="icon-button" aria-label="Close">✕</button></div>

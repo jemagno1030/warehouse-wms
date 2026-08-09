@@ -272,6 +272,9 @@ function setupStaticEvents() {
   $('clear-qr-btn').addEventListener('click', clearQrSelection);
   $('print-qr-btn').addEventListener('click', printSelectedQrLabels);
   $('admin-code-btn').addEventListener('click', applyAdministrativeCode);
+  $('full-reset-open-btn').addEventListener('click', openFullResetDialog);
+  $('full-reset-close').addEventListener('click', () => $('full-reset-dialog').close());
+  $('full-reset-form').addEventListener('submit', submitFullReset);
   $('system-manager-refresh-btn').addEventListener('click', () => loadSystemManager(true));
   $('system-manager-usage-link').addEventListener('click', () => {
     window.open('https://supabase.com/dashboard/org/_/usage', '_blank', 'noopener,noreferrer');
@@ -449,7 +452,12 @@ async function refreshOwnAccountAccess() {
     .select('*')
     .eq('id', state.session.user.id)
     .single();
-  if (error || !profile) return;
+  if (error || !profile) {
+    toast('Your WMS account no longer exists or is no longer accessible.', 'error');
+    stopAccountAccessWatch();
+    await supabase.auth.signOut();
+    return;
+  }
 
   if (!profile.is_active) {
     toast('Your account has been kicked out by an administrator.', 'error');
@@ -3671,6 +3679,127 @@ async function applyAdministrativeCode() {
   $('control-result').textContent = `${row.new_mode === 'ACTIVE' ? 'Operations resumed' : 'Administrative Pause activated'} · ${row.transaction_no}`;
   $('control-result').classList.remove('hidden');
   toast('Global system mode changed across connected devices.', 'success');
+}
+
+
+async function openFullResetDialog() {
+  if (!isOwner()) return toast('Owner access is required.', 'error');
+
+  const button = $('full-reset-open-btn');
+  setBusy(button, true, 'Loading preview…');
+  try {
+    const { data, error } = await supabase.rpc('owner_full_reset_preview');
+    if (error) throw error;
+    const row = data?.[0] || {};
+
+    $('full-reset-preview').innerHTML = `
+      <strong>LIVE RESET PREVIEW</strong><br>
+      Owner accounts preserved: <strong>${Number(row.owner_accounts || 0).toLocaleString()}</strong><br>
+      Non-Owner Auth users removed: <strong>${Number(row.non_owner_auth_users || 0).toLocaleString()}</strong><br>
+      SKU records removed: <strong>${Number(row.sku_records || 0).toLocaleString()}</strong><br>
+      Stock lots removed: <strong>${Number(row.stock_lots || 0).toLocaleString()}</strong><br>
+      Shipper boxes removed: <strong>${Number(row.shipper_boxes || 0).toLocaleString()}</strong><br>
+      Transactions removed: <strong>${Number(row.transactions || 0).toLocaleString()}</strong><br>
+      Transaction lines removed: <strong>${Number(row.transaction_lines || 0).toLocaleString()}</strong><br>
+      System audit events removed: <strong>${Number(row.audit_events || 0).toLocaleString()}</strong><br>
+      Non-FEFO detail rows removed: <strong>${Number(row.non_fefo_events || 0).toLocaleString()}</strong><br>
+      Sales Orders removed: <strong>${Number(row.sales_orders || 0).toLocaleString()}</strong><br>
+      Current location locks removed: <strong>${Number(row.active_location_locks || 0).toLocaleString()}</strong><br>
+      Hidden/removed container records cleared: <strong>${Number(row.hidden_containers || 0).toLocaleString()}</strong>`;
+
+    $('full-reset-pin').value = '';
+    $('full-reset-understand').checked = false;
+    $('full-reset-dialog').showModal();
+    setTimeout(() => $('full-reset-pin').focus(), 50);
+  } catch (error) {
+    toast(friendlyError(error), 'error');
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function clearClientAfterFullReset() {
+  stopHeartbeat(state.pick);
+  stopHeartbeat(state.transfer);
+
+  state.putaway = { locationCode: null, cart: [], matchedSkuId: null, duplicateDetailsSkuId: null, lookupSequence: 0 };
+  state.shipperPutaway = freshShipperPutawayState();
+  state.pick = freshOperationState();
+  state.transfer = freshOperationState();
+  state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
+  state.pickOrderLookupSequence = 0;
+  state.pickOrderSummary = [];
+  state.selectedQrLocations.clear();
+  Object.keys(state.data).forEach((key) => { state.data[key] = []; });
+}
+
+async function submitFullReset(event) {
+  event.preventDefault();
+  if (!isOwner()) return toast('Owner access is required.', 'error');
+
+  const pin = $('full-reset-pin').value;
+  if (!pin) return toast('Enter the Full Reset confirmation PIN.', 'error');
+  if (!$('full-reset-understand').checked) {
+    return toast('Confirm that you understand the Full Reset is permanent.', 'error');
+  }
+
+  const finalConfirm = window.confirm(
+    'FINAL CONFIRMATION\n\n' +
+    'This will permanently clear the WMS SKU Masterlist, current inventory, containers, Shipper data, Sales Orders, ' +
+    'Transaction History, System Audit Events, other operational reports, and every non-Owner user account.\n\n' +
+    'Owner accounts, rack locations, system configuration, and database structure will remain.\n\n' +
+    'Continue with FULL RESET?'
+  );
+  if (!finalConfirm) return;
+
+  const button = $('full-reset-confirm-btn');
+  setBusy(button, true, 'Resetting…');
+
+  try {
+    const { data, error } = await supabase.rpc('owner_full_reset_wms', {
+      p_confirmation_pin: pin
+    });
+    if (error) throw error;
+
+    const row = data?.[0] || {};
+    if (row.result_status === 'INVALID_PIN') {
+      $('full-reset-pin').value = '';
+      return toast('Invalid Full Reset confirmation PIN. Nothing was reset.', 'error');
+    }
+    if (row.result_status === 'LOCKED_OUT') {
+      $('full-reset-pin').value = '';
+      return toast('Too many failed Full Reset PIN attempts. Try again after 10 minutes.', 'error');
+    }
+    if (row.result_status !== 'RESET_COMPLETE') {
+      throw new Error(`Unexpected reset result: ${row.result_status || 'unknown'}`);
+    }
+
+    clearClientAfterFullReset();
+    applyMode('ADMINISTRATIVE_PAUSE');
+    $('full-reset-dialog').close();
+
+    $('full-reset-result').innerHTML = `
+      <strong>FULL WMS DATA RESET COMPLETED.</strong><br>
+      Owner accounts preserved: ${Number(row.owner_accounts_preserved || 0).toLocaleString()}<br>
+      Non-Owner users deleted: ${Number(row.non_owner_users_deleted || 0).toLocaleString()}<br>
+      SKUs deleted: ${Number(row.skus_deleted || 0).toLocaleString()} ·
+      Stock lots deleted: ${Number(row.stock_lots_deleted || 0).toLocaleString()} ·
+      Shipper boxes deleted: ${Number(row.shipper_boxes_deleted || 0).toLocaleString()}<br>
+      Transactions deleted: ${Number(row.transactions_deleted || 0).toLocaleString()} ·
+      Transaction lines deleted: ${Number(row.transaction_lines_deleted || 0).toLocaleString()} ·
+      Audit events deleted: ${Number(row.audit_events_deleted || 0).toLocaleString()}<br>
+      Sales Orders deleted: ${Number(row.sales_orders_deleted || 0).toLocaleString()} ·
+      Rack locks deleted: ${Number(row.location_locks_deleted || 0).toLocaleString()}<br>
+      <strong>System remains in Administrative Pause.</strong> Inspect the blank system before Operational Resume.`;
+    $('full-reset-result').classList.remove('hidden');
+
+    toast('Full WMS data reset completed. Owner accounts and rack/system structure were preserved.', 'success');
+  } catch (error) {
+    toast(`Full Reset failed. No partial reset should be committed: ${friendlyError(error)}`, 'error');
+  } finally {
+    $('full-reset-pin').value = '';
+    setBusy(button, false);
+  }
 }
 
 async function openScanner(targetId, kind) {
