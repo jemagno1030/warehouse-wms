@@ -87,7 +87,7 @@ const state = {
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
   transfer: freshOperationState(),
-  data: { inventory: [], skuMaster: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], locations: [], rackMap: [] },
+  data: { inventory: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], locations: [], rackMap: [] },
   selectedQrLocations: new Set(),
   accountAccessTimer: null
 };
@@ -115,6 +115,7 @@ const screenMeta = {
   transfer: ['Stock transfer', 'Move stock lots between rack locations'],
   inventory: ['Inventory', 'Stock by SKU, container, expiry, and location'],
   skumaster: ['SKU Masterlist', 'Permanent SKU details and registered CASE / PACK / PIECE barcodes'],
+  skuhealth: ['SKU Master Data Health', 'Admin/Owner duplicate, split-barcode, incomplete, and archived SKU review'],
   containers: ['Containers', 'Container consumption and remaining contents'],
   rackmap: ['Rack map', 'Visual location occupancy and active locks'],
   expiry: ['Expiry alerts', 'Expired and near-expiry stock'],
@@ -257,6 +258,8 @@ function setupStaticEvents() {
 
   $('inventory-search').addEventListener('input', renderInventory);
   $('sku-master-search').addEventListener('input', renderSkuMaster);
+  $('sku-health-search').addEventListener('input', renderSkuHealth);
+  $('sku-health-filter').addEventListener('change', renderSkuHealth);
   $('container-search').addEventListener('input', renderContainers);
   $('history-search').addEventListener('input', renderHistory);
   $('history-type').addEventListener('change', renderHistory);
@@ -324,6 +327,8 @@ function setupStaticEvents() {
     if (skuMasterEdit) openSkuMasterEdit(skuMasterEdit.dataset.skuMasterEdit);
     const skuMasterDelete = event.target.closest('[data-sku-master-delete]');
     if (skuMasterDelete) deleteSkuMaster(skuMasterDelete.dataset.skuMasterDelete);
+    const skuHealthReview = event.target.closest('[data-sku-health-review]');
+    if (skuHealthReview) reviewSkuHealthInMasterlist(skuHealthReview.dataset.skuHealthReview);
     const containerDelete = event.target.closest('[data-container-delete]');
     if (containerDelete) deleteConsumedContainer(containerDelete.dataset.containerDelete);
     const userRole = event.target.closest('[data-user-role]');
@@ -561,7 +566,7 @@ function canOpenScreen(name) {
   if (name === 'locations' && !isSupervisor()) return false;
   if (name === 'skumaster' && !isSupervisor()) return false;
   if (name === 'nonfefo' && !isSupervisor()) return false;
-  if ((name === 'users' || name === 'systemmanager') && !isAdminOrOwner()) return false;
+  if ((name === 'users' || name === 'systemmanager' || name === 'skuhealth') && !isAdminOrOwner()) return false;
   if (name === 'control' && !isOwner()) return false;
   return true;
 }
@@ -569,7 +574,7 @@ function canOpenScreen(name) {
 function showScreen(name) {
   if (!canOpenScreen(name)) {
     if ((name === 'locations' || name === 'skumaster' || name === 'nonfefo') && !isSupervisor()) toast('Supervisor access is required.', 'error');
-    if ((name === 'users' || name === 'systemmanager') && !isAdminOrOwner()) toast('Admin or Owner access is required.', 'error');
+    if ((name === 'users' || name === 'systemmanager' || name === 'skuhealth') && !isAdminOrOwner()) toast('Admin or Owner access is required.', 'error');
     if (name === 'control' && !isOwner()) toast('Owner access is required.', 'error');
     name = 'dashboard';
   }
@@ -590,6 +595,7 @@ async function loadScreen(name, force = false) {
     if (name === 'picking') await refreshPickSalesOrderStatus();
     if (name === 'inventory') await loadInventory(force);
     if (name === 'skumaster') await loadSkuMaster(force);
+    if (name === 'skuhealth') await loadSkuHealth(force);
     if (name === 'containers') await loadContainers(force);
     if (name === 'rackmap') await loadRackMap(force);
     if (name === 'expiry') await loadExpiry(force);
@@ -792,6 +798,7 @@ function uniqueBy(rows, keyFn) {
 function invalidateReports() {
   state.data.inventory = [];
   state.data.skuMaster = [];
+  state.data.skuHealth = [];
   state.data.containers = [];
   state.data.expiry = [];
   state.data.nonFefo = [];
@@ -836,6 +843,66 @@ function hidePutawayDuplicateWarning() {
   $('pa-still-add').checked = false;
 }
 
+function archivedSkuLabel(sku) {
+  return [sku?.brand, sku?.description, sku?.variant, sku?.size].filter(Boolean).join(' ');
+}
+
+function archivedSkuBarcodeText(sku) {
+  return `CASE: ${sku?.case_barcode || 'N/A'} · PACK: ${sku?.pack_barcode || 'N/A'} · PIECE: ${sku?.piece_barcode || 'N/A'}`;
+}
+
+async function offerArchivedSkuReactivation(sku, contextLabel = 'Put-away') {
+  if (!sku?.id) return false;
+
+  const label = archivedSkuLabel(sku);
+  const deletedInfo = sku.deleted_at ? `\nDeleted: ${fmtDateTime(sku.deleted_at)}` : '';
+  const deletedReason = sku.delete_reason ? `\nPrevious delete reason: ${sku.delete_reason}` : '';
+
+  if (!isAdminOrOwner()) {
+    toast('This barcode belongs to a previously deleted SKU. Ask an Admin or Owner to reactivate it.', 'warning');
+    return false;
+  }
+
+  const ok = window.confirm(
+    `This SKU was previously deleted from the SKU Masterlist.\n\n` +
+    `${label}\n${archivedSkuBarcodeText(sku)}${deletedInfo}${deletedReason}\n\n` +
+    `Do you want to reactivate the SAME original SKU record for ${contextLabel}?`
+  );
+  if (!ok) return false;
+
+  const reason = window.prompt(
+    `Enter the reason for reactivating this SKU:\n\n${label}`,
+    'SKU received again during Put-away'
+  );
+  if (reason === null) return false;
+  if (!reason.trim()) {
+    toast('A reason is required to reactivate an archived SKU.', 'error');
+    return false;
+  }
+
+  const { error } = await supabase.rpc('admin_reactivate_sku_master', {
+    p_sku_id: sku.id,
+    p_reason: reason.trim()
+  });
+  if (error) {
+    toast(friendlyError(error), 'error');
+    return false;
+  }
+
+  invalidateReports();
+  toast('Archived SKU reactivated. The original SKU record and barcode family were restored.', 'success');
+  return true;
+}
+
+async function findArchivedSkuByDetails(details, skuType = 'STANDARD') {
+  const { data, error } = await supabase.rpc('find_archived_sku_by_details_type', {
+    ...details,
+    p_sku_type: skuType
+  });
+  if (error) throw error;
+  return data || [];
+}
+
 async function resolvePutawaySku() {
   const sequence = ++state.putaway.lookupSequence;
   const fields = [
@@ -864,19 +931,24 @@ async function resolvePutawaySku() {
   // legitimately exist in another barcode category, so cross-category matches
   // are warnings only and never rewrite the user's field.
   const responses = await Promise.all(actualEntries.map(async (entry) => {
-    const [typed, all] = await Promise.all([
+    const [typed, all, archivedTyped] = await Promise.all([
       supabase.rpc('find_sku_by_barcode_type', { p_barcode: entry.value, p_barcode_type: entry.expectedType }),
-      supabase.rpc('find_sku_barcode_matches', { p_barcode: entry.value })
+      supabase.rpc('find_sku_barcode_matches', { p_barcode: entry.value }),
+      supabase.rpc('find_archived_sku_by_barcode_type', { p_barcode: entry.value, p_barcode_type: entry.expectedType })
     ]);
-    return { entry, typed, all };
+    return { entry, typed, all, archivedTyped };
   }));
   if (sequence !== state.putaway.lookupSequence) return 'stale';
 
-  const failed = responses.find((response) => response.typed.error || response.all.error);
-  if (failed) return toast(friendlyError(failed.typed.error || failed.all.error), 'error') || 'error';
+  const failed = responses.find((response) => response.typed.error || response.all.error || response.archivedTyped.error);
+  if (failed) return toast(friendlyError(failed.typed.error || failed.all.error || failed.archivedTyped.error), 'error') || 'error';
 
   const typedRows = responses.flatMap((response) => response.typed.data?.[0] ? [response.typed.data[0]] : []);
   const matches = uniqueBy(typedRows, (row) => row.id);
+  const archivedTypedRows = uniqueBy(
+    responses.flatMap((response) => response.archivedTyped.data?.[0] ? [response.archivedTyped.data[0]] : []),
+    (row) => row.id
+  );
 
   if (matches.length > 1) {
     state.putaway.matchedSkuId = null;
@@ -926,6 +998,52 @@ async function resolvePutawaySku() {
     return 'existing';
   }
 
+  if (!matches.length && archivedTypedRows.length) {
+    if (archivedTypedRows.length > 1) {
+      state.putaway.matchedSkuId = null;
+      setPutawayDetailsReadonly(false);
+      $('pa-match-note').innerHTML = '<strong>Archived SKU conflict:</strong> the entered barcode categories point to more than one previously deleted SKU. Do not create a new SKU. Review SKU Master Data Health.';
+      $('pa-match-note').classList.remove('hidden');
+      toast('The entered barcodes point to different archived SKU records.', 'error');
+      return 'conflict';
+    }
+
+    const archivedSku = archivedTypedRows[0];
+
+    for (const entry of actualEntries) {
+      const stored = normalizeBarcode(archivedSku[`${entry.expectedType.toLowerCase()}_barcode`]);
+      if (entry.value.toLowerCase() !== stored.toLowerCase()) {
+        state.putaway.matchedSkuId = null;
+        setPutawayDetailsReadonly(false);
+        $('pa-match-note').innerHTML =
+          `<strong>Archived SKU barcode conflict:</strong> ${escapeHtml(entry.expectedType)} ${escapeHtml(entry.value)} does not match the archived SKU's stored ${escapeHtml(entry.expectedType)} barcode ${escapeHtml(stored)}.<br>` +
+          `Archived SKU: ${escapeHtml(archivedSkuLabel(archivedSku))}. Review SKU Master Data Health instead of creating another master record.`;
+        $('pa-match-note').classList.remove('hidden');
+        return 'conflict';
+      }
+    }
+
+    if (String(archivedSku.sku_type || 'STANDARD').toUpperCase() === 'SHIPPER') {
+      state.putaway.matchedSkuId = null;
+      setPutawayDetailsReadonly(false);
+      $('pa-match-note').innerHTML =
+        `<strong>Previously deleted Shipper SKU found.</strong> ${escapeHtml(archivedSkuLabel(archivedSku))}<br>` +
+        `${escapeHtml(archivedSkuBarcodeText(archivedSku))}<br>Switch Put-away type to <strong>Shipper Box</strong> to reactivate/use it.`;
+      $('pa-match-note').classList.remove('hidden');
+      return 'archived';
+    }
+
+    $('pa-match-note').innerHTML =
+      `<strong>Previously deleted SKU found.</strong> ${escapeHtml(archivedSkuLabel(archivedSku))}<br>` +
+      `${escapeHtml(archivedSkuBarcodeText(archivedSku))}<br>` +
+      `${isAdminOrOwner() ? 'Confirm reactivation to restore the original SKU record.' : 'Ask an Admin or Owner to reactivate this SKU before Put-away.'}`;
+    $('pa-match-note').classList.remove('hidden');
+
+    const reactivated = await offerArchivedSkuReactivation(archivedSku, 'Standard Put-away');
+    if (reactivated) return resolvePutawaySku();
+    return 'archived';
+  }
+
   // No same-category match exists. Warn about any cross-category use, but allow
   // the user to continue creating this barcode in its entered category.
   const crossWarnings = [];
@@ -973,6 +1091,20 @@ async function checkPutawayDuplicateDetails() {
   }
   const match = data?.[0];
   if (!match) {
+    try {
+      const archivedMatches = await findArchivedSkuByDetails(details, 'STANDARD');
+      const archived = archivedMatches[0];
+      if (archived) {
+        state.putaway.duplicateDetailsSkuId = archived.id;
+        $('pa-duplicate-details').textContent =
+          `A previously deleted SKU has the same details. Archived barcodes — CASE: ${archived.case_barcode}; PACK: ${archived.pack_barcode}; PIECE: ${archived.piece_barcode}. ` +
+          `If this is the same physical product, use its original barcode so Admin/Owner can reactivate the original record. Only use Still Add to Database when this is genuinely a different barcode family.`;
+        $('pa-duplicate-warning').classList.remove('hidden');
+        return { ...archived, archived: true };
+      }
+    } catch (archivedError) {
+      toast(friendlyError(archivedError), 'error');
+    }
     hidePutawayDuplicateWarning();
     return null;
   }
@@ -1025,7 +1157,7 @@ async function addPutawayItem(event) {
 
   try {
     const resolution = await resolvePutawaySku();
-    if (['conflict', 'error', 'stale'].includes(resolution)) return;
+    if (['conflict', 'error', 'stale', 'archived'].includes(resolution)) return;
     if (!form.reportValidity()) return;
 
     const location = normalizeLocation($('pa-location').value);
@@ -1184,13 +1316,36 @@ async function resolveShipperSku() {
     return null;
   }
 
-  const [typedResult, allResult] = await Promise.all([
+  const [typedResult, allResult, archivedResult] = await Promise.all([
     supabase.rpc('find_sku_by_barcode_type', { p_barcode: barcode, p_barcode_type: 'CASE' }),
-    supabase.rpc('find_sku_barcode_matches', { p_barcode: barcode })
+    supabase.rpc('find_sku_barcode_matches', { p_barcode: barcode }),
+    supabase.rpc('find_archived_sku_by_barcode_type', { p_barcode: barcode, p_barcode_type: 'CASE' })
   ]);
   if (sequence !== state.shipperPutaway.shipperLookupSequence) return null;
-  if (typedResult.error || allResult.error) return toast(friendlyError(typedResult.error || allResult.error), 'error');
+  if (typedResult.error || allResult.error || archivedResult.error) return toast(friendlyError(typedResult.error || allResult.error || archivedResult.error), 'error');
   const sku = typedResult.data?.[0];
+  if (!sku && archivedResult.data?.[0]) {
+    const archivedSku = archivedResult.data[0];
+    state.shipperPutaway.matchedShipperSku = null;
+    setShipperDetailsReadonly(false);
+
+    if (String(archivedSku.sku_type || '').toUpperCase() !== 'SHIPPER') {
+      $('sp-match-note').innerHTML =
+        `<strong>Previously deleted STANDARD SKU found.</strong> CASE ${escapeHtml(barcode)} belongs to archived STANDARD SKU ${escapeHtml(archivedSkuLabel(archivedSku))}, not a Shipper master.`;
+      $('sp-match-note').classList.remove('hidden');
+      return toast('This archived CASE barcode belongs to a STANDARD SKU.', 'error');
+    }
+
+    $('sp-match-note').innerHTML =
+      `<strong>Previously deleted Shipper SKU found.</strong> ${escapeHtml(archivedSkuLabel(archivedSku))}<br>` +
+      `${escapeHtml(archivedSkuBarcodeText(archivedSku))}<br>` +
+      `${isAdminOrOwner() ? 'Confirm reactivation to restore the original Shipper master record.' : 'Ask an Admin or Owner to reactivate it.'}`;
+    $('sp-match-note').classList.remove('hidden');
+
+    const reactivated = await offerArchivedSkuReactivation(archivedSku, 'Shipper Box Put-away');
+    if (reactivated) return resolveShipperSku();
+    return null;
+  }
   if (!sku) {
     state.shipperPutaway.matchedShipperSku = null;
     setShipperDetailsReadonly(false);
@@ -1238,7 +1393,24 @@ async function checkShipperDuplicateDetails() {
   const { data, error } = await supabase.rpc('find_sku_by_details_type', { ...details, p_sku_type: 'SHIPPER' });
   if (error) { toast(friendlyError(error), 'error'); return null; }
   const match = data?.[0];
-  if (!match) { hideShipperDuplicateWarning(); return null; }
+  if (!match) {
+    try {
+      const archivedMatches = await findArchivedSkuByDetails(details, 'SHIPPER');
+      const archived = archivedMatches[0];
+      if (archived) {
+        state.shipperPutaway.duplicateShipperSkuId = archived.id;
+        $('sp-duplicate-details').textContent =
+          `A previously deleted Shipper SKU has the same details. Archived CASE: ${archived.case_barcode}. ` +
+          `If this is the same Shipper product, use that original CASE barcode so Admin/Owner can reactivate it.`;
+        $('sp-duplicate-warning').classList.remove('hidden');
+        return { ...archived, archived: true };
+      }
+    } catch (archivedError) {
+      toast(friendlyError(archivedError), 'error');
+    }
+    hideShipperDuplicateWarning();
+    return null;
+  }
   state.shipperPutaway.duplicateShipperSkuId = match.id;
   $('sp-duplicate-details').textContent = `Existing barcodes — CASE: ${match.case_barcode}; PACK: ${match.pack_barcode}; PIECE: ${match.piece_barcode}. Added by: ${match.created_by_username || 'unknown user'}.`;
   $('sp-duplicate-warning').classList.remove('hidden');
@@ -1257,13 +1429,35 @@ async function resolveShipperContentSku() {
     return null;
   }
 
-  const [typedResult, allResult] = await Promise.all([
+  const [typedResult, allResult, archivedResult] = await Promise.all([
     supabase.rpc('find_sku_by_barcode_type', { p_barcode: barcode, p_barcode_type: 'PACK' }),
-    supabase.rpc('find_sku_barcode_matches', { p_barcode: barcode })
+    supabase.rpc('find_sku_barcode_matches', { p_barcode: barcode }),
+    supabase.rpc('find_archived_sku_by_barcode_type', { p_barcode: barcode, p_barcode_type: 'PACK' })
   ]);
   if (sequence !== state.shipperPutaway.contentLookupSequence) return null;
-  if (typedResult.error || allResult.error) return toast(friendlyError(typedResult.error || allResult.error), 'error');
+  if (typedResult.error || allResult.error || archivedResult.error) return toast(friendlyError(typedResult.error || allResult.error || archivedResult.error), 'error');
   const sku = typedResult.data?.[0];
+  if (!sku && archivedResult.data?.[0]) {
+    const archivedSku = archivedResult.data[0];
+    state.shipperPutaway.contentSku = null;
+    setShipperContentDetailsReadonly(false);
+
+    if (String(archivedSku.sku_type || '').toUpperCase() !== 'STANDARD') {
+      $('sp-content-match-note').innerHTML = '<strong>Archived Shipper master detected.</strong> A Shipper master cannot be used as a child PACK SKU.';
+      $('sp-content-match-note').classList.remove('hidden');
+      return toast('This archived PACK barcode is not a STANDARD child SKU.', 'error');
+    }
+
+    $('sp-content-match-note').innerHTML =
+      `<strong>Previously deleted child SKU found.</strong> ${escapeHtml(archivedSkuLabel(archivedSku))}<br>` +
+      `${escapeHtml(archivedSkuBarcodeText(archivedSku))}<br>` +
+      `${isAdminOrOwner() ? 'Confirm reactivation to restore the original child SKU record.' : 'Ask an Admin or Owner to reactivate it.'}`;
+    $('sp-content-match-note').classList.remove('hidden');
+
+    const reactivated = await offerArchivedSkuReactivation(archivedSku, 'Shipper content Put-away');
+    if (reactivated) return resolveShipperContentSku();
+    return null;
+  }
   if (!sku) {
     state.shipperPutaway.contentSku = null;
     setShipperContentDetailsReadonly(false);
@@ -1307,7 +1501,24 @@ async function checkShipperContentDuplicateDetails() {
   const { data, error } = await supabase.rpc('find_sku_by_details_type', { ...details, p_sku_type: 'STANDARD' });
   if (error) { toast(friendlyError(error), 'error'); return null; }
   const match = data?.[0];
-  if (!match) { hideShipperContentDuplicateWarning(); return null; }
+  if (!match) {
+    try {
+      const archivedMatches = await findArchivedSkuByDetails(details, 'STANDARD');
+      const archived = archivedMatches[0];
+      if (archived) {
+        state.shipperPutaway.duplicateContentSkuId = archived.id;
+        $('sp-content-duplicate-details').textContent =
+          `A previously deleted STANDARD SKU has the same details. Archived PACK: ${archived.pack_barcode}. ` +
+          `If this is the same physical item, use its original PACK barcode so Admin/Owner can reactivate the original record.`;
+        $('sp-content-duplicate-warning').classList.remove('hidden');
+        return { ...archived, archived: true };
+      }
+    } catch (archivedError) {
+      toast(friendlyError(archivedError), 'error');
+    }
+    hideShipperContentDuplicateWarning();
+    return null;
+  }
   state.shipperPutaway.duplicateContentSkuId = match.id;
   $('sp-content-duplicate-details').textContent = `Existing barcodes — CASE: ${match.case_barcode}; PACK: ${match.pack_barcode}; PIECE: ${match.piece_barcode}. Added by: ${match.created_by_username || 'unknown user'}.`;
   $('sp-content-duplicate-warning').classList.remove('hidden');
@@ -2835,6 +3046,215 @@ The balance will become zero. Historical transaction records will remain.`)) ret
 }
 
 
+function skuHealthActual(code) {
+  const value = normalizeBarcode(code);
+  return value && value !== 'N/A' ? value : null;
+}
+
+function buildSkuHealthGroups(rows) {
+  const map = new Map();
+
+  for (const row of rows || []) {
+    const key = row.detail_group_key || `${row.sku_type}|${row.brand}|${row.description}|${row.variant}|${row.size}`;
+    if (!map.has(key)) map.set(key, { key, rows: [] });
+    map.get(key).rows.push(row);
+  }
+
+  return Array.from(map.values()).map((group) => {
+    const active = group.rows.filter((r) => r.is_active);
+    const archived = group.rows.filter((r) => !r.is_active);
+    const sample = active[0] || archived[0] || group.rows[0];
+
+    const categoryStats = {};
+    for (const category of ['case','pack','piece']) {
+      const values = active.map((r) => skuHealthActual(r[`${category}_barcode`])).filter(Boolean);
+      const unique = Array.from(new Set(values.map((v) => v.toLowerCase())));
+      const naCount = active.filter((r) => !skuHealthActual(r[`${category}_barcode`])).length;
+      categoryStats[category] = { values, unique, naCount };
+    }
+
+    const duplicateDetails = active.length > 1;
+    const splitBarcodes = duplicateDetails && ['case','pack','piece'].some((category) => {
+      const stat = categoryStats[category];
+      return stat.unique.length > 1 || (stat.unique.length > 0 && stat.naCount > 0);
+    });
+    const incomplete = active.some((r) => {
+      const type = String(r.sku_type || 'STANDARD').toUpperCase();
+      if (type === 'SHIPPER') return !skuHealthActual(r.case_barcode);
+      return !skuHealthActual(r.case_barcode) || !skuHealthActual(r.pack_barcode) || !skuHealthActual(r.piece_barcode);
+    });
+    const crossCategory = active.some((r) => Boolean(r.cross_category_reuse));
+    const archivedOnly = active.length === 0 && archived.length > 0;
+
+    let status = 'CLEAN';
+    if (archivedOnly) status = 'ARCHIVED';
+    else if (duplicateDetails || splitBarcodes || crossCategory) status = 'REVIEW';
+    else if (incomplete) status = 'INCOMPLETE';
+
+    const issues = [];
+    if (duplicateDetails) issues.push('Duplicate details');
+    if (splitBarcodes) issues.push('Possible split barcode family');
+    if (crossCategory) issues.push('Cross-category barcode reuse');
+    if (incomplete) issues.push('Incomplete barcode family');
+    if (archivedOnly) issues.push('Archived only');
+
+    return {
+      ...group,
+      active,
+      archived,
+      sample,
+      categoryStats,
+      duplicateDetails,
+      splitBarcodes,
+      incomplete,
+      crossCategory,
+      archivedOnly,
+      status,
+      issues
+    };
+  });
+}
+
+async function loadSkuHealth(force = false) {
+  if (!isAdminOrOwner()) return;
+  if (!force && state.data.skuHealth.length) return renderSkuHealth();
+
+  const { data, error } = await supabase.rpc('admin_get_sku_master_health');
+  if (error) throw error;
+
+  state.data.skuHealth = data || [];
+  renderSkuHealth();
+}
+
+function skuHealthPill(status) {
+  if (status === 'REVIEW') return '<span class="pill expired">REVIEW</span>';
+  if (status === 'INCOMPLETE') return '<span class="pill near">INCOMPLETE</span>';
+  if (status === 'ARCHIVED') return '<span class="pill">ARCHIVED</span>';
+  return '<span class="pill">CLEAN</span>';
+}
+
+function skuHealthBarcodeCoverage(group) {
+  const parts = ['case','pack','piece'].map((category) => {
+    const label = category.toUpperCase();
+    const values = Array.from(new Set(
+      group.active.map((r) => skuHealthActual(r[`${category}_barcode`])).filter(Boolean)
+    ));
+    return `${label}: ${values.length ? values.join(' / ') : 'N/A'}`;
+  });
+  return parts.join('<br>');
+}
+
+function skuHealthRecordDetails(group) {
+  return group.rows.map((r) => {
+    const stateText = r.is_active ? 'ACTIVE' : 'ARCHIVED';
+    const stockText = Number(r.positive_lot_count || 0) > 0 ? ` · ${Number(r.positive_lot_count).toLocaleString()} positive lot(s)` : '';
+    const deletedText = !r.is_active && r.deleted_at ? ` · deleted ${fmtDateTime(r.deleted_at)}` : '';
+    return `<div style="margin-bottom:8px">
+      <strong>${escapeHtml(stateText)}</strong> ·
+      CASE ${escapeHtml(r.case_barcode || 'N/A')} ·
+      PACK ${escapeHtml(r.pack_barcode || 'N/A')} ·
+      PIECE ${escapeHtml(r.piece_barcode || 'N/A')}
+      ${escapeHtml(stockText)}${escapeHtml(deletedText)}
+      ${!r.is_active && r.delete_reason ? `<br><small>Delete reason: ${escapeHtml(r.delete_reason)}</small>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function renderSkuHealth() {
+  if (!isAdminOrOwner()) return;
+
+  const groups = buildSkuHealthGroups(state.data.skuHealth);
+  const term = $('sku-health-search').value.trim().toLowerCase();
+  const filter = $('sku-health-filter').value;
+
+  const visible = groups.filter((group) => {
+    const haystack = group.rows.map((r) => [
+      r.sku_type, r.brand, r.description, r.variant, r.size,
+      r.case_barcode, r.pack_barcode, r.piece_barcode,
+      r.created_by_username, r.deleted_by_username, r.delete_reason
+    ].join(' ')).join(' ').toLowerCase();
+
+    if (term && !haystack.includes(term)) return false;
+    if (!filter || filter === 'ALL') return true;
+    if (filter === 'NEEDS_REVIEW') return ['REVIEW','INCOMPLETE'].includes(group.status);
+    if (filter === 'DUPLICATE') return group.duplicateDetails;
+    if (filter === 'SPLIT') return group.splitBarcodes;
+    if (filter === 'CROSS') return group.crossCategory;
+    if (filter === 'INCOMPLETE') return group.incomplete && !group.archivedOnly;
+    if (filter === 'ARCHIVED') return group.archived.length > 0;
+    if (filter === 'CLEAN') return group.status === 'CLEAN';
+    return true;
+  });
+
+  const activeSkuCount = state.data.skuHealth.filter((r) => r.is_active).length;
+  const archivedSkuCount = state.data.skuHealth.filter((r) => !r.is_active).length;
+  const duplicateGroups = groups.filter((g) => g.duplicateDetails).length;
+  const splitGroups = groups.filter((g) => g.splitBarcodes).length;
+  const reviewGroups = groups.filter((g) => ['REVIEW','INCOMPLETE'].includes(g.status)).length;
+  const cleanGroups = groups.filter((g) => g.status === 'CLEAN').length;
+
+  $('sku-health-summary').innerHTML =
+    `<strong>Active SKUs:</strong> ${activeSkuCount.toLocaleString()} · ` +
+    `<strong>Clean groups:</strong> ${cleanGroups.toLocaleString()} · ` +
+    `<strong>Needs review:</strong> ${reviewGroups.toLocaleString()} · ` +
+    `<strong>Duplicate-detail groups:</strong> ${duplicateGroups.toLocaleString()} · ` +
+    `<strong>Split-barcode groups:</strong> ${splitGroups.toLocaleString()} · ` +
+    `<strong>Archived records:</strong> ${archivedSkuCount.toLocaleString()}`;
+
+  $('sku-health-count').textContent =
+    `${visible.length.toLocaleString()} of ${groups.length.toLocaleString()} SKU detail group(s) shown`;
+
+  $('sku-health-table').innerHTML = visible.length ? `<table>
+    <thead><tr>
+      <th>Status</th>
+      <th>SKU details</th>
+      <th>Barcode coverage</th>
+      <th>Master records</th>
+      <th>Issues / recommendation</th>
+      <th></th>
+    </tr></thead>
+    <tbody>${visible.map((group) => {
+      const s = group.sample;
+      const label = [s.brand, s.description, s.variant, s.size].filter(Boolean).join(' ');
+      const recommendation = group.status === 'CLEAN'
+        ? 'No master-data issue detected.'
+        : group.archivedOnly
+          ? 'Archived record. If the original barcode is received again, Put-away will detect it and Admin/Owner can reactivate the same record.'
+          : group.splitBarcodes
+            ? 'Physically verify whether these records are one product. If yes, complete one canonical barcode family through SKU Masterlist Edit, then retire unnecessary zero-stock duplicates.'
+            : group.duplicateDetails
+              ? 'Verify whether these are truly different products/barcode families before keeping multiple master records.'
+              : group.crossCategory
+                ? 'The same digits are reused in different barcode categories. This is allowed, but warehouse staff should verify the correct CASE/PACK/PIECE field.'
+                : 'Review N/A barcode categories. Complete the barcode family through SKU Masterlist Edit if official barcodes are now known.';
+
+      const reviewRow = group.active[0];
+      return `<tr>
+        <td>${skuHealthPill(group.status)}</td>
+        <td class="wrap"><strong>${escapeHtml(s.sku_type || 'STANDARD')}</strong><br>${escapeHtml(label)}</td>
+        <td class="wrap">${skuHealthBarcodeCoverage(group)}</td>
+        <td class="wrap"><details><summary>${group.active.length} active · ${group.archived.length} archived</summary>${skuHealthRecordDetails(group)}</details></td>
+        <td class="wrap">${group.issues.length ? group.issues.map((x) => `<span class="pill near">${escapeHtml(x)}</span>`).join(' ') : '<span class="pill">Clean</span>'}<br><small>${escapeHtml(recommendation)}</small></td>
+        <td>${reviewRow ? `<button class="link-btn" type="button" data-sku-health-review="${escapeHtml(reviewRow.sku_id)}">Review in Masterlist</button>` : '<small>Archived only</small>'}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>` : emptyState('No SKU groups match the selected health filter.');
+}
+
+function reviewSkuHealthInMasterlist(skuId) {
+  if (!isAdminOrOwner()) return;
+  const row = state.data.skuHealth.find((r) => r.sku_id === skuId);
+  if (!row) return toast('SKU health record not found. Refresh the report.', 'error');
+
+  showScreen('skumaster');
+  setTimeout(() => {
+    const search = $('sku-master-search');
+    search.value = skuHealthActual(row.case_barcode) || skuHealthActual(row.pack_barcode) || skuHealthActual(row.piece_barcode) || row.description || '';
+    renderSkuMaster();
+    search.focus();
+  }, 50);
+}
+
 async function loadSkuMaster(force = false) {
   if (!isSupervisor()) return;
   if (!force && state.data.skuMaster.length) return renderSkuMaster();
@@ -3907,6 +4327,7 @@ function exportDataset(name) {
   let filename = `${name}-${new Date().toISOString().slice(0, 10)}.csv`;
   if (name === 'inventory') rows = state.data.inventory;
   if (name === 'skumaster') rows = state.data.skuMaster;
+  if (name === 'skuhealth') rows = state.data.skuHealth;
   if (name === 'containers') rows = state.data.containers;
   if (name === 'expiry') rows = state.data.expiry;
   if (name === 'nonfefo') rows = state.data.nonFefo;

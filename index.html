@@ -61,6 +61,7 @@
         <button data-screen="transfer">Stock transfer</button>
         <button data-screen="inventory">Inventory</button>
         <button data-screen="skumaster" data-role-min="supervisor">SKU Masterlist</button>
+        <button data-screen="skuhealth" data-role-min="admin">SKU Master Data Health</button>
         <button data-screen="containers">Containers</button>
         <button data-screen="rackmap">Rack map</button>
         <button data-screen="expiry">Expiry alerts</button>
@@ -282,9 +283,51 @@
             <button class="secondary export-btn" data-export="skumaster">Export CSV</button>
           </div>
           <div class="filters"><input id="sku-master-search" placeholder="Search brand, description, variant, size, barcode, or creator..." /></div>
-          <div class="info-box"><strong>Access:</strong> Supervisor = view only · Admin / Owner = view and edit. Every edit requires a reason, is written to Audit History, and affects future barcode lookups immediately.</div>
+          <div class="info-box"><strong>Access:</strong> Supervisor = view only · Admin / Owner = view, edit, and archive/delete. Every change requires a reason and is written to Audit History. Archived SKUs keep their historical identity; if an original archived barcode is encountered again in Put-away, the system warns the user and Admin/Owner can reactivate that same original SKU record.</div>
           <p id="sku-master-count" class="small-note">0 SKU record(s) shown</p>
           <div id="sku-master-table" class="table-wrap"></div>
+        </article>
+      </section>
+
+      <section id="screen-skuhealth" class="screen">
+        <article class="card">
+          <div class="card-head">
+            <div>
+              <h3>SKU Master Data Health</h3>
+              <p>Admin / Owner review of duplicate details, possible split barcode families, incomplete barcode sets, cross-category barcode reuse, and archived SKU records.</p>
+            </div>
+            <button class="secondary export-btn" data-export="skuhealth">Export CSV</button>
+          </div>
+
+          <div class="info-box">
+            <strong>Read-only diagnostic report.</strong> This module does not merge, edit, delete, or reactivate anything automatically.
+            Always physically verify the product before changing a SKU master record.
+          </div>
+
+          <div id="sku-health-summary" class="info-box">Loading SKU health summary…</div>
+
+          <div class="filters grid">
+            <input id="sku-health-search" placeholder="Search SKU details, CASE/PACK/PIECE barcode, creator, delete reason..." />
+            <select id="sku-health-filter">
+              <option value="NEEDS_REVIEW">Needs review</option>
+              <option value="ALL">All SKU groups</option>
+              <option value="DUPLICATE">Duplicate details</option>
+              <option value="SPLIT">Possible split barcodes</option>
+              <option value="CROSS">Cross-category barcode reuse</option>
+              <option value="INCOMPLETE">Incomplete barcode family</option>
+              <option value="ARCHIVED">Includes archived records</option>
+              <option value="CLEAN">Clean only</option>
+            </select>
+          </div>
+
+          <div class="info-box">
+            <strong>How to use it:</strong> a split/duplicate warning does not prove the records should be merged.
+            Verify the actual CASE/PACK/PIECE barcodes on the physical item first. If they are one product, use SKU Masterlist Edit
+            to establish one canonical barcode family, then archive unnecessary duplicate records only after their current inventory is zero.
+          </div>
+
+          <p id="sku-health-count" class="small-note">0 SKU group(s) shown</p>
+          <div id="sku-health-table" class="table-wrap"></div>
         </article>
       </section>
 
