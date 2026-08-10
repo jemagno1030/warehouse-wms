@@ -206,7 +206,7 @@
 
       <section id="screen-picking" class="screen">
         <div class="card form-card">
-          <div class="card-head"><div><h3>Picking session</h3><p>Use one sales order across as many source racks as needed. Complete each rack, then finish the sales order after all required items are picked.</p></div><span id="pick-lock-chip" class="status-chip neutral">No location locked</span></div>
+          <div class="card-head"><div><h3>Picking session</h3><p>Normal Sales Orders use the existing multi-rack workflow. Sales Order 0 is reserved for reusable Warehouse Stock Adjustment.</p></div><span id="pick-lock-chip" class="status-chip neutral">No location locked</span></div>
           <div class="form-grid three">
             <label>Sales order number *<input id="pick-so" required /></label>
             <label>Source rack / QR *<div class="scan-field"><input id="pick-location" /><button type="button" class="scan-btn" data-scan-target="pick-location" data-scan-kind="location">Scan</button></div></label>
@@ -218,6 +218,7 @@
           <div id="pick-barcode-match" class="info-box hidden"></div>
           <div id="pick-qty-note" class="info-box hidden"></div>
           <div id="pick-so-status" class="info-box"><strong>Sales order status:</strong> enter a sales order number. A completed sales order cannot be reused by a regular user.</div>
+          <div class="info-box"><strong>Warehouse Stock Adjustment:</strong> use Sales Order <strong>0</strong> when stock must be converted/reclassified physically. Example: OUT 1 damaged/incomplete CASE under SO 0, then Put-away the remaining usable PIECES. SO 0 is reusable indefinitely; normal Sales Order rules are unchanged.</div>
           <div id="pick-so-override-panel" class="warning-box hidden" data-role-min="admin">
             <label><input id="pick-so-override" type="checkbox" /> Admin override: reopen this sales order if it was already completed</label>
             <label>Override reason<input id="pick-so-override-reason" type="text" placeholder="Required only when reusing a completed sales order" disabled /></label>
@@ -236,7 +237,7 @@
             </div>
           </div>
           <div id="pick-cart" class="table-wrap"></div>
-          <div class="card-head compact"><div><h3>Sales order picking summary</h3><p>All saved picks from completed source racks, plus items currently queued on this rack, remain visible until you finish the sales order.</p></div><button id="pick-summary-refresh-btn" class="secondary" type="button">Refresh summary</button></div>
+          <div class="card-head compact"><div><h3>Picking / Stock Adjustment summary</h3><p>Normal Sales Orders show multi-rack progress. SO 0 shows only the current adjustment rack because each completed adjustment is immediately final and reusable.</p></div><button id="pick-summary-refresh-btn" class="secondary" type="button">Refresh summary</button></div>
           <div id="pick-order-summary" class="table-wrap"><div class="empty-state">Enter a sales order number to see its picking summary.</div></div>
         </div>
       </section>

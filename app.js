@@ -93,7 +93,15 @@ const state = {
 };
 
 function freshOperationState() {
-  return { lockToken: null, locationCode: null, heartbeat: null, cart: [], lots: [], rackLots: [], sku: null, naMode: false };
+  return { lockToken: null, locationCode: null, heartbeat: null, cart: [], lots: [], rackLots: [], sku: null, naMode: false, adjustmentSessionKey: null };
+}
+
+function isStockAdjustmentSalesOrder(value) {
+  return String(value ?? '').trim() === '0';
+}
+
+function isInternalStockAdjustmentKey(value) {
+  return String(value ?? '').trim().toUpperCase().startsWith('__WMS_ADJ0__:');
 }
 
 function freshShipperPutawayState() {
@@ -694,7 +702,7 @@ function renderDashboardActiveLocks(rows) {
     <td><strong>${escapeHtml(r.location_code)}</strong></td>
     <td>${escapeHtml(r.operation === 'PICK' ? 'Picking' : r.operation === 'TRANSFER' ? 'Stock Transfer' : r.operation)}</td>
     <td>${escapeHtml(r.username || '—')}</td>
-    <td>${escapeHtml(r.sales_order || '—')}</td>
+    <td>${isInternalStockAdjustmentKey(r.sales_order) ? '<strong>0</strong><br><small>Stock Adjustment</small>' : escapeHtml(r.sales_order || '—')}</td>
     <td>${fmtDateTime(r.acquired_at)}</td>
     <td>${fmtDateTime(r.expires_at)}</td>
   </tr>`).join('')}</tbody></table></div>`;
@@ -1667,6 +1675,12 @@ async function lockPickLocation() {
   const location = normalizeLocation($('pick-location').value);
   if (!so || !location) return toast('Enter the sales order and scan the source location first.', 'error');
 
+  if (isStockAdjustmentSalesOrder(so)) {
+    const locked = await acquireStockAdjustmentPickLock(location);
+    if (locked) await refreshPickSalesOrderStatus();
+    return;
+  }
+
   // Verify the sales order immediately before locking. This prevents a stale status
   // or an Admin override left checked from a previously entered sales order.
   const statusOk = await refreshPickSalesOrderStatus();
@@ -1690,6 +1704,42 @@ async function lockPickLocation() {
     $('pick-so-override-reason').value = '';
     await refreshPickSalesOrderStatus();
   }
+}
+
+async function acquireStockAdjustmentPickLock(location) {
+  const opState = state.pick;
+  const button = $('pick-lock-btn');
+  setBusy(button, true, 'Locking…');
+
+  const { data, error } = await supabase.rpc('acquire_stock_adjustment_pick_lock', {
+    p_location_code: location
+  });
+
+  setBusy(button, false);
+  if (error) {
+    toast(friendlyError(error), 'error');
+    return false;
+  }
+
+  const row = data?.[0];
+  if (!row?.lock_token || !row?.adjustment_session_key) {
+    toast('Stock Adjustment rack lock could not be created.', 'error');
+    return false;
+  }
+
+  opState.lockToken = row.lock_token;
+  opState.adjustmentSessionKey = row.adjustment_session_key;
+  opState.locationCode = row.location_code;
+
+  state.data.rackMap = [];
+  state.data.audit = [];
+
+  startHeartbeat(opState);
+  configureOperationUi('pick', true);
+  await loadPickRackContents();
+
+  toast(`${opState.locationCode} locked for Warehouse Stock Adjustment (SO 0).`, 'success');
+  return true;
 }
 
 async function lockTransferLocation() {
@@ -2488,16 +2538,27 @@ function removeCartItem(operation, index) {
 async function cancelOperation(operation, silent = false) {
   const opState = state[operation];
   if (opState.lockToken) {
-    const { error } = await supabase.rpc('cancel_location_operation', {
-      p_lock_token: opState.lockToken,
-      p_reason: silent ? 'Session ended during sign out.' : 'User cancelled or restarted the source-location session.'
-    });
+    const adjustmentMode = operation === 'pick' && Boolean(opState.adjustmentSessionKey);
+    const rpcName = adjustmentMode ? 'cancel_stock_adjustment_pick' : 'cancel_location_operation';
+    const rpcArgs = adjustmentMode
+      ? {
+          p_lock_token: opState.lockToken,
+          p_adjustment_session_key: opState.adjustmentSessionKey,
+          p_reason: silent ? 'Session ended during sign out.' : 'User cancelled or restarted the Stock Adjustment source-rack session.'
+        }
+      : {
+          p_lock_token: opState.lockToken,
+          p_reason: silent ? 'Session ended during sign out.' : 'User cancelled or restarted the source-location session.'
+        };
+    const { error } = await supabase.rpc(rpcName, rpcArgs);
     if (error && !silent) toast(friendlyError(error), 'error');
   }
   invalidateReports();
   resetOperation(operation);
   if (!silent) toast(operation === 'pick'
-    ? 'Rack session cancelled. The sales order remains open so you may scan the same or a different location.'
+    ? (isStockAdjustmentSalesOrder($('pick-so').value)
+        ? 'Stock Adjustment rack session cancelled. Sales Order 0 remains immediately reusable.'
+        : 'Rack session cancelled. The sales order remains open so you may scan the same or a different location.')
     : 'Session cancelled. You may scan the same or a different location.');
 }
 
@@ -2541,6 +2602,11 @@ function resetOperation(operation) {
 
 async function loadPickSalesOrderSummary() {
   const so = $('pick-so').value.trim();
+  if (isStockAdjustmentSalesOrder(so)) {
+    state.pickOrderSummary = [];
+    renderPickSalesOrderSummary();
+    return;
+  }
   if (!so || state.pickOrder.status === 'NEW' || !state.pickOrder.status) {
     state.pickOrderSummary = [];
     renderPickSalesOrderSummary();
@@ -2564,6 +2630,22 @@ function renderPickSalesOrderSummary() {
     container.innerHTML = emptyState('Enter a sales order number to see its picking summary.');
     return;
   }
+  if (isStockAdjustmentSalesOrder(so)) {
+    const queued = (state.pick.cart || []).map((row) => {
+      const item = [row.brand, row.description, row.variant, row.size].filter(Boolean).join(' ') || row.sku_name || '—';
+      return `<tr><td><span class="pill near">QUEUED</span></td><td>${escapeHtml(state.pick.locationCode || '—')}</td><td class="wrap"><strong>${escapeHtml(item)}</strong></td><td>${escapeHtml(row.container_no || '—')}</td><td>${fmtDate(row.expiry_date)}</td><td>${fmtQtyUom(row.qty, row.uom)}</td></tr>`;
+    }).join('');
+
+    container.innerHTML = `<div class="info-box">
+      <strong>Warehouse Stock Adjustment — Sales Order 0.</strong>
+      SO 0 has no permanent Sales Order lifecycle and can be reused indefinitely.
+      Each completed rack is saved immediately to Transaction History as SO 0.
+      <strong>Finish Sales Order is not required.</strong>
+    </div>` + (queued
+      ? `<table><thead><tr><th>Status</th><th>Rack</th><th>Item</th><th>Container</th><th>Expiry</th><th>Adjustment OUT</th></tr></thead><tbody>${queued}</tbody></table>`
+      : emptyState('No stock-adjustment items are queued on the current rack.'));
+    return;
+  }
   const saved = (state.pickOrderSummary || []).map((row) => ({ ...row, line_status: 'SAVED' }));
   const queued = (state.pick.cart || []).map((row) => ({
     transaction_no: 'Current rack', picked_at: null, location_code: state.pick.locationCode || '—',
@@ -2585,12 +2667,16 @@ function renderPickSalesOrderSummary() {
 }
 
 function isPickSalesOrderInputLocked() {
+  if (isStockAdjustmentSalesOrder($('pick-so').value)) {
+    return Boolean(state.pick.lockToken);
+  }
   return Boolean(state.pick.lockToken)
     || (state.pickOrder.status === 'OPEN' && Boolean(state.pickOrder.isCurrentOwner));
 }
 
 function updatePickSalesOrderControls() {
   const hasSo = Boolean($('pick-so').value.trim());
+  const adjustmentMode = isStockAdjustmentSalesOrder($('pick-so').value);
   const orderOpen = state.pickOrder.status === 'OPEN';
   const hasSavedPick = Number(state.pickOrder.pickCount || 0) > 0;
   const unlocked = !state.pick.lockToken;
@@ -2598,19 +2684,24 @@ function updatePickSalesOrderControls() {
 
   $('pick-so').disabled = soLocked;
   $('pick-so').title = soLocked
-    ? 'Sales Order is locked while this picking order is in progress. Finish the Sales Order to release it.'
+    ? (adjustmentMode
+        ? 'Sales Order 0 is locked only while this Stock Adjustment rack is active.'
+        : 'Sales Order is locked while this picking order is in progress. Finish the Sales Order to release it.')
     : '';
 
-  $('pick-finish-so-btn').disabled = !(state.mode === 'ACTIVE' && hasSo && orderOpen && hasSavedPick && unlocked);
+  $('pick-finish-so-btn').disabled = adjustmentMode || !(state.mode === 'ACTIVE' && hasSo && orderOpen && hasSavedPick && unlocked);
+  $('pick-finish-so-btn').title = adjustmentMode ? 'Sales Order 0 is reusable Stock Adjustment mode and does not need to be finished.' : '';
 
   // A whole picking session may be abandoned only before the first saved rack pick.
   // The server re-checks this condition before releasing the Sales Order number.
   const cancelWhole = $('pick-cancel-order-btn');
   if (cancelWhole) {
-    cancelWhole.disabled = !(state.mode === 'ACTIVE' && hasSo && orderOpen && !hasSavedPick && Boolean(state.pickOrder.isCurrentOwner));
-    cancelWhole.title = hasSavedPick
-      ? 'This Sales Order already has a saved pick and can no longer be cancelled as an empty picking session.'
-      : 'Cancel the entire empty picking session and release this Sales Order number for reuse.';
+    cancelWhole.disabled = adjustmentMode || !(state.mode === 'ACTIVE' && hasSo && orderOpen && !hasSavedPick && Boolean(state.pickOrder.isCurrentOwner));
+    cancelWhole.title = adjustmentMode
+      ? 'Sales Order 0 has no whole-order session. Use Cancel / restart rack if needed.'
+      : (hasSavedPick
+          ? 'This Sales Order already has a saved pick and can no longer be cancelled as an empty picking session.'
+          : 'Cancel the entire empty picking session and release this Sales Order number for reuse.');
   }
 }
 
@@ -2620,7 +2711,8 @@ function syncPickOverrideControls() {
   if (!checkbox || !reason) return;
 
   const completed = state.pickOrder.status === 'COMPLETED';
-  const available = isAdminOrOwner() && completed && !state.pick.lockToken;
+  const adjustmentMode = isStockAdjustmentSalesOrder($('pick-so').value);
+  const available = !adjustmentMode && isAdminOrOwner() && completed && !state.pick.lockToken;
 
   // The override belongs only to the completed sales order currently displayed.
   // Clear it as soon as the user switches to a NEW or OPEN sales order.
@@ -2641,6 +2733,15 @@ async function refreshPickSalesOrderStatus() {
   if (!so) {
     state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
     box.innerHTML = '<strong>Sales order status:</strong> enter a sales order number. A completed sales order cannot be reused by a regular user.';
+    syncPickOverrideControls();
+    updatePickSalesOrderControls();
+    await loadPickSalesOrderSummary();
+    return true;
+  }
+
+  if (isStockAdjustmentSalesOrder(so)) {
+    state.pickOrder = { salesOrder: '0', status: 'ADJUSTMENT', pickCount: 0, openedBy: state.profile?.username || null, isCurrentOwner: true };
+    box.innerHTML = `<strong>Warehouse Stock Adjustment:</strong> Sales Order <strong>0</strong> is a reusable adjustment code and may be used indefinitely. Each completed rack is saved directly as a PICK transaction under SO 0. It does not become a completed Sales Order and does not require <strong>Finish Sales Order</strong>.`;
     syncPickOverrideControls();
     updatePickSalesOrderControls();
     await loadPickSalesOrderSummary();
@@ -2693,6 +2794,9 @@ async function refreshPickSalesOrderStatus() {
 async function cancelEntirePicking() {
   const so = $('pick-so').value.trim();
   if (!so) return toast('Enter the sales order number.', 'error');
+  if (isStockAdjustmentSalesOrder(so)) {
+    return toast('Sales Order 0 has no whole-order session to cancel. Use Cancel / restart rack for the current Stock Adjustment rack.', 'error');
+  }
 
   // Refresh immediately before cancellation so an older client status cannot
   // accidentally release an order that already has a completed rack pick.
@@ -2747,6 +2851,9 @@ async function cancelEntirePicking() {
 async function finishPickSalesOrder() {
   const so = $('pick-so').value.trim();
   if (!so) return toast('Enter the sales order number.', 'error');
+  if (isStockAdjustmentSalesOrder(so)) {
+    return toast('Sales Order 0 is reusable Warehouse Stock Adjustment mode. Finish Sales Order is not required.', 'success');
+  }
   if (state.pick.lockToken) return toast('Complete or cancel the current rack before finishing the sales order.', 'error');
   if (!window.confirm(`Finish sales order ${so}? After this, regular users cannot use this sales order number again.`)) return;
 
@@ -2778,26 +2885,53 @@ async function completePicking() {
     if (!reason?.trim()) return toast('Picking was not completed because an override reason is required.', 'error');
   }
   const button = $('pick-complete-btn');
-  setBusy(button, true, 'Completing…');
-  const { data, error } = await supabase.rpc('complete_picking', {
-    p_location_code: state.pick.locationCode,
-    p_lock_token: state.pick.lockToken,
-    p_sales_order: $('pick-so').value.trim(),
-    p_items: state.pick.cart.map(({ lot_id, qty, barcode, supervisor_bypass, bypass_reason, fefo_override_confirmed }) => ({
-      lot_id, qty, barcode, supervisor_bypass: Boolean(supervisor_bypass), bypass_reason: bypass_reason || null,
-      fefo_override_confirmed: Boolean(fefo_override_confirmed)
-    })),
-    p_allow_fefo_override: requiresOverride,
-    p_override_reason: reason,
-    p_note: null
-  });
+  const so = $('pick-so').value.trim();
+  const adjustmentMode = isStockAdjustmentSalesOrder(so);
+
+  if (adjustmentMode && !state.pick.adjustmentSessionKey) {
+    return toast('The Stock Adjustment session key is missing. Cancel/restart the rack and lock it again.', 'error');
+  }
+
+  const items = state.pick.cart.map(({ lot_id, qty, barcode, supervisor_bypass, bypass_reason, fefo_override_confirmed }) => ({
+    lot_id, qty, barcode, supervisor_bypass: Boolean(supervisor_bypass), bypass_reason: bypass_reason || null,
+    fefo_override_confirmed: Boolean(fefo_override_confirmed)
+  }));
+
+  setBusy(button, true, adjustmentMode ? 'Saving adjustment…' : 'Completing…');
+
+  const rpcName = adjustmentMode ? 'complete_stock_adjustment_picking' : 'complete_picking';
+  const rpcArgs = adjustmentMode
+    ? {
+        p_location_code: state.pick.locationCode,
+        p_lock_token: state.pick.lockToken,
+        p_adjustment_session_key: state.pick.adjustmentSessionKey,
+        p_items: items,
+        p_allow_fefo_override: requiresOverride,
+        p_override_reason: reason
+      }
+    : {
+        p_location_code: state.pick.locationCode,
+        p_lock_token: state.pick.lockToken,
+        p_sales_order: so,
+        p_items: items,
+        p_allow_fefo_override: requiresOverride,
+        p_override_reason: reason,
+        p_note: null
+      };
+
+  const { data, error } = await supabase.rpc(rpcName, rpcArgs);
   setBusy(button, false);
   if (error) return toast(friendlyError(error), 'error');
-  const so = $('pick-so').value;
-  toast(`Rack pick saved: ${data?.[0]?.transaction_no || 'completed'}${requiresOverride ? ' · FEFO override recorded' : ''}. Scan the next source rack, or finish the sales order when all items are complete.`, 'success');
+
+  if (adjustmentMode) {
+    toast(`Stock Adjustment OUT saved: ${data?.[0]?.transaction_no || 'completed'} · Sales Order 0 remains reusable.${requiresOverride ? ' FEFO override recorded.' : ''} Put-away the remaining usable units as needed.`, 'success');
+  } else {
+    toast(`Rack pick saved: ${data?.[0]?.transaction_no || 'completed'}${requiresOverride ? ' · FEFO override recorded' : ''}. Scan the next source rack, or finish the sales order when all items are complete.`, 'success');
+  }
+
   invalidateReports();
   resetOperation('pick');
-  $('pick-so').value = so; // Keep the sales order for picking from the next rack.
+  $('pick-so').value = so;
   await refreshPickSalesOrderStatus();
 }
 
