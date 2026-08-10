@@ -2692,16 +2692,24 @@ function updatePickSalesOrderControls() {
   $('pick-finish-so-btn').disabled = adjustmentMode || !(state.mode === 'ACTIVE' && hasSo && orderOpen && hasSavedPick && unlocked);
   $('pick-finish-so-btn').title = adjustmentMode ? 'Sales Order 0 is reusable Stock Adjustment mode and does not need to be finished.' : '';
 
-  // A whole picking session may be abandoned only before the first saved rack pick.
-  // The server re-checks this condition before releasing the Sales Order number.
+  // Normal Sales Orders use the existing whole-order cancellation rule.
+  // Sales Order 0 repurposes this button as a clean way to LEAVE
+  // Warehouse Stock Adjustment mode.
   const cancelWhole = $('pick-cancel-order-btn');
   if (cancelWhole) {
-    cancelWhole.disabled = adjustmentMode || !(state.mode === 'ACTIVE' && hasSo && orderOpen && !hasSavedPick && Boolean(state.pickOrder.isCurrentOwner));
-    cancelWhole.title = adjustmentMode
-      ? 'Sales Order 0 has no whole-order session. Use Cancel / restart rack if needed.'
-      : (hasSavedPick
-          ? 'This Sales Order already has a saved pick and can no longer be cancelled as an empty picking session.'
-          : 'Cancel the entire empty picking session and release this Sales Order number for reuse.');
+    if (adjustmentMode) {
+      cancelWhole.textContent = 'Exit stock adjustment';
+      cancelWhole.disabled = !hasSo;
+      cancelWhole.title = state.pick.lockToken
+        ? 'Cancel/release the current Stock Adjustment rack and leave Sales Order 0 mode.'
+        : 'Leave Sales Order 0 Warehouse Stock Adjustment mode.';
+    } else {
+      cancelWhole.textContent = 'Cancel picking';
+      cancelWhole.disabled = !(state.mode === 'ACTIVE' && hasSo && orderOpen && !hasSavedPick && Boolean(state.pickOrder.isCurrentOwner));
+      cancelWhole.title = hasSavedPick
+        ? 'This Sales Order already has a saved pick and can no longer be cancelled as an empty picking session.'
+        : 'Cancel the entire empty picking session and release this Sales Order number for reuse.';
+    }
   }
 }
 
@@ -2791,11 +2799,84 @@ async function refreshPickSalesOrderStatus() {
   return true;
 }
 
+async function exitStockAdjustmentMode() {
+  if (!isStockAdjustmentSalesOrder($('pick-so').value)) return false;
+
+  const hasRack = Boolean(state.pick.lockToken);
+  const queuedCount = Number(state.pick.cart?.length || 0);
+  const warning = hasRack
+    ? `\n\nThe current Stock Adjustment rack ${state.pick.locationCode || ''} will be cancelled and its rack lock released.${queuedCount ? ` ${queuedCount} unsaved queued line(s) will be discarded; inventory has not yet been deducted for those queued lines.` : ''}`
+    : '';
+
+  if (!window.confirm(
+    `Exit Warehouse Stock Adjustment mode (Sales Order 0)?${warning}\n\nCompleted Stock Adjustment transactions already saved to history will NOT be changed.`
+  )) return false;
+
+  const button = $('pick-cancel-order-btn');
+  setBusy(button, true, hasRack ? 'Releasing rack…' : 'Exiting…');
+
+  try {
+    if (hasRack) {
+      if (!state.pick.adjustmentSessionKey) {
+        throw new Error('The Stock Adjustment session key is missing. Refresh the page to recover the screen; the rack lock will expire automatically if it cannot be released.');
+      }
+
+      const { error } = await supabase.rpc('cancel_stock_adjustment_pick', {
+        p_lock_token: state.pick.lockToken,
+        p_adjustment_session_key: state.pick.adjustmentSessionKey,
+        p_reason: 'User exited Warehouse Stock Adjustment mode.'
+      });
+      if (error) throw error;
+    }
+
+    stopHeartbeat(state.pick);
+    state.pick = freshOperationState();
+
+    $('pick-so').value = '';
+    $('pick-location').value = '';
+    $('pick-barcode').value = '';
+    $('pick-lot').innerHTML = '<option value="">Scan a barcode first</option>';
+    $('pick-qty').value = '';
+    $('pick-so-override').checked = false;
+    $('pick-so-override-reason').value = '';
+    $('pick-so-override-reason').disabled = true;
+
+    clearPickBarcodeMatch();
+    $('pick-fefo-note').classList.add('hidden');
+    $('pick-qty-note').classList.add('hidden');
+    $('pick-rack-title').textContent = 'Source rack contents';
+    $('pick-rack-contents').innerHTML = emptyState('Lock a source rack to display its available items.');
+
+    state.pickOrder = {
+      salesOrder: null,
+      status: null,
+      pickCount: 0,
+      openedBy: null,
+      isCurrentOwner: false
+    };
+    state.pickOrderSummary = [];
+
+    configureOperationUi('pick', false);
+    renderOperationCart('pick');
+    invalidateReports();
+    await refreshPickSalesOrderStatus();
+
+    toast('Warehouse Stock Adjustment mode closed. You may now enter a normal Sales Order.', 'success');
+    return true;
+  } catch (error) {
+    toast(`Could not exit Stock Adjustment mode safely: ${friendlyError(error)}`, 'error');
+    return false;
+  } finally {
+    setBusy(button, false);
+    updatePickSalesOrderControls();
+  }
+}
+
 async function cancelEntirePicking() {
   const so = $('pick-so').value.trim();
   if (!so) return toast('Enter the sales order number.', 'error');
   if (isStockAdjustmentSalesOrder(so)) {
-    return toast('Sales Order 0 has no whole-order session to cancel. Use Cancel / restart rack for the current Stock Adjustment rack.', 'error');
+    return exitStockAdjustmentMode();
   }
 
   // Refresh immediately before cancellation so an older client status cannot
