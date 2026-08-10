@@ -142,6 +142,7 @@
             <label>Size *<input id="pa-size" required /></label>
             <label>Container number *<input id="pa-container" required /></label>
             <label>Expiry date *<input id="pa-expiry" type="date" required /></label>
+            <label class="check-line"><input id="pa-no-expiry" type="checkbox" /> No expiry (N/A)</label>
             <label>Case quantity<input id="pa-case-qty" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
             <label>Pack quantity<input id="pa-pack-qty" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
             <label>Piece quantity<input id="pa-piece-qty" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
@@ -182,7 +183,8 @@
           <div class="card-head compact"><div><h3>Contents of this physical Shipper Box</h3><p>Encode each PACK-level SKU lot. Different expiry dates remain separate. Same SKU + same expiry is consolidated automatically when saved.</p></div></div>
           <div class="form-grid three">
             <label>Content PACK barcode *<div class="scan-field"><input id="sp-content-pack" autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="sp-content-pack">Scan</button></div></label>
-            <label>Expiry date *<input id="sp-content-expiry" type="date" /></label>
+            <label>Expiry date *<input id="sp-content-expiry" type="date" required /></label>
+            <label class="check-line"><input id="sp-content-no-expiry" type="checkbox" /> No expiry (N/A)</label>
             <label>PACK quantity — whole number *<input id="sp-content-qty" type="number" min="1" step="1" inputmode="numeric" /></label>
             <label>Brand *<input id="sp-content-brand" /></label>
             <label>Description *<input id="sp-content-description" /></label>
@@ -264,7 +266,7 @@
       <section id="screen-inventory" class="screen">
         <article class="card">
           <div class="card-head"><div><h3>Inventory by lot and location</h3><p>Current positive stock only</p></div><button class="secondary export-btn" data-export="inventory">Export CSV</button></div>
-          <div class="filters"><input id="inventory-search" placeholder="Search SKU, container, location, or put-away remarks..." /></div>
+          <div class="filters"><input id="inventory-search" placeholder="Search SKU, CASE/PACK/PIECE barcode, container, location, expiry, or remarks..." /></div>
           <h4>SKU summary</h4>
           <div id="inventory-summary-table" class="table-wrap"></div>
           <h4>Detailed lots</h4>
@@ -394,10 +396,10 @@
 
       <section id="screen-history" class="screen">
         <article class="card">
-          <div class="card-head"><div><h3>Transaction history</h3><p>Every movement, FEFO override, edit, and system-control action</p></div><button class="secondary export-btn" data-export="history">Export CSV</button></div>
+          <div class="card-head"><div><h3>Transaction history</h3><p>Every movement, FEFO override, edit, system-control action, and saved Put-away / Transfer remarks</p></div><button class="secondary export-btn" data-export="history">Export CSV</button></div>
           <div class="filters grid"><input id="history-search" placeholder="Search transaction, user, SO, SKU..." /><select id="history-type"><option value="">All actions</option><option>PUTAWAY</option><option>PICK</option><option>TRANSFER</option><option>PICK_CANCEL</option><option>TRANSFER_CANCEL</option><option>ADMIN_PAUSE</option><option>ADMIN_RESUME</option></select></div>
           <div id="history-table" class="table-wrap"></div>
-          <div class="card-head audit-head"><div><h3>System audit events</h3><p>Before/after records for corrections and administrative actions</p></div><button class="secondary export-btn" data-export="audit">Export audit CSV</button></div>
+          <div class="card-head audit-head"><div><h3>System audit events</h3><p>Before/after records plus stored Put-away / Stock Transfer remarks when available</p></div><button class="secondary export-btn" data-export="audit">Export audit CSV</button></div>
           <div id="audit-history-table" class="table-wrap"></div>
         </article>
       </section>

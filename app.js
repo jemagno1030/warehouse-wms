@@ -16,7 +16,9 @@ const supabase = configReady
 const $ = (id) => document.getElementById(id);
 const qsa = (selector, root = document) => [...root.querySelectorAll(selector)];
 const fmtQty = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 3 });
-const fmtDate = (value) => value ? new Date(`${value}T00:00:00`).toLocaleDateString() : '—';
+const NO_EXPIRY_DATE = '9999-12-31';
+const isNoExpiryDate = (value) => String(value || '').slice(0, 10) === NO_EXPIRY_DATE;
+const fmtDate = (value) => isNoExpiryDate(value) ? 'N/A' : value ? new Date(`${String(value).slice(0, 10)}T00:00:00`).toLocaleDateString() : '—';
 const fmtDateTime = (value) => value ? new Date(value).toLocaleString() : '—';
 const localDateKey = (value) => {
   if (!value) return '';
@@ -186,6 +188,8 @@ function setupStaticEvents() {
   qsa('.export-btn').forEach((btn) => btn.addEventListener('click', () => exportDataset(btn.dataset.export)));
 
   $('putaway-form').addEventListener('submit', addPutawayItem);
+  $('pa-no-expiry').addEventListener('change', () => syncNoExpiryControl('pa-expiry', 'pa-no-expiry'));
+  $('sp-content-no-expiry').addEventListener('change', () => syncNoExpiryControl('sp-content-expiry', 'sp-content-no-expiry'));
   $('pa-clear-line-btn').addEventListener('click', clearPutawayLine);
   $('pa-cancel-btn').addEventListener('click', resetPutawaySession);
   $('pa-complete-btn').addEventListener('click', completePutaway);
@@ -979,6 +983,16 @@ async function checkPutawayDuplicateDetails() {
   return match;
 }
 
+function syncNoExpiryControl(dateInputId, checkboxId) {
+  const dateInput = $(dateInputId);
+  const checkbox = $(checkboxId);
+  const noExpiry = Boolean(checkbox?.checked);
+  if (!dateInput) return;
+  if (noExpiry) dateInput.value = '';
+  dateInput.disabled = noExpiry;
+  dateInput.required = !noExpiry;
+}
+
 function putawayLinePayload() {
   return {
     piece_barcode: normalizeBarcode($('pa-piece').value),
@@ -989,7 +1003,7 @@ function putawayLinePayload() {
     variant: $('pa-variant').value.trim(),
     size: $('pa-size').value.trim(),
     container_no: $('pa-container').value.trim(),
-    expiry_date: $('pa-expiry').value,
+    expiry_date: $('pa-no-expiry').checked ? NO_EXPIRY_DATE : $('pa-expiry').value,
     piece_qty: Number($('pa-piece-qty').value || 0),
     pack_qty: Number($('pa-pack-qty').value || 0),
     case_qty: Number($('pa-case-qty').value || 0),
@@ -1053,6 +1067,8 @@ async function addPutawayItem(event) {
 
 function clearPutawayLine() {
   ['pa-piece','pa-pack','pa-case','pa-brand','pa-description','pa-variant','pa-size','pa-container','pa-expiry'].forEach((id) => $(id).value = '');
+  $('pa-no-expiry').checked = false;
+  syncNoExpiryControl('pa-expiry', 'pa-no-expiry');
   ['pa-piece-qty','pa-pack-qty','pa-case-qty'].forEach((id) => $(id).value = '0');
   state.putaway.matchedSkuId = null;
   state.putaway.lookupSequence += 1;
@@ -1084,6 +1100,7 @@ function removePutawayItem(index) {
 function resetPutawaySession() {
   state.putaway = { locationCode: null, cart: [], matchedSkuId: null, duplicateDetailsSkuId: null, lookupSequence: 0 };
   $('putaway-form').reset();
+  syncNoExpiryControl('pa-expiry', 'pa-no-expiry');
   ['pa-piece-qty','pa-pack-qty','pa-case-qty'].forEach((id) => $(id).value = '0');
   setPutawayDetailsReadonly(false);
   $('pa-location').disabled = false;
@@ -1304,7 +1321,7 @@ async function addShipperContentLine() {
   try {
     await resolveShipperContentSku();
     const pack = normalizeBarcode($('sp-content-pack').value);
-    const expiry = $('sp-content-expiry').value;
+    const expiry = $('sp-content-no-expiry').checked ? NO_EXPIRY_DATE : $('sp-content-expiry').value;
     const rawQty = String($('sp-content-qty').value || '').trim();
     const qty = Number(rawQty);
     const brand = $('sp-content-brand').value.trim();
@@ -1312,7 +1329,7 @@ async function addShipperContentLine() {
     const variant = $('sp-content-variant').value.trim();
     const size = $('sp-content-size').value.trim();
     if (!pack || pack === 'N/A') return toast('Enter the actual PACK barcode for this Shipper content line.', 'error');
-    if (!expiry) return toast('Enter the expiry date for this Shipper content line.', 'error');
+    if (!expiry) return toast('Enter the expiry date, or select No expiry (N/A), for this Shipper content line.', 'error');
     if (!/^\d+$/.test(rawQty) || !Number.isSafeInteger(qty) || qty <= 0) return toast('PACK quantity must be a whole number greater than zero.', 'error');
     if (!brand || !description || !variant || !size) return toast('Brand, description, variant, and size are required for the content SKU.', 'error');
 
@@ -1350,6 +1367,8 @@ async function addShipperContentLine() {
 
 function clearShipperContentLine() {
   ['sp-content-pack','sp-content-brand','sp-content-description','sp-content-variant','sp-content-size','sp-content-expiry','sp-content-qty'].forEach((id) => { $(id).value = ''; });
+  $('sp-content-no-expiry').checked = false;
+  syncNoExpiryControl('sp-content-expiry', 'sp-content-no-expiry');
   state.shipperPutaway.contentSku = null;
   state.shipperPutaway.contentLookupSequence += 1;
   setShipperContentDetailsReadonly(false);
@@ -1375,6 +1394,7 @@ function removeShipperContentLine(index) {
 function resetShipperPutaway(preserveResult = false) {
   state.shipperPutaway = freshShipperPutawayState();
   $('shipper-putaway-form').reset();
+  syncNoExpiryControl('sp-content-expiry', 'sp-content-no-expiry');
   if (!preserveResult) { $('sp-result').classList.add('hidden'); $('sp-result').innerHTML = ''; }
   setShipperDetailsReadonly(false);
   setShipperContentDetailsReadonly(false);
@@ -2601,7 +2621,13 @@ async function loadInventory(force = false) {
 
 function renderInventory() {
   const term = $('inventory-search').value.trim().toLowerCase();
-  const rows = state.data.inventory.filter((r) => [r.sku_name, r.brand, r.description, r.variant, r.size, r.container_no, r.location_code, r.expiry_date, r.uom, r.putaway_remarks, r.transfer_remarks, r.shipper_box_no, r.shipper_status, r.shipper_lot_role].join(' ').toLowerCase().includes(term));
+  const rows = state.data.inventory.filter((r) => [
+    r.sku_name, r.brand, r.description, r.variant, r.size,
+    r.case_barcode, r.pack_barcode, r.piece_barcode,
+    r.container_no, r.location_code, isNoExpiryDate(r.expiry_date) ? 'N/A no expiry' : r.expiry_date,
+    r.uom, r.putaway_remarks, r.transfer_remarks,
+    r.shipper_box_no, r.shipper_status, r.shipper_lot_role
+  ].join(' ').toLowerCase().includes(term));
   const grouped = new Map();
   rows.forEach((r) => {
     const item = grouped.get(r.sku_id) || { sku_name: r.sku_name, balances: { PIECE: 0, PACK: 0, CASE: 0 }, containers: new Set(), locations: new Set(), earliest: r.expiry_date };
@@ -2615,7 +2641,7 @@ function renderInventory() {
   $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
   const actionHeader = isAdminOrOwner() ? '<th>Actions</th>' : '';
   $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => `<tr>
-    <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
+    <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${isNoExpiryDate(r.expiry_date) ? '<span class="pill">N/A</span>' : expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
     ${isAdminOrOwner() ? (r.shipper_box_id ? `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button><br><small>Shipper-safe correction · ${escapeHtml(r.shipper_box_no || '')}</small></td>` : `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button> <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button></td>`) : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching inventory.');
 }
@@ -3489,29 +3515,43 @@ function renderHistory() {
   const term = $('history-search').value.trim().toLowerCase();
   const type = $('history-type').value;
   const rows = state.data.history.filter((r) => {
-    const haystack = [r.tx_no, r.created_by_username, r.sales_order, r.sku_name, r.container_no, r.location_code, r.override_reason, r.edit_reason, r.line_note, r.shipper_box_no, r.shipper_status, r.shipper_action].join(' ').toLowerCase();
+    const haystack = [r.tx_no, r.created_by_username, r.sales_order, r.sku_name, r.container_no, r.location_code, r.transaction_note, r.override_reason, r.edit_reason, r.line_note, r.shipper_box_no, r.shipper_status, r.shipper_action].join(' ').toLowerCase();
     return (!type || r.transaction_type === type) && haystack.includes(term);
   });
   const firstLineByTx = new Set();
-  $('history-table').innerHTML = rows.length ? `<table><thead><tr><th>Transaction</th><th>Action</th><th>User / time</th><th>SO</th><th>Location</th><th>SKU / container</th><th>Qty</th><th>Flags</th><th></th></tr></thead><tbody>${rows.map((r) => {
+  $('history-table').innerHTML = rows.length ? `<table><thead><tr><th>Transaction</th><th>Action</th><th>User / time</th><th>SO</th><th>Location</th><th>SKU / container</th><th>Qty</th><th>Remarks</th><th>Flags</th><th></th></tr></thead><tbody>${rows.map((r) => {
     const first = !firstLineByTx.has(r.transaction_id); firstLineByTx.add(r.transaction_id);
     const flags = [
       r.fefo_overridden ? '<span class="pill override">FEFO override</span>' : '',
       r.barcode_bypassed ? '<span class="pill override">Supervisor barcode bypass</span>' : '',
       r.edited_at ? '<span class="pill">Corrected</span>' : ''
     ].filter(Boolean).join(' ');
-    return `<tr><td><strong>${escapeHtml(r.tx_no)}</strong><br><small>${first ? escapeHtml(r.transaction_note || '') : ''}</small></td><td>${escapeHtml(r.transaction_type)}</td>
+    return `<tr><td><strong>${escapeHtml(r.tx_no)}</strong></td><td>${escapeHtml(r.transaction_type)}</td>
       <td>${escapeHtml(r.created_by_username)}<br><small>${fmtDateTime(r.created_at)}</small></td><td>${escapeHtml(r.sales_order || '—')}</td><td>${escapeHtml(r.location_code || '—')}</td>
       <td class="wrap">${escapeHtml(r.sku_name || 'System action')}<br><small>${escapeHtml(r.container_no || '')} ${r.expiry_date ? `· ${fmtDate(r.expiry_date)}` : ''}${r.shipper_box_no ? ` · ${escapeHtml(r.shipper_box_no)}` : ''}</small>${r.line_note ? `<br><small>${escapeHtml(r.line_note)}</small>` : ''}</td>
-      <td>${r.signed_qty == null ? '—' : fmtQtyUom(r.signed_qty, r.uom)}</td><td class="wrap">${flags}${r.shipper_action ? `<br><span class="pill near">${escapeHtml(r.shipper_action)}</span>` : ''}${r.barcode_bypassed ? `<br><small>Bypass by ${escapeHtml(r.bypassed_by_username || r.created_by_username)}: ${escapeHtml(r.bypass_reason || '')}</small>` : ''}${first && r.override_reason ? `<br><small>${escapeHtml(r.override_reason)}</small>` : ''}${first && r.edit_reason ? `<br><small>Edit: ${escapeHtml(r.edit_reason)}</small>` : ''}</td>
+      <td>${r.signed_qty == null ? '—' : fmtQtyUom(r.signed_qty, r.uom)}</td><td class="wrap">${first ? escapeHtml(r.transaction_note || '—') : '—'}</td><td class="wrap">${flags}${r.shipper_action ? `<br><span class="pill near">${escapeHtml(r.shipper_action)}</span>` : ''}${r.barcode_bypassed ? `<br><small>Bypass by ${escapeHtml(r.bypassed_by_username || r.created_by_username)}: ${escapeHtml(r.bypass_reason || '')}</small>` : ''}${first && r.override_reason ? `<br><small>${escapeHtml(r.override_reason)}</small>` : ''}${first && r.edit_reason ? `<br><small>Edit: ${escapeHtml(r.edit_reason)}</small>` : ''}</td>
       <td>${first && isAdminOrOwner() && ['PUTAWAY','PICK','TRANSFER'].includes(r.transaction_type) && !rows.some((x) => x.transaction_id === r.transaction_id && x.shipper_box_id) ? `<button class="link-btn" data-edit-transaction="${r.transaction_id}">Correct</button>` : (first && r.shipper_box_id ? '<small>Shipper transaction protected</small>' : '')}</td></tr>`;
   }).join('')}</tbody></table>` : emptyState('No matching history.');
 }
 
+function auditEventRemarks(row) {
+  const after = row?.after_data || {};
+  const directNote = typeof after?.note === 'string' ? after.note : '';
+  const nestedNote = typeof after?.transaction?.note === 'string' ? after.transaction.note : '';
+  if (nestedNote.trim()) return nestedNote.trim();
+  if (directNote.trim()) return directNote.trim();
+
+  // Shipper Box put-away stores the entered Put-away remarks in the audit reason.
+  if (String(row?.action || '').toUpperCase() === 'SHIPPER_BOX_PUTAWAY' && String(row?.reason || '').trim()) {
+    return String(row.reason).trim();
+  }
+  return '';
+}
+
 function renderAuditHistory() {
   const rows = state.data.audit;
-  $('audit-history-table').innerHTML = rows.length ? `<table><thead><tr><th>Time</th><th>Action</th><th>User</th><th>Entity</th><th>Reason</th><th>Stored details</th></tr></thead><tbody>${rows.map((r) => `<tr>
-    <td>${fmtDateTime(r.created_at)}</td><td>${escapeHtml(r.action)}</td><td>${escapeHtml(r.username || '—')}</td><td>${escapeHtml(r.entity_type)} ${escapeHtml(r.entity_id || '')}</td><td class="wrap">${escapeHtml(r.reason || '')}</td>
+  $('audit-history-table').innerHTML = rows.length ? `<table><thead><tr><th>Time</th><th>Action</th><th>User</th><th>Entity</th><th>Remarks</th><th>Reason</th><th>Stored details</th></tr></thead><tbody>${rows.map((r) => `<tr>
+    <td>${fmtDateTime(r.created_at)}</td><td>${escapeHtml(r.action)}</td><td>${escapeHtml(r.username || '—')}</td><td>${escapeHtml(r.entity_type)} ${escapeHtml(r.entity_id || '')}</td><td class="wrap">${escapeHtml(auditEventRemarks(r) || '—')}</td><td class="wrap">${escapeHtml(r.reason || '—')}</td>
     <td class="wrap"><details><summary>View JSON</summary><pre>${escapeHtml(JSON.stringify({ before: r.before_data, after: r.after_data }, null, 2))}</pre></details></td></tr>`).join('')}</tbody></table>` : emptyState('No audit events yet.');
 }
 
@@ -3883,7 +3923,7 @@ function exportDataset(name) {
 }
 
 function csvCell(value) {
-  const text = value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+  const text = isNoExpiryDate(value) ? 'N/A' : value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value);
   return `"${text.replace(/"/g, '""')}"`;
 }
 
