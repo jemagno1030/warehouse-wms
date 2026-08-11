@@ -172,6 +172,31 @@ function isAdminOrOwner() {
   return ['admin', 'owner'].includes(state.profile?.role);
 }
 
+function syncShipperBatchApprovalControl(showMessage = false) {
+  const input = $('sp-case-count');
+  if (!input) return;
+  const approvedRole = isSupervisor();
+  input.max = approvedRole ? '500' : '1';
+  input.title = approvedRole
+    ? 'Supervisor-or-higher approval active: 1 to 500 identical physical Shipper cases may be created.'
+    : 'User/Picker accounts may create only 1 physical Shipper case at a time. Quantity 2+ requires Supervisor, Admin, or Owner approval.';
+
+  const raw = String(input.value || '').trim();
+  const qty = Number(raw);
+  if (!approvedRole && /^\d+$/.test(raw) && qty > 1) {
+    input.value = '1';
+    if (showMessage) toast('Supervisor approval is required for more than 1 identical Shipper case. User/Picker accounts are limited to 1 case.', 'error');
+  }
+
+  const note = $('sp-batch-approval-note');
+  if (note) {
+    note.innerHTML = approvedRole
+      ? '<strong>Batch approval active:</strong> Your role may approve and create 2–500 identical Shipper cases.'
+      : '<strong>Supervisor approval required:</strong> User/Picker accounts may put away 1 Shipper case only. Quantity 2+ must be completed by a Supervisor, Admin, or Owner.';
+    note.className = approvedRole ? 'info-box' : 'warning-box';
+  }
+}
+
 function setupStaticEvents() {
   qsa('[data-auth-tab]').forEach((btn) => btn.addEventListener('click', () => {
     qsa('[data-auth-tab]').forEach((b) => b.classList.toggle('active', b === btn));
@@ -211,6 +236,7 @@ function setupStaticEvents() {
   $('pa-mode-select').addEventListener('change', switchPutawayMode);
   $('shipper-putaway-form').addEventListener('submit', (event) => event.preventDefault());
   $('sp-case').addEventListener('change', resolveShipperSku);
+  $('sp-case-count').addEventListener('input', () => syncShipperBatchApprovalControl(true));
   $('sp-content-pack').addEventListener('change', resolveShipperContentSku);
   ['sp-brand', 'sp-description', 'sp-variant', 'sp-size'].forEach((id) => $(id).addEventListener('input', () => {
     clearTimeout(putawayDetailsTimer);
@@ -461,6 +487,7 @@ function applyCurrentProfile(profile) {
   }
   const controlNav = document.querySelector('#main-nav [data-screen="control"]');
   if (controlNav) controlNav.classList.toggle('hidden', !isOwner());
+  syncShipperBatchApprovalControl(false);
 }
 
 async function refreshOwnAccountAccess() {
@@ -1615,6 +1642,7 @@ function resetShipperPutaway(preserveResult = false) {
   state.shipperPutaway = freshShipperPutawayState();
   $('shipper-putaway-form').reset();
   syncNoExpiryControl('sp-content-expiry', 'sp-content-no-expiry');
+  syncShipperBatchApprovalControl(false);
   if (!preserveResult) { $('sp-result').classList.add('hidden'); $('sp-result').innerHTML = ''; }
   setShipperDetailsReadonly(false);
   setShipperContentDetailsReadonly(false);
@@ -1637,6 +1665,9 @@ async function completeShipperPutaway() {
   if (!container) return toast('Container number is required.', 'error');
   if (!/^\d+$/.test(rawBoxCount) || !Number.isSafeInteger(boxCount) || boxCount < 1 || boxCount > 500) {
     return toast('Number of identical Shipper cases must be a whole number from 1 to 500.', 'error');
+  }
+  if (boxCount > 1 && !isSupervisor()) {
+    return toast('Supervisor approval is required for more than 1 identical Shipper case. Ask a Supervisor, Admin, or Owner to complete this batch.', 'error');
   }
   if (!state.shipperPutaway.contents.length) return toast('Add at least one PACK content line inside this Shipper Box.', 'error');
 

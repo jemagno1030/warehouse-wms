@@ -168,14 +168,15 @@
             <label>Rack location / QR *<div class="scan-field"><input id="sp-location" required /><button type="button" class="scan-btn" data-scan-target="sp-location" data-scan-kind="location">Scan</button></div></label>
             <label>Shipper CASE barcode *<div class="scan-field"><input id="sp-case" required autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="sp-case">Scan</button></div></label>
             <label>Container number *<input id="sp-container" required /></label>
-            <label>Number of identical Shipper cases *<input id="sp-case-count" type="number" min="1" max="500" step="1" value="1" inputmode="numeric" required /></label>
+            <label>Number of identical Shipper cases *<input id="sp-case-count" type="number" min="1" max="1" step="1" value="1" inputmode="numeric" required /></label>
             <label>Brand *<input id="sp-brand" required /></label>
             <label>Description *<input id="sp-description" required /></label>
             <label>Variant *<input id="sp-variant" required /></label>
             <label>Size *<input id="sp-size" required /></label>
             <label>Remarks<textarea id="sp-note" rows="2"></textarea></label>
           </div>
-          <div class="warning-box"><strong>Identical-case batch rule:</strong> If you enter more than 1 case, every generated physical SB will receive the exact same child SKUs, PACK quantities, expiry dates, container, and rack. If even one physical case is different, encode that case in a separate batch.</div>
+          <div id="sp-batch-approval-note" class="warning-box"><strong>Supervisor approval required:</strong> User/Picker accounts may put away 1 Shipper case only. Quantity 2+ must be completed by a Supervisor, Admin, or Owner.</div>
+          <div class="warning-box"><strong>Identical-case batch rule:</strong> If an approved Supervisor-or-higher user enters more than 1 case, every generated physical SB will receive the exact same child SKUs, PACK quantities, expiry dates, container, and rack. If even one physical case is different, encode that case in a separate batch.</div>
           <div id="sp-match-note" class="info-box hidden"></div>
           <div id="sp-duplicate-warning" class="warning-box hidden">
             <strong>ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE</strong>
