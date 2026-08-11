@@ -168,12 +168,14 @@
             <label>Rack location / QR *<div class="scan-field"><input id="sp-location" required /><button type="button" class="scan-btn" data-scan-target="sp-location" data-scan-kind="location">Scan</button></div></label>
             <label>Shipper CASE barcode *<div class="scan-field"><input id="sp-case" required autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="sp-case">Scan</button></div></label>
             <label>Container number *<input id="sp-container" required /></label>
+            <label>Number of identical Shipper cases *<input id="sp-case-count" type="number" min="1" max="500" step="1" value="1" inputmode="numeric" required /></label>
             <label>Brand *<input id="sp-brand" required /></label>
             <label>Description *<input id="sp-description" required /></label>
             <label>Variant *<input id="sp-variant" required /></label>
             <label>Size *<input id="sp-size" required /></label>
             <label>Remarks<textarea id="sp-note" rows="2"></textarea></label>
           </div>
+          <div class="warning-box"><strong>Identical-case batch rule:</strong> If you enter more than 1 case, every generated physical SB will receive the exact same child SKUs, PACK quantities, expiry dates, container, and rack. If even one physical case is different, encode that case in a separate batch.</div>
           <div id="sp-match-note" class="info-box hidden"></div>
           <div id="sp-duplicate-warning" class="warning-box hidden">
             <strong>ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE</strong>
@@ -254,6 +256,12 @@
             <label>New location / QR *<div class="scan-field"><input id="tr-destination" disabled /><button type="button" class="scan-btn" data-scan-target="tr-destination" data-scan-kind="location" disabled>Scan</button></div></label>
             <label>Remarks<textarea id="tr-note" rows="2"></textarea></label>
           </div>
+          <div class="warning-box">
+            <label class="check-line"><input id="tr-transfer-all" type="checkbox" disabled /> <strong>Transfer ALL stock in this source rack (whole pallet / rack reorganization)</strong></label>
+            <p class="small-note">When selected, barcode-by-barcode entry is skipped and every active STANDARD lot plus every physical Shipper Box in the locked source rack moves to the one destination. Shipper SB identity and SEALED/OPEN status are preserved.</p>
+            <p class="small-note"><strong>Important:</strong> the current WMS does not store a separate physical Pallet ID, so this option is rack-level. If the source rack contains more than one pallet/container, all active stock in that rack will move.</p>
+          </div>
+          <div id="tr-transfer-all-note" class="info-box hidden"></div>
           <div id="tr-barcode-match" class="info-box hidden"></div>
           <div id="tr-qty-note" class="info-box hidden"></div>
           <div class="info-box"><strong>Barcode-controlled transfer:</strong> a CASE barcode transfers CASE stock, a PACK barcode transfers PACK stock, and a PIECE barcode transfers PIECE stock. If the required unit barcode is stored as N/A, enter N/A and select the exact eligible item. <strong>Shipper:</strong> a Shipper CASE moves the complete SEALED physical box and all contents together; a child PACK transfer removes only that content and opens the source box.</div>

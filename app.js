@@ -257,6 +257,7 @@ function setupStaticEvents() {
   $('pick-summary-refresh-btn').addEventListener('click', loadPickSalesOrderSummary);
 
   $('tr-lock-btn').addEventListener('click', lockTransferLocation);
+  $('tr-transfer-all').addEventListener('change', syncFullTransferMode);
   $('tr-barcode').addEventListener('change', () => loadOperationLots('transfer'));
   $('tr-lot').addEventListener('change', () => handleOperationLotChange('transfer'));
   $('tr-qty').addEventListener('input', updateTransferQtyNote);
@@ -1629,9 +1630,14 @@ async function completeShipperPutaway() {
   const location = normalizeLocation($('sp-location').value);
   const shipperCase = normalizeBarcode($('sp-case').value);
   const container = $('sp-container').value.trim();
+  const rawBoxCount = String($('sp-case-count').value || '').trim();
+  const boxCount = Number(rawBoxCount);
   if (!location) return toast('Scan or enter the rack location.', 'error');
   if (!shipperCase || shipperCase === 'N/A') return toast('A Shipper Box requires an actual CASE barcode.', 'error');
   if (!container) return toast('Container number is required.', 'error');
+  if (!/^\d+$/.test(rawBoxCount) || !Number.isSafeInteger(boxCount) || boxCount < 1 || boxCount > 500) {
+    return toast('Number of identical Shipper cases must be a whole number from 1 to 500.', 'error');
+  }
   if (!state.shipperPutaway.contents.length) return toast('Add at least one PACK content line inside this Shipper Box.', 'error');
 
   await resolveShipperSku();
@@ -1645,9 +1651,14 @@ async function completeShipperPutaway() {
     return toast('ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE, or select Still Add Shipper to Database.', 'error');
   }
 
+  if (boxCount > 1) {
+    const confirmed = window.confirm(`Create ${boxCount} independent physical Shipper Boxes with EXACTLY the same encoded contents, quantities, expiries, container, and rack? Each CASE will receive its own SB ID.`);
+    if (!confirmed) return;
+  }
+
   const button = $('sp-complete-btn');
-  setBusy(button, true, 'Completing…');
-  const { data, error } = await supabase.rpc('complete_shipper_putaway', {
+  setBusy(button, true, boxCount > 1 ? `Creating ${boxCount} boxes…` : 'Completing…');
+  const { data, error } = await supabase.rpc('complete_shipper_putaway_batch', {
     p_location_code: location,
     p_shipper_case_barcode: shipperCase,
     p_shipper_brand: brand,
@@ -1656,17 +1667,28 @@ async function completeShipperPutaway() {
     p_shipper_size: size,
     p_container_no: container,
     p_contents: state.shipperPutaway.contents,
+    p_box_count: boxCount,
     p_allow_duplicate_shipper_details: $('sp-still-add').checked,
     p_note: $('sp-note').value.trim() || null
   });
   setBusy(button, false);
   if (error) return toast(friendlyError(error), 'error');
-  const row = data?.[0];
-  const boxNo = row?.shipper_box_no || 'physical box';
-  toast(`Shipper put-away saved: ${boxNo} · ${row?.transaction_no || 'transaction completed'}`, 'success');
+
+  const rows = data || [];
+  const boxNos = rows.map((row) => row.shipper_box_no).filter(Boolean);
+  const transactionNos = rows.map((row) => row.transaction_no).filter(Boolean);
+  const createdCount = boxNos.length || boxCount;
+  toast(`${createdCount} physical Shipper ${createdCount === 1 ? 'box' : 'boxes'} created successfully.`, 'success');
   invalidateReports();
   resetShipperPutaway(true);
-  $('sp-result').innerHTML = `<strong>Physical Shipper ID created: ${escapeHtml(boxNo)}</strong><br>Write or attach this SB number to the physical box so users can distinguish it from another box with the same manufacturer CASE barcode.`;
+
+  const idsHtml = boxNos.length
+    ? `<div class="small-note" style="margin-top:8px;word-break:break-word">${boxNos.map(escapeHtml).join(' · ')}</div>`
+    : '';
+  const txHtml = transactionNos.length
+    ? `<div class="small-note" style="margin-top:6px">Put-away transactions: ${transactionNos.map(escapeHtml).join(' · ')}</div>`
+    : '';
+  $('sp-result').innerHTML = `<strong>${createdCount} Physical Shipper ID${createdCount === 1 ? '' : 's'} created.</strong><br>Write or attach the correct SB number to each physical box. These boxes are independent even though this batch used identical contents.${idsHtml}${txHtml}`;
   $('sp-result').classList.remove('hidden');
 }
 
@@ -1827,10 +1849,48 @@ function configureOperationUi(operation, locked) {
   if (!pick) {
     $('tr-destination').disabled = !locked;
     qsa('[data-scan-target="tr-destination"]').forEach((b) => b.disabled = !locked);
+    $('tr-transfer-all').disabled = !locked;
+    syncFullTransferMode();
   }
   const chip = $(pick ? 'pick-lock-chip' : 'transfer-lock-chip');
   chip.textContent = locked ? `${state[operation].locationCode} locked by you` : 'No location locked';
   chip.className = `status-chip ${locked ? 'active' : 'neutral'}`;
+}
+
+function syncFullTransferMode() {
+  const checkbox = $('tr-transfer-all');
+  if (!checkbox) return;
+  const locked = Boolean(state.transfer.lockToken);
+  const bulk = locked && checkbox.checked;
+
+  const manualIds = ['tr-barcode', 'tr-lot', 'tr-qty'];
+  manualIds.forEach((id) => { $(id).disabled = !locked || bulk; });
+  qsa('[data-scan-target="tr-barcode"]').forEach((b) => b.disabled = !locked || bulk);
+  qsa('[data-na-target="tr-barcode"]').forEach((b) => b.disabled = !locked || bulk);
+  $('tr-add-btn').disabled = !locked || bulk;
+
+  const note = $('tr-transfer-all-note');
+  if (bulk) {
+    if (state.transfer.cart.length) {
+      state.transfer.cart = [];
+      renderOperationCart('transfer');
+    }
+    $('tr-barcode').value = '';
+    $('tr-lot').innerHTML = '<option value="">Whole-rack transfer selected</option>';
+    $('tr-qty').value = '';
+    $('tr-unit-label').textContent = 'all units';
+    clearTransferBarcodeMatch();
+    $('tr-qty-note').classList.add('hidden');
+    const activeLots = (state.transfer.rackLots || []).filter((row) => Number(row.qty) > 0);
+    const shipperBoxes = new Set(activeLots.map((row) => row.shipper_box_no).filter(Boolean));
+    note.innerHTML = `<strong>WHOLE SOURCE-RACK / PALLET MODE ACTIVE.</strong> Completing this transfer will move every active stock balance from <strong>${escapeHtml(state.transfer.locationCode || 'the locked source')}</strong> to the destination: STANDARD stock plus all physical Shipper Boxes, while preserving each SB number and SEALED/OPEN status.<br><strong>${activeLots.length.toLocaleString()} active inventory lines · ${shipperBoxes.size.toLocaleString()} Shipper box${shipperBoxes.size === 1 ? '' : 'es'} currently detected.</strong><br><small>This is rack-level because the current WMS does not store a separate physical Pallet ID. If more than one pallet/container is stored in this rack, ALL active stock in the rack will move.</small>`;
+    note.classList.remove('hidden');
+  } else {
+    $('tr-unit-label').textContent = 'matched unit';
+    note.classList.add('hidden');
+    note.innerHTML = '';
+    if (locked && $('tr-barcode').value.trim()) loadOperationLots('transfer');
+  }
 }
 
 async function loadPickRackContents() {
@@ -1920,6 +1980,7 @@ async function loadTransferRackContents() {
   }
   state.transfer.rackLots = data || [];
   renderTransferRackContents();
+  if ($('tr-transfer-all')?.checked) syncFullTransferMode();
 }
 
 function renderTransferRackContents() {
@@ -2588,6 +2649,10 @@ function resetOperation(operation) {
     $('tr-unit-label').textContent = 'matched unit';
     $('tr-destination').value = '';
     $('tr-note').value = '';
+    $('tr-transfer-all').checked = false;
+    $('tr-transfer-all').disabled = true;
+    $('tr-transfer-all-note').classList.add('hidden');
+    $('tr-transfer-all-note').innerHTML = '';
     $('tr-rack-title').textContent = 'Source rack contents';
     $('tr-rack-contents').innerHTML = emptyState('Lock a source rack to display its available items.');
     clearTransferBarcodeMatch();
@@ -3017,11 +3082,39 @@ async function completePicking() {
 }
 
 async function completeTransfer() {
-  if (!state.transfer.cart.length) return toast('Add at least one item.', 'error');
-  if (state.transfer.cart.some((item) => !Number.isInteger(Number(item.qty)))) return toast('Transfer cannot continue: CASE, PACK, and PIECE quantities must be whole numbers.', 'error');
   const destination = normalizeLocation($('tr-destination').value);
   if (!destination) return toast('Scan the destination location.', 'error');
+
+  const bulk = Boolean($('tr-transfer-all')?.checked);
   const button = $('tr-complete-btn');
+
+  if (bulk) {
+    if (!state.transfer.lockToken || !state.transfer.locationCode) return toast('Lock the source rack first.', 'error');
+    const activeLots = (state.transfer.rackLots || []).filter((row) => Number(row.qty) > 0);
+    if (!activeLots.length) return toast('The locked source rack has no active stock to transfer.', 'error');
+    const shipperBoxes = new Set(activeLots.map((row) => row.shipper_box_no).filter(Boolean));
+    const confirmed = window.confirm(`WHOLE SOURCE-RACK / PALLET TRANSFER\n\nMove ALL active stock from ${state.transfer.locationCode} to ${destination}?\n\nDetected: ${activeLots.length} active inventory lines and ${shipperBoxes.size} physical Shipper box(es).\n\nThis includes every STANDARD lot and every Shipper Box currently stored in the source rack. This cannot be limited to one pallet because the current WMS has no separate Pallet ID.`);
+    if (!confirmed) return;
+
+    setBusy(button, true, 'Moving whole rack…');
+    const { data, error } = await supabase.rpc('complete_full_location_transfer', {
+      p_source_code: state.transfer.locationCode,
+      p_destination_code: destination,
+      p_lock_token: state.transfer.lockToken,
+      p_note: $('tr-note').value.trim() || null
+    });
+    setBusy(button, false);
+    if (error) return toast(friendlyError(error), 'error');
+    const row = data?.[0] || {};
+    toast(`Whole-rack transfer saved: ${row.transaction_no || 'completed'} · ${Number(row.moved_stock_lot_count || 0).toLocaleString()} stock lines · ${Number(row.moved_shipper_box_count || 0).toLocaleString()} Shipper boxes.`, 'success');
+    invalidateReports();
+    resetOperation('transfer');
+    return;
+  }
+
+  if (!state.transfer.cart.length) return toast('Add at least one item, or select Transfer ALL stock in this source rack.', 'error');
+  if (state.transfer.cart.some((item) => !Number.isInteger(Number(item.qty)))) return toast('Transfer cannot continue: CASE, PACK, and PIECE quantities must be whole numbers.', 'error');
+
   setBusy(button, true, 'Completing…');
   const { data, error } = await supabase.rpc('complete_transfer', {
     p_source_code: state.transfer.locationCode,
