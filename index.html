@@ -299,11 +299,11 @@
       <section id="screen-inventory" class="screen">
         <article class="card">
           <div class="card-head"><div><h3>Inventory by lot and location</h3><p>Current positive stock only</p></div><button class="secondary export-btn" data-export="inventory">Export CSV</button></div>
-          <div class="filters"><input id="inventory-search" placeholder="Search SKU, CASE/PACK/PIECE barcode, container, location, expiry, or remarks..." /></div>
+          <div class="filters"><input id="inventory-search" placeholder="Search SKU, CASE/PACK/PIECE barcode, container, location, expiry, remarks, or ON HOLD reason..." /></div>
           <h4>SKU summary</h4>
           <div id="inventory-summary-table" class="table-wrap"></div>
           <h4>Detailed lots</h4>
-          <div class="info-box" data-role-min="admin"><strong>Admin / Owner inventory adjustment:</strong> Standard lots can be Edit/Delete. Shipper-linked lots can also be safely edited; the physical Shipper Box relationship is preserved. Every change requires a reason and is recorded in Audit History.</div>
+          <div class="info-box"><strong>Detailed-Lot control:</strong> Supervisor / Admin / Owner may Edit eligible lots. Delete remains Admin / Owner only. <strong>Admin / Owner may also Freeze a lot (ON HOLD)</strong> so it cannot be released by Picking, Sales Order 0, barcode bypass, item-by-item Stock Transfer, or whole-rack transfer until it is explicitly Unfrozen. Hold and Unfreeze both require a reason and are recorded in Audit History.</div>
           <div id="inventory-table" class="table-wrap"></div>
         </article>
       </section>
@@ -684,6 +684,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260812-so0-remarks-full-reset-1"></script>
+  <script type="module" src="app.js?v=20260812-inventory-lot-hold-1"></script>
 </body>
 </html>

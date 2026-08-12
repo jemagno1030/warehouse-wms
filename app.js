@@ -363,6 +363,8 @@ function setupStaticEvents() {
     if (inventoryEdit) openInventoryLotEdit(inventoryEdit.dataset.inventoryEdit);
     const inventoryDelete = event.target.closest('[data-inventory-delete]');
     if (inventoryDelete) deleteInventoryLot(inventoryDelete.dataset.inventoryDelete);
+    const inventoryHold = event.target.closest('[data-inventory-hold]');
+    if (inventoryHold) toggleInventoryLotHold(inventoryHold.dataset.inventoryHold, inventoryHold.dataset.holdState === 'freeze');
     const skuMasterEdit = event.target.closest('[data-sku-master-edit]');
     if (skuMasterEdit) openSkuMasterEdit(skuMasterEdit.dataset.skuMasterEdit);
     const skuMasterDelete = event.target.closest('[data-sku-master-delete]');
@@ -2415,8 +2417,11 @@ function syncFullTransferMode() {
     clearTransferBarcodeMatch();
     $('tr-qty-note').classList.add('hidden');
     const activeLots = (state.transfer.rackLots || []).filter((row) => Number(row.qty) > 0);
+    const heldLots = activeLots.filter((row) => row.is_releasable === false);
     const shipperBoxes = new Set(activeLots.map((row) => row.shipper_box_no).filter(Boolean));
-    note.innerHTML = `<strong>WHOLE SOURCE-RACK / PALLET MODE ACTIVE.</strong> Completing this transfer will move every active stock balance from <strong>${escapeHtml(state.transfer.locationCode || 'the locked source')}</strong> to the destination: STANDARD stock plus all physical Shipper Boxes, while preserving each SB number and SEALED/OPEN status.<br><strong>${activeLots.length.toLocaleString()} active inventory lines · ${shipperBoxes.size.toLocaleString()} Shipper box${shipperBoxes.size === 1 ? '' : 'es'} currently detected.</strong><br><small>This is rack-level because the current WMS does not store a separate physical Pallet ID. If more than one pallet/container is stored in this rack, ALL active stock in the rack will move.</small>`;
+    note.innerHTML = heldLots.length
+      ? `<strong>WHOLE-RACK TRANSFER BLOCKED BY ON-HOLD STOCK.</strong> ${heldLots.length.toLocaleString()} inventory line(s) in <strong>${escapeHtml(state.transfer.locationCode || 'this rack')}</strong> cannot be released. Unfreeze the held lot(s), or leave Whole Rack mode OFF and transfer only eligible lots.<br><small>Held stock remains physically visible in the rack but is excluded from normal item selection.</small>`
+      : `<strong>WHOLE SOURCE-RACK / PALLET MODE ACTIVE.</strong> Completing this transfer will move every active stock balance from <strong>${escapeHtml(state.transfer.locationCode || 'the locked source')}</strong> to the destination: STANDARD stock plus all physical Shipper Boxes, while preserving each SB number and SEALED/OPEN status.<br><strong>${activeLots.length.toLocaleString()} active inventory lines · ${shipperBoxes.size.toLocaleString()} Shipper box${shipperBoxes.size === 1 ? '' : 'es'} currently detected.</strong><br><small>This is rack-level because the current WMS does not store a separate physical Pallet ID. If more than one pallet/container is stored in this rack, ALL active stock in the rack will move.</small>`;
     note.classList.remove('hidden');
   } else {
     $('tr-unit-label').textContent = 'matched unit';
@@ -2465,10 +2470,19 @@ function renderPickRackContents() {
     return;
   }
 
-  container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Available</th><th>Queued</th><th></th></tr></thead><tbody>${rows.map((lot) => {
+  container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Physical qty</th><th>Release status</th><th>Queued</th><th></th></tr></thead><tbody>${rows.map((lot) => {
     const queued = state.pick.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
     const remaining = Math.max(Number(lot.qty) - queued, 0);
-    const bypassAction = `<button class="link-btn" type="button" data-pick-bypass-lot="${lot.lot_id}">Request barcode bypass</button>`;
+    const blocked = lot.is_releasable === false;
+    const holdDetail = lot.is_on_hold
+      ? escapeHtml(lot.hold_reason || 'Admin / Owner hold')
+      : (blocked ? 'Blocked by an ON-HOLD lot in this physical Shipper Box' : '');
+    const releaseStatus = blocked
+      ? `<span class="pill expired">ON HOLD</span>${holdDetail ? `<br><small>${holdDetail}</small>` : ''}`
+      : '<span class="pill">Available</span>';
+    const bypassAction = blocked
+      ? '<small>Release blocked</small>'
+      : `<button class="link-btn" type="button" data-pick-bypass-lot="${lot.lot_id}">Request barcode bypass</button>`;
     return `<tr>
       <td class="wrap"><strong>${escapeHtml(lot.sku_name)}</strong></td>
       <td>${shipperBadge(lot)}</td>
@@ -2476,6 +2490,7 @@ function renderPickRackContents() {
       <td>${fmtDate(lot.expiry_date)} ${expiryPill(lot.expiry_status)}</td>
       <td><span class="pill">${escapeHtml(lot.uom)}</span></td>
       <td>${fmtQtyUom(remaining, lot.uom)}${queued ? `<br><small>Original: ${fmtQtyUom(lot.qty, lot.uom)}</small>` : ''}</td>
+      <td class="wrap">${releaseStatus}</td>
       <td>${queued ? fmtQtyUom(queued, lot.uom) : '—'}</td>
       <td>${bypassAction}</td>
     </tr>`;
@@ -2525,9 +2540,13 @@ function renderTransferRackContents() {
     return;
   }
 
-  container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Available</th><th>Queued</th></tr></thead><tbody>${rows.map((lot) => {
+  container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Physical qty</th><th>Release status</th><th>Queued</th></tr></thead><tbody>${rows.map((lot) => {
     const queued = state.transfer.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
     const remaining = Math.max(Number(lot.qty) - queued, 0);
+    const blocked = lot.is_releasable === false;
+    const holdDetail = lot.is_on_hold
+      ? escapeHtml(lot.hold_reason || 'Admin / Owner hold')
+      : (blocked ? 'Blocked by an ON-HOLD lot in this physical Shipper Box' : '');
     return `<tr>
       <td class="wrap"><strong>${escapeHtml(lot.sku_name)}</strong></td>
       <td>${shipperBadge(lot)}</td>
@@ -2535,6 +2554,7 @@ function renderTransferRackContents() {
       <td>${fmtDate(lot.expiry_date)} ${expiryPill(lot.expiry_status)}</td>
       <td><span class="pill">${escapeHtml(lot.uom)}</span></td>
       <td>${fmtQtyUom(remaining, lot.uom)}${queued ? `<br><small>Original: ${fmtQtyUom(lot.qty, lot.uom)}</small>` : ''}</td>
+      <td class="wrap">${blocked ? `<span class="pill expired">ON HOLD</span>${holdDetail ? `<br><small>${holdDetail}</small>` : ''}` : '<span class="pill">Available</span>'}</td>
       <td>${queued ? fmtQtyUom(queued, lot.uom) : '—'}</td>
     </tr>`;
   }).join('')}</tbody></table>`;
@@ -2758,7 +2778,8 @@ async function loadOperationLots(operation) {
       .order('container_no');
     if (rackError) return toast(friendlyError(rackError), 'error');
 
-    const candidates = (rackRows || []).filter(lotUsesNaBarcode);
+    const allNaCandidates = (rackRows || []).filter(lotUsesNaBarcode);
+    const candidates = allNaCandidates.filter((lot) => lot.is_releasable !== false);
     const skuIds = [...new Set(candidates.map((row) => row.sku_id).filter(Boolean))];
     let fefoRows = [];
     if (pick && skuIds.length) {
@@ -2767,6 +2788,7 @@ async function loadOperationLots(operation) {
         .select('lot_id,sku_id,expiry_date,location_code,container_no,qty,uom')
         .in('sku_id', skuIds)
         .gt('qty', 0)
+        .eq('is_releasable', true)
         .neq('expiry_status', 'EXPIRED')
         .order('expiry_date');
       if (error) return toast(friendlyError(error), 'error');
@@ -2807,8 +2829,13 @@ async function loadOperationLots(operation) {
     if (!opState.lots.length) {
       const note = $(pick ? 'pick-qty-note' : 'tr-qty-note');
       note.classList.remove('hidden');
-      note.textContent = `No positive stock in ${opState.locationCode} has N/A recorded for the barcode corresponding to its CASE, PACK, or PIECE stock unit.`;
-      return toast(`No selectable N/A-barcode stock is available in ${opState.locationCode}.`, 'error');
+      const heldMatches = allNaCandidates.filter((lot) => lot.is_releasable === false).length;
+      note.textContent = heldMatches
+        ? `${heldMatches} matching N/A stock lot(s) exist in ${opState.locationCode}, but they are ON HOLD and cannot be released.`
+        : `No positive stock in ${opState.locationCode} has N/A recorded for the barcode corresponding to its CASE, PACK, or PIECE stock unit.`;
+      return toast(heldMatches
+        ? 'Matching N/A stock exists, but it is ON HOLD. Admin or Owner must unfreeze the lot before release.'
+        : `No selectable N/A-barcode stock is available in ${opState.locationCode}.`, 'error');
     }
     if (pick) { updatePickFefoNote(); updatePickQtyNote(); }
     if (transfer) updateTransferQtyNote();
@@ -2841,12 +2868,13 @@ async function loadOperationLots(operation) {
   const [{ data: rackRows, error: rackError }, fefoResult] = await Promise.all([
     supabase.from('v_inventory_details').select('*').eq('location_code', opState.locationCode).in('sku_id', skuIds).order('sku_name').order('uom').order('expiry_date').order('container_no'),
     pick
-      ? supabase.from('v_inventory_details').select('lot_id,sku_id,expiry_date,location_code,container_no,qty,uom').in('sku_id', skuIds).gt('qty', 0).neq('expiry_status', 'EXPIRED').order('expiry_date')
+      ? supabase.from('v_inventory_details').select('lot_id,sku_id,expiry_date,location_code,container_no,qty,uom,is_releasable').in('sku_id', skuIds).gt('qty', 0).eq('is_releasable', true).neq('expiry_status', 'EXPIRED').order('expiry_date')
       : Promise.resolve({ data: [], error: null })
   ]);
   if (rackError || fefoResult.error) return toast(friendlyError(rackError || fefoResult.error), 'error');
 
-  const candidates = (rackRows || []).filter((lot) => pairKeys.has(`${lot.sku_id}|${String(lot.uom || '').toUpperCase()}`));
+  const matchingRackRows = (rackRows || []).filter((lot) => pairKeys.has(`${lot.sku_id}|${String(lot.uom || '').toUpperCase()}`));
+  const candidates = matchingRackRows.filter((lot) => lot.is_releasable !== false);
   const queuedByLot = new Map();
   opState.cart.forEach((line) => {
     queuedByLot.set(line.lot_id, (queuedByLot.get(line.lot_id) || 0) + Number(line.qty || 0));
@@ -2912,7 +2940,10 @@ async function loadOperationLots(operation) {
     if (pick) {
       $('pick-qty-note').classList.remove('hidden');
       $('pick-qty-note').textContent = `Barcode is registered as ${categories}, but none of those matching stock units are available in ${opState.locationCode}.`;
-      toast(`Barcode is valid, but no matching stock is available in ${opState.locationCode}.`, 'error');
+      const heldMatches = matchingRackRows.filter((lot) => lot.is_releasable === false).length;
+      toast(heldMatches
+        ? 'Matching stock exists in this rack, but it is ON HOLD. Admin or Owner must unfreeze the lot before release.'
+        : `Barcode is valid, but no matching stock is available in ${opState.locationCode}.`, 'error');
     } else {
       $('tr-qty-note').classList.remove('hidden');
       $('tr-qty-note').textContent = `Barcode is registered as ${categories}, but none of those matching stock units are available for transfer in ${opState.locationCode}.`;
@@ -2929,6 +2960,7 @@ async function addSupervisorBarcodeBypass(lotId) {
   if (!state.session?.user?.id) return toast('Your warehouse session is no longer active. Sign in again.', 'error');
   const lot = state.pick.rackLots.find((row) => row.lot_id === lotId);
   if (!lot) return toast('The selected rack item is no longer available. Refresh the source rack.', 'error');
+  if (lot.is_releasable === false) return toast('This inventory lot is ON HOLD and cannot be released or barcode-bypassed. Admin or Owner must unfreeze it first.', 'error');
   if (state.pick.cart.some((line) => line.lot_id === lotId && line.supervisor_bypass)) {
     return toast('An approved barcode bypass for this inventory lot is already queued. Remove it first if you need to change the quantity or reason.', 'error');
   }
@@ -2959,6 +2991,7 @@ async function addSupervisorBarcodeBypass(lotId) {
     .eq('sku_id', lot.sku_id)
     .eq('uom', lot.uom)
     .gt('qty', 0)
+    .eq('is_releasable', true)
     .neq('expiry_status', 'EXPIRED')
     .order('expiry_date');
   if (earliestError) return toast(friendlyError(earliestError), 'error');
@@ -3045,6 +3078,7 @@ async function addOperationItem(operation) {
   const lotIndex = Number(lotValue);
   const lot = opState.lots[lotIndex];
   if (!lot) return toast('Select a valid stock lot.', 'error');
+  if (lot.is_releasable === false) return toast('This inventory lot is ON HOLD and cannot be picked or transferred. Admin or Owner must unfreeze it first.', 'error');
 
   let qty;
   if (pick) {
@@ -3751,6 +3785,8 @@ async function completeTransfer() {
     if (!state.transfer.lockToken || !state.transfer.locationCode) return toast('Lock the source rack first.', 'error');
     const activeLots = (state.transfer.rackLots || []).filter((row) => Number(row.qty) > 0);
     if (!activeLots.length) return toast('The locked source rack has no active stock to transfer.', 'error');
+    const heldLots = activeLots.filter((row) => row.is_releasable === false);
+    if (heldLots.length) return toast(`Whole-rack transfer blocked: ${heldLots.length} inventory line(s) are ON HOLD. Unfreeze them first, or transfer only eligible lots individually.`, 'error');
     const shipperBoxes = new Set(activeLots.map((row) => row.shipper_box_no).filter(Boolean));
     const confirmed = window.confirm(`WHOLE SOURCE-RACK / PALLET TRANSFER\n\nMove ALL active stock from ${state.transfer.locationCode} to ${destination}?\n\nDetected: ${activeLots.length} active inventory lines and ${shipperBoxes.size} physical Shipper box(es).\n\nThis includes every STANDARD lot and every Shipper Box currently stored in the source rack. This cannot be limited to one pallet because the current WMS has no separate Pallet ID.`);
     if (!confirmed) return;
@@ -3797,6 +3833,38 @@ async function loadInventory(force = false) {
   renderInventory();
 }
 
+function inventoryHoldStatus(row) {
+  if (row.is_on_hold) {
+    return `<span class="pill expired">ON HOLD</span>${row.hold_reason ? `<br><small>${escapeHtml(row.hold_reason)}</small>` : ''}`;
+  }
+  if (row.is_releasable === false && row.shipper_header_on_hold) {
+    return '<span class="pill expired">BOX ON HOLD</span><br><small>The Shipper HEADER is frozen.</small>';
+  }
+  if (row.is_releasable === false && row.shipper_box_has_hold) {
+    return '<span class="pill expired">BOX HAS HELD CONTENT</span><br><small>Whole-box release is blocked.</small>';
+  }
+  return '';
+}
+
+function inventoryLotActions(row) {
+  if (!isSupervisor()) return '';
+  const lotId = escapeHtml(row.lot_id);
+  const blocked = row.is_releasable === false;
+  if (row.is_on_hold) {
+    return isAdminOrOwner()
+      ? `<td><button class="link-btn" data-inventory-hold="${lotId}" data-hold-state="release">Unfreeze lot</button><br><small>Reason required · audited</small></td>`
+      : '<td><small>ON HOLD · Admin / Owner must unfreeze</small></td>';
+  }
+  if (blocked) {
+    return '<td><small>Release/correction blocked by Shipper hold. Unfreeze the held Shipper lot first.</small></td>';
+  }
+  const freeze = isAdminOrOwner() ? ` <button class="link-btn" data-inventory-hold="${lotId}" data-hold-state="freeze">Freeze lot</button>` : '';
+  if (row.shipper_box_id) {
+    return `<td><button class="link-btn" data-inventory-edit="${lotId}">Edit</button>${freeze}<br><small>Shipper-safe correction · ${escapeHtml(row.shipper_box_no || '')}</small></td>`;
+  }
+  return `<td><button class="link-btn" data-inventory-edit="${lotId}">Edit</button>${isAdminOrOwner() ? ` <button class="link-btn" data-inventory-delete="${lotId}">Delete</button>${freeze}` : '<br><small>Delete / Freeze: Admin / Owner only</small>'}</td>`;
+}
+
 function renderInventory() {
   const term = $('inventory-search').value.trim().toLowerCase();
   const rows = state.data.inventory.filter((r) => [
@@ -3804,30 +3872,65 @@ function renderInventory() {
     r.case_barcode, r.pack_barcode, r.piece_barcode,
     r.container_no, r.location_code, isNoExpiryDate(r.expiry_date) ? 'N/A no expiry' : r.expiry_date,
     r.uom, r.putaway_remarks, r.transfer_remarks,
-    r.shipper_box_no, r.shipper_status, r.shipper_lot_role
+    r.shipper_box_no, r.shipper_status, r.shipper_lot_role,
+    r.is_on_hold ? 'on hold frozen freeze' : '', r.hold_reason
   ].join(' ').toLowerCase().includes(term));
   const grouped = new Map();
   rows.forEach((r) => {
-    const item = grouped.get(r.sku_id) || { sku_name: r.sku_name, balances: { PIECE: 0, PACK: 0, CASE: 0 }, containers: new Set(), locations: new Set(), earliest: r.expiry_date };
+    const item = grouped.get(r.sku_id) || { sku_name: r.sku_name, balances: { PIECE: 0, PACK: 0, CASE: 0 }, containers: new Set(), locations: new Set(), earliest: r.expiry_date, heldLots: 0 };
     item.balances[r.uom] = (item.balances[r.uom] || 0) + Number(r.qty);
     item.containers.add(r.container_no);
     item.locations.add(r.location_code);
     if (r.expiry_date < item.earliest) item.earliest = r.expiry_date;
+    if (r.is_on_hold) item.heldLots += 1;
     grouped.set(r.sku_id, item);
   });
   const summaryRows = [...grouped.values()].sort((a, b) => a.sku_name.localeCompare(b.sku_name));
-  $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
+  $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Held lots</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${r.heldLots ? `<span class="pill expired">${r.heldLots} ON HOLD</span>` : '—'}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
   const actionHeader = isSupervisor() ? '<th>Actions</th>' : '';
-  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => `<tr>
-    <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${isNoExpiryDate(r.expiry_date) ? '<span class="pill">N/A</span>' : expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
-    ${isSupervisor() ? (r.shipper_box_id ? `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button><br><small>Shipper-safe correction · ${escapeHtml(r.shipper_box_no || '')}</small></td>` : `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button>${isAdminOrOwner() ? ` <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button>` : '<br><small>Delete: Admin / Owner only</small>'}</td>`) : ''}
-  </tr>`).join('')}</tbody></table>` : emptyState('No matching inventory.');
+  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => {
+    const expiry = isNoExpiryDate(r.expiry_date) ? '<span class="pill">N/A</span>' : expiryPill(r.expiry_status);
+    const hold = inventoryHoldStatus(r);
+    return `<tr>
+      <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${expiry}${hold ? `<br>${hold}` : ''}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
+      ${inventoryLotActions(r)}
+    </tr>`;
+  }).join('')}</tbody></table>` : emptyState('No matching inventory.');
+}
+
+async function toggleInventoryLotHold(lotId, shouldHold) {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required to freeze or unfreeze an inventory lot.', 'error');
+  const row = state.data.inventory.find((r) => r.lot_id === lotId);
+  if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
+
+  const action = shouldHold ? 'FREEZE / PLACE ON HOLD' : 'UNFREEZE / RELEASE HOLD';
+  const reason = window.prompt(`${action} reason (required):\n\n${row.sku_name}\n${row.location_code} · ${row.container_no} · ${fmtDate(row.expiry_date)} · ${fmtQtyUom(row.qty, row.uom)}`);
+  if (!reason?.trim()) return toast('A reason is required.', 'error');
+  if (reason.trim().length > 500) return toast('Hold/release reason is limited to 500 characters.', 'error');
+
+  const warning = shouldHold
+    ? 'This exact lot will remain visible in Inventory but cannot be Picked, Stock Transferred, barcode-bypassed, or reduced/moved by Detailed-Lot correction until Admin/Owner unfreezes it. For a SEALED Shipper HEADER, the whole physical box is held; holding a Shipper CONTENT lot also blocks whole-box release.'
+    : 'This lot will become eligible for Picking/Transfer again, subject to the normal barcode, FEFO, Shipper, rack-lock, and stock rules.';
+  if (!window.confirm(`${action} this inventory lot?\n\n${row.sku_name}\n${row.location_code} · ${row.container_no} · ${fmtQtyUom(row.qty, row.uom)}\n\n${warning}`)) return;
+
+  const { data, error } = await supabase.rpc('admin_set_inventory_lot_hold', {
+    p_lot_id: lotId,
+    p_hold: Boolean(shouldHold),
+    p_reason: reason.trim()
+  });
+  if (error) return toast(friendlyError(error), 'error');
+
+  invalidateReports();
+  await loadInventory(true);
+  const result = data?.[0];
+  toast(result?.is_on_hold ? 'Inventory lot placed ON HOLD. Release is now blocked.' : 'Inventory lot hold released. Normal eligibility restored.', 'success');
 }
 
 async function openInventoryLotEdit(lotId) {
   if (!isSupervisor()) return toast('Supervisor, Admin, or Owner access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
+  if (row.is_releasable === false) return toast('This lot is ON HOLD or blocked by a Shipper hold. Admin/Owner must unfreeze the held lot before it can be corrected.', 'error');
 
   const isShipperLot = Boolean(row.shipper_box_id);
   const shipperRole = String(row.shipper_lot_role || '').toUpperCase();
