@@ -73,6 +73,20 @@ const sortLocations = (rows) => [...rows].sort((a, b) => {
 
 let putawayDetailsTimer = null;
 
+function freshPutawayState() {
+  return {
+    locationCode: null,
+    cart: [],
+    matchedSkuId: null,
+    duplicateDetailsSkuId: null,
+    lookupSequence: 0,
+    barcodeLessMode: null,
+    barcodeLessSkuId: null,
+    barcodeLessSkus: [],
+    barcodeLessLoaded: false
+  };
+}
+
 const state = {
   session: null,
   profile: null,
@@ -80,7 +94,7 @@ const state = {
   currentScreen: 'dashboard',
   realtimeChannel: null,
   scanner: { reader: null, controls: null, target: null, kind: null },
-  putaway: { locationCode: null, cart: [], matchedSkuId: null, duplicateDetailsSkuId: null, lookupSequence: 0 },
+  putaway: freshPutawayState(),
   shipperPutaway: freshShipperPutawayState(),
   pick: freshOperationState(),
   pickOrder: { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false },
@@ -205,6 +219,9 @@ function setupStaticEvents() {
   $('pa-cancel-btn').addEventListener('click', resetPutawaySession);
   $('pa-complete-btn').addEventListener('click', completePutaway);
   ['pa-piece', 'pa-pack', 'pa-case'].forEach((id) => $(id).addEventListener('change', resolvePutawaySku));
+  $('pa-barcode-less-search').addEventListener('input', renderBarcodeLessSkuOptions);
+  $('pa-barcode-less-select').addEventListener('change', selectBarcodeLessPutawaySku);
+  $('pa-barcode-less-new-btn').addEventListener('click', startNewBarcodeLessPutawaySku);
   ['pa-brand', 'pa-description', 'pa-variant', 'pa-size'].forEach((id) => $(id).addEventListener('input', () => {
     clearTimeout(putawayDetailsTimer);
     putawayDetailsTimer = setTimeout(checkPutawayDuplicateDetails, 350);
@@ -864,6 +881,7 @@ function hidePutawayDuplicateWarning() {
   $('pa-duplicate-warning').classList.add('hidden');
   $('pa-duplicate-details').textContent = '';
   $('pa-still-add').checked = false;
+  $('pa-still-add').disabled = false;
 }
 
 function archivedSkuLabel(sku) {
@@ -926,6 +944,196 @@ async function findArchivedSkuByDetails(details, skuType = 'STANDARD') {
   return data || [];
 }
 
+
+function putawayBarcodeValues() {
+  return ['pa-case', 'pa-pack', 'pa-piece'].map((id) => normalizeBarcode($(id).value));
+}
+
+function isAllNaPutaway() {
+  const codes = putawayBarcodeValues();
+  return codes.length === 3 && codes.every((code) => code === 'N/A');
+}
+
+function barcodeLessSearchText(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function barcodeLessCompactText(value) {
+  return barcodeLessSearchText(value).replace(/[^a-z0-9]+/g, '');
+}
+
+function barcodeLessSkuLabel(sku) {
+  return [sku?.brand, sku?.description, sku?.variant, sku?.size].filter(Boolean).join(' — ');
+}
+
+function clearBarcodeLessDetailFields() {
+  ['pa-brand', 'pa-description', 'pa-variant', 'pa-size'].forEach((id) => { $(id).value = ''; });
+}
+
+function hideBarcodeLessPutawayPanel({ clearExistingDetails = false } = {}) {
+  const wasExisting = state.putaway.barcodeLessMode === 'existing';
+  state.putaway.barcodeLessMode = null;
+  state.putaway.barcodeLessSkuId = null;
+  if (wasExisting) state.putaway.matchedSkuId = null;
+  if (clearExistingDetails && wasExisting) clearBarcodeLessDetailFields();
+  $('pa-barcode-less-panel').classList.add('hidden');
+  $('pa-barcode-less-search').value = '';
+  $('pa-barcode-less-select').innerHTML = '<option value="">Select a previously recorded barcode-less SKU</option>';
+  $('pa-barcode-less-selection-note').textContent = '';
+}
+
+function setBarcodeLessAwaitingSelection() {
+  state.putaway.barcodeLessMode = 'select';
+  state.putaway.barcodeLessSkuId = null;
+  state.putaway.matchedSkuId = null;
+  clearBarcodeLessDetailFields();
+  setPutawayDetailsReadonly(true);
+  hidePutawayDuplicateWarning();
+  $('pa-match-note').classList.add('hidden');
+  $('pa-barcode-less-selection-note').innerHTML =
+    '<strong>Select an existing item first.</strong> If the item is genuinely new and is not in the list, use <strong>Create new barcode-less SKU</strong>.';
+}
+
+async function loadBarcodeLessPutawaySkus(force = false) {
+  if (!force && state.putaway.barcodeLessLoaded) {
+    renderBarcodeLessSkuOptions();
+    return state.putaway.barcodeLessSkus;
+  }
+
+  $('pa-barcode-less-selection-note').textContent = 'Loading previously recorded barcode-less items…';
+  const { data, error } = await supabase.rpc('find_barcode_less_standard_skus', { p_search: null });
+  if (error) throw error;
+
+  state.putaway.barcodeLessSkus = data || [];
+  state.putaway.barcodeLessLoaded = true;
+  renderBarcodeLessSkuOptions();
+
+  if (!state.putaway.barcodeLessSkus.length) {
+    $('pa-barcode-less-selection-note').innerHTML =
+      '<strong>No previously recorded barcode-less STANDARD SKU was found.</strong> If this is a genuinely new item, use <strong>Create new barcode-less SKU</strong>.';
+  }
+  return state.putaway.barcodeLessSkus;
+}
+
+function renderBarcodeLessSkuOptions() {
+  const select = $('pa-barcode-less-select');
+  if (!select) return;
+
+  const term = barcodeLessSearchText($('pa-barcode-less-search').value);
+  const compactTerm = barcodeLessCompactText(term);
+  const currentId = state.putaway.barcodeLessSkuId;
+
+  let rows = state.putaway.barcodeLessSkus.filter((sku) => {
+    if (!term) return true;
+    const label = barcodeLessSearchText(barcodeLessSkuLabel(sku));
+    const compact = barcodeLessCompactText(label);
+    const words = term.split(/\s+/).filter(Boolean);
+    return label.includes(term)
+      || (compactTerm && compact.includes(compactTerm))
+      || words.every((word) => label.includes(word) || compact.includes(barcodeLessCompactText(word)));
+  });
+
+  if (currentId && !rows.some((sku) => sku.id === currentId)) {
+    const selected = state.putaway.barcodeLessSkus.find((sku) => sku.id === currentId);
+    if (selected) rows = [selected, ...rows];
+  }
+
+  const first = state.putaway.barcodeLessSkus.length
+    ? '<option value="">Select a previously recorded barcode-less SKU</option>'
+    : '<option value="">No previously recorded barcode-less SKU</option>';
+
+  select.innerHTML = first + rows.map((sku) =>
+    `<option value="${escapeHtml(sku.id)}">${escapeHtml(barcodeLessSkuLabel(sku))}${sku.created_by_username ? ` · added by ${escapeHtml(sku.created_by_username)}` : ''}</option>`
+  ).join('');
+
+  if (currentId && rows.some((sku) => sku.id === currentId)) select.value = currentId;
+}
+
+function selectBarcodeLessPutawaySku() {
+  const id = $('pa-barcode-less-select').value;
+  if (!id) {
+    if (state.putaway.barcodeLessMode !== 'new') setBarcodeLessAwaitingSelection();
+    return;
+  }
+
+  const sku = state.putaway.barcodeLessSkus.find((row) => row.id === id);
+  if (!sku) {
+    setBarcodeLessAwaitingSelection();
+    return toast('The selected barcode-less SKU is no longer in the loaded list. Refresh the selection.', 'error');
+  }
+
+  state.putaway.barcodeLessMode = 'existing';
+  state.putaway.barcodeLessSkuId = sku.id;
+  state.putaway.matchedSkuId = sku.id;
+  $('pa-brand').value = sku.brand || '';
+  $('pa-description').value = sku.description || '';
+  $('pa-variant').value = sku.variant || '';
+  $('pa-size').value = sku.size || '';
+  setPutawayDetailsReadonly(true);
+  hidePutawayDuplicateWarning();
+  $('pa-match-note').innerHTML =
+    `<strong>Existing barcode-less SKU selected.</strong> ${escapeHtml(barcodeLessSkuLabel(sku))}. The stored master details are locked; enter only the delivery-specific rack, container, expiry and quantities.`;
+  $('pa-match-note').classList.remove('hidden');
+  $('pa-barcode-less-selection-note').innerHTML =
+    `<strong>Selected:</strong> ${escapeHtml(barcodeLessSkuLabel(sku))}`;
+}
+
+function startNewBarcodeLessPutawaySku() {
+  if (!isAllNaPutaway()) return toast('Create-new barcode-less mode is available only when CASE, PACK, and PIECE are all N/A.', 'error');
+
+  const ok = window.confirm(
+    'Create a new permanent barcode-less SKU only if the physical item is not already listed above. Continue?'
+  );
+  if (!ok) return;
+
+  state.putaway.barcodeLessMode = 'new';
+  state.putaway.barcodeLessSkuId = null;
+  state.putaway.matchedSkuId = null;
+  $('pa-barcode-less-select').value = '';
+  clearBarcodeLessDetailFields();
+  setPutawayDetailsReadonly(false);
+  hidePutawayDuplicateWarning();
+  $('pa-match-note').innerHTML =
+    '<strong>Creating a new barcode-less STANDARD SKU.</strong> Enter Brand, Description, Variant and Size carefully. The database will block an exact normalized duplicate.';
+  $('pa-match-note').classList.remove('hidden');
+  $('pa-barcode-less-selection-note').innerHTML =
+    '<strong>New SKU mode:</strong> type the master details below. You may still choose an existing item from the list if you find a match.';
+  $('pa-brand').focus();
+}
+
+async function enterBarcodeLessPutawayMode() {
+  $('pa-barcode-less-panel').classList.remove('hidden');
+
+  if (!state.putaway.barcodeLessMode) {
+    state.putaway.barcodeLessMode = 'select';
+    state.putaway.barcodeLessSkuId = null;
+    state.putaway.matchedSkuId = null;
+    clearBarcodeLessDetailFields();
+    setPutawayDetailsReadonly(true);
+    hidePutawayDuplicateWarning();
+  }
+
+  await loadBarcodeLessPutawaySkus();
+
+  if (state.putaway.barcodeLessMode === 'existing' && state.putaway.barcodeLessSkuId) {
+    const sku = state.putaway.barcodeLessSkus.find((row) => row.id === state.putaway.barcodeLessSkuId);
+    if (!sku) {
+      setBarcodeLessAwaitingSelection();
+      return 'barcode-less-select';
+    }
+    setPutawayDetailsReadonly(true);
+    return 'barcode-less-existing';
+  }
+
+  if (state.putaway.barcodeLessMode === 'new') {
+    setPutawayDetailsReadonly(false);
+    return 'barcode-less-new';
+  }
+
+  setBarcodeLessAwaitingSelection();
+  return 'barcode-less-select';
+}
+
 async function resolvePutawaySku() {
   const sequence = ++state.putaway.lookupSequence;
   const fields = [
@@ -940,6 +1148,20 @@ async function resolvePutawaySku() {
     return { ...field, value };
   });
   const actualEntries = entered.filter((entry) => entry.value && entry.value !== 'N/A');
+  const allNa = entered.every((entry) => entry.value === 'N/A');
+
+  if (allNa) {
+    try {
+      return await enterBarcodeLessPutawayMode();
+    } catch (error) {
+      toast(friendlyError(error), 'error');
+      return 'error';
+    }
+  }
+
+  if (state.putaway.barcodeLessMode) {
+    hideBarcodeLessPutawayPanel({ clearExistingDetails: true });
+  }
 
   if (!actualEntries.length) {
     state.putaway.matchedSkuId = null;
@@ -1092,6 +1314,10 @@ async function resolvePutawaySku() {
 }
 
 async function checkPutawayDuplicateDetails() {
+  if (isAllNaPutaway() && state.putaway.barcodeLessMode !== 'new') {
+    hidePutawayDuplicateWarning();
+    return null;
+  }
   if (state.putaway.matchedSkuId) {
     hidePutawayDuplicateWarning();
     return null;
@@ -1119,9 +1345,19 @@ async function checkPutawayDuplicateDetails() {
       const archived = archivedMatches[0];
       if (archived) {
         state.putaway.duplicateDetailsSkuId = archived.id;
-        $('pa-duplicate-details').textContent =
-          `A previously deleted SKU has the same details. Archived barcodes — CASE: ${archived.case_barcode}; PACK: ${archived.pack_barcode}; PIECE: ${archived.piece_barcode}. ` +
-          `If this is the same physical product, use its original barcode so Admin/Owner can reactivate the original record. Only use Still Add to Database when this is genuinely a different barcode family.`;
+        const archivedAllNa = [archived.case_barcode, archived.pack_barcode, archived.piece_barcode]
+          .every((code) => normalizeBarcode(code) === 'N/A');
+
+        if (isAllNaPutaway() && state.putaway.barcodeLessMode === 'new' && archivedAllNa) {
+          $('pa-still-add').checked = false;
+          $('pa-still-add').disabled = true;
+          $('pa-duplicate-details').textContent =
+            `A previously archived barcode-less SKU has these exact details: ${barcodeLessSkuLabel(archived)}. Do not create another master record. Ask Admin/Owner to review/reactivate the archived SKU in SKU Master Data Health.`;
+        } else {
+          $('pa-duplicate-details').textContent =
+            `A previously deleted SKU has the same details. Archived barcodes — CASE: ${archived.case_barcode}; PACK: ${archived.pack_barcode}; PIECE: ${archived.piece_barcode}. ` +
+            `If this is the same physical product, use its original barcode so Admin/Owner can reactivate the original record. Only use Still Add to Database when this is genuinely a different barcode family.`;
+        }
         $('pa-duplicate-warning').classList.remove('hidden');
         return { ...archived, archived: true };
       }
@@ -1133,7 +1369,18 @@ async function checkPutawayDuplicateDetails() {
   }
 
   state.putaway.duplicateDetailsSkuId = match.id;
-  $('pa-duplicate-details').textContent = `Existing barcodes — CASE: ${match.case_barcode}; PACK: ${match.pack_barcode}; PIECE: ${match.piece_barcode}. Added by: ${match.created_by_username || 'unknown user'}.`;
+  const matchAllNa = [match.case_barcode, match.pack_barcode, match.piece_barcode]
+    .every((code) => normalizeBarcode(code) === 'N/A');
+
+  if (isAllNaPutaway() && state.putaway.barcodeLessMode === 'new' && matchAllNa) {
+    $('pa-still-add').checked = false;
+    $('pa-still-add').disabled = true;
+    $('pa-duplicate-details').textContent =
+      `This exact barcode-less SKU already exists: ${barcodeLessSkuLabel(match)}. Return to the list above and select the existing item instead. Creating another exact all-N/A master record is blocked.`;
+  } else {
+    $('pa-still-add').disabled = false;
+    $('pa-duplicate-details').textContent = `Existing barcodes — CASE: ${match.case_barcode}; PACK: ${match.pack_barcode}; PIECE: ${match.piece_barcode}. Added by: ${match.created_by_username || 'unknown user'}.`;
+  }
   $('pa-duplicate-warning').classList.remove('hidden');
   return match;
 }
@@ -1162,7 +1409,9 @@ function putawayLinePayload() {
     piece_qty: Number($('pa-piece-qty').value || 0),
     pack_qty: Number($('pa-pack-qty').value || 0),
     case_qty: Number($('pa-case-qty').value || 0),
-    allow_duplicate_details: $('pa-still-add').checked
+    allow_duplicate_details: $('pa-still-add').checked,
+    barcode_less_sku_id: state.putaway.barcodeLessMode === 'existing' ? state.putaway.barcodeLessSkuId : null,
+    create_barcode_less_sku: state.putaway.barcodeLessMode === 'new'
   };
 }
 
@@ -1181,6 +1430,9 @@ async function addPutawayItem(event) {
   try {
     const resolution = await resolvePutawaySku();
     if (['conflict', 'error', 'stale', 'archived'].includes(resolution)) return;
+    if (resolution === 'barcode-less-select') {
+      return toast('Select a previously recorded barcode-less SKU, or choose Create new barcode-less SKU.', 'error');
+    }
     if (!form.reportValidity()) return;
 
     const location = normalizeLocation($('pa-location').value);
@@ -1190,14 +1442,30 @@ async function addPutawayItem(event) {
     const codes = [item.case_barcode, item.pack_barcode, item.piece_barcode];
     if (codes.some((code) => !code)) return toast('CASE, PACK, and PIECE barcode are all required. Enter N/A when unavailable.', 'error');
     const actualCodes = codes.filter((code) => code !== 'N/A').map((code) => code.toLowerCase());
-    if (!actualCodes.length) return toast('At least one actual barcode is required; use N/A only for unavailable barcode types.', 'error');
+    const allNa = actualCodes.length === 0;
+    if (allNa && state.putaway.barcodeLessMode === 'existing' && !state.putaway.barcodeLessSkuId) {
+      return toast('Select the existing barcode-less SKU before adding the line.', 'error');
+    }
+    if (allNa && !['existing', 'new'].includes(state.putaway.barcodeLessMode)) {
+      return toast('For an item with no CASE/PACK/PIECE barcode, select an existing barcode-less SKU or explicitly create a new one.', 'error');
+    }
     if ([item.case_qty, item.pack_qty, item.piece_qty].some((qty) => qty < 0)) return toast('Quantities cannot be negative.', 'error');
     if ([item.case_qty, item.pack_qty, item.piece_qty].some((qty) => !Number.isInteger(qty))) return toast('CASE, PACK, and PIECE quantities must be whole numbers only (0, 1, 2, 3, ...).', 'error');
     if (item.case_qty <= 0 && item.pack_qty <= 0 && item.piece_qty <= 0) return toast('Enter at least one CASE, PACK, or PIECE quantity.', 'error');
 
-    const duplicateMatch = await checkPutawayDuplicateDetails();
-    if (duplicateMatch && !$('pa-still-add').checked) {
-      return toast('ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE, or select Still Add to Database.', 'error');
+    if (!(allNa && state.putaway.barcodeLessMode === 'existing')) {
+      const duplicateMatch = await checkPutawayDuplicateDetails();
+      const duplicateIsAllNa = duplicateMatch && [duplicateMatch.case_barcode, duplicateMatch.pack_barcode, duplicateMatch.piece_barcode]
+        .every((code) => normalizeBarcode(code) === 'N/A');
+
+      if (allNa && state.putaway.barcodeLessMode === 'new' && duplicateIsAllNa) {
+        return duplicateMatch.archived
+          ? toast('A previously archived barcode-less SKU has these exact details. Ask Admin/Owner to review/reactivate it instead of creating a duplicate.', 'error')
+          : toast('This exact barcode-less SKU already exists. Select it from the previously recorded items list instead.', 'error');
+      }
+      if (duplicateMatch && !$('pa-still-add').checked) {
+        return toast('ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE, or select Still Add to Database.', 'error');
+      }
     }
     item.allow_duplicate_details = $('pa-still-add').checked;
 
@@ -1226,10 +1494,16 @@ function clearPutawayLine() {
   syncNoExpiryControl('pa-expiry', 'pa-no-expiry');
   ['pa-piece-qty','pa-pack-qty','pa-case-qty'].forEach((id) => $(id).value = '0');
   state.putaway.matchedSkuId = null;
+  state.putaway.barcodeLessMode = null;
+  state.putaway.barcodeLessSkuId = null;
   state.putaway.lookupSequence += 1;
   setPutawayDetailsReadonly(false);
   $('pa-match-note').classList.add('hidden');
   hidePutawayDuplicateWarning();
+  $('pa-barcode-less-panel').classList.add('hidden');
+  $('pa-barcode-less-search').value = '';
+  renderBarcodeLessSkuOptions();
+  $('pa-barcode-less-selection-note').textContent = '';
   $('pa-case').focus();
 }
 
@@ -1253,7 +1527,7 @@ function removePutawayItem(index) {
 }
 
 function resetPutawaySession() {
-  state.putaway = { locationCode: null, cart: [], matchedSkuId: null, duplicateDetailsSkuId: null, lookupSequence: 0 };
+  state.putaway = freshPutawayState();
   $('putaway-form').reset();
   syncNoExpiryControl('pa-expiry', 'pa-no-expiry');
   ['pa-piece-qty','pa-pack-qty','pa-case-qty'].forEach((id) => $(id).value = '0');
@@ -1264,6 +1538,10 @@ function resetPutawaySession() {
   $('pa-complete-btn').disabled = true;
   $('pa-match-note').classList.add('hidden');
   hidePutawayDuplicateWarning();
+  $('pa-barcode-less-panel').classList.add('hidden');
+  $('pa-barcode-less-search').value = '';
+  $('pa-barcode-less-select').innerHTML = '<option value="">Select a previously recorded barcode-less SKU</option>';
+  $('pa-barcode-less-selection-note').textContent = '';
   renderPutawayCart();
 }
 
@@ -3751,7 +4029,11 @@ function buildSkuHealthGroups(rows) {
     const incomplete = active.some((r) => {
       const type = String(r.sku_type || 'STANDARD').toUpperCase();
       if (type === 'SHIPPER') return !skuHealthActual(r.case_barcode);
-      return !skuHealthActual(r.case_barcode) || !skuHealthActual(r.pack_barcode) || !skuHealthActual(r.piece_barcode);
+      const hasCase = Boolean(skuHealthActual(r.case_barcode));
+      const hasPack = Boolean(skuHealthActual(r.pack_barcode));
+      const hasPiece = Boolean(skuHealthActual(r.piece_barcode));
+      if (!hasCase && !hasPack && !hasPiece) return false; // intentional barcode-less STANDARD SKU
+      return !hasCase || !hasPack || !hasPiece;
     });
     const crossCategory = active.some((r) => Boolean(r.cross_category_reuse));
     const archivedOnly = active.length === 0 && archived.length > 0;
@@ -4008,9 +4290,6 @@ async function submitSkuMasterEdit(event) {
 
   if (!brand || !description || !variant || !size) return toast('Brand, description, variant, and size are required.', 'error');
   if (!caseBarcode || !packBarcode || !pieceBarcode) return toast('CASE, PACK, and PIECE barcode fields are required. Enter N/A when unavailable.', 'error');
-  if ([caseBarcode, packBarcode, pieceBarcode].every((code) => code.toUpperCase() === 'N/A')) {
-    return toast('At least one actual barcode must remain registered for the SKU.', 'error');
-  }
   if (!reason) return toast('Enter the reason for editing this SKU master record.', 'error');
 
   const button = event.submitter;
@@ -4852,7 +5131,7 @@ function clearClientAfterFullReset() {
   stopHeartbeat(state.pick);
   stopHeartbeat(state.transfer);
 
-  state.putaway = { locationCode: null, cart: [], matchedSkuId: null, duplicateDetailsSkuId: null, lookupSequence: 0 };
+  state.putaway = freshPutawayState();
   state.shipperPutaway = freshShipperPutawayState();
   state.pick = freshOperationState();
   state.transfer = freshOperationState();

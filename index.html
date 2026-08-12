@@ -131,12 +131,23 @@
         </article>
 
         <form id="putaway-form" class="card form-card">
-          <div class="card-head"><div><h3>Standard SKU put-away</h3><p>CASE, PACK, and PIECE barcode fields are all required. Use N/A only when a barcode is unavailable. Container, expiry, and quantities are always entered manually.</p></div></div>
+          <div class="card-head"><div><h3>Standard SKU put-away</h3><p>CASE, PACK, and PIECE barcode fields are all required. Use N/A when a barcode is unavailable. If all three are N/A, select a previously recorded barcode-less SKU or explicitly create a new one. Container, expiry, and quantities are always entered manually.</p></div></div>
           <div class="form-grid three">
             <label>Rack location / QR *<div class="scan-field"><input id="pa-location" required /><button type="button" class="scan-btn" data-scan-target="pa-location" data-scan-kind="location">Scan</button></div></label>
             <label>Case barcode *<div class="scan-field with-na"><input id="pa-case" required autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="pa-case">Scan</button><button type="button" class="na-btn" data-na-target="pa-case">N/A</button></div></label>
             <label>Pack barcode *<div class="scan-field with-na"><input id="pa-pack" required autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="pa-pack">Scan</button><button type="button" class="na-btn" data-na-target="pa-pack">N/A</button></div></label>
             <label>Piece barcode *<div class="scan-field with-na"><input id="pa-piece" required autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="pa-piece">Scan</button><button type="button" class="na-btn" data-na-target="pa-piece">N/A</button></div></label>
+            <div id="pa-barcode-less-panel" class="warning-box hidden" style="grid-column:1/-1">
+              <strong>No physical barcode — choose the permanent SKU first</strong>
+              <p class="small-note">CASE, PACK, and PIECE are all N/A. Search and select a previously recorded barcode-less item to reuse its exact SKU record. This prevents small wording differences such as “microfiber” versus “micro fiber” from creating duplicate SKUs.</p>
+              <div class="form-grid two">
+                <label>Search previously recorded items<input id="pa-barcode-less-search" type="search" autocomplete="off" placeholder="Example: micro1, microfiber, cloth..." /></label>
+                <label>Previously recorded barcode-less SKU<select id="pa-barcode-less-select"><option value="">Select a previously recorded barcode-less SKU</option></select></label>
+              </div>
+              <div id="pa-barcode-less-selection-note" class="info-box"></div>
+              <div class="form-actions"><button id="pa-barcode-less-new-btn" type="button" class="secondary">Create new barcode-less SKU</button></div>
+              <p class="small-note"><strong>Create New</strong> should be used only when the physical item is genuinely not in the existing list. Exact duplicate barcode-less master details are also blocked by the database.</p>
+            </div>
             <label>Brand *<input id="pa-brand" required /></label>
             <label>Description *<input id="pa-description" required /></label>
             <label>Variant *<input id="pa-variant" required /></label>
@@ -647,7 +658,7 @@
         <label>PACK barcode *<input id="sku-master-edit-pack" required /></label>
         <label>PIECE barcode *<input id="sku-master-edit-piece" required /></label>
       </div>
-      <p class="small-note">Enter N/A when a barcode type is unavailable. At least one actual barcode must remain registered.</p>
+      <p class="small-note">Enter N/A when a barcode type is unavailable. A STANDARD SKU may intentionally use N/A for CASE, PACK, and PIECE when the product has no physical barcode. SHIPPER master records still require an actual CASE barcode.</p>
       <label>Reason for edit *<textarea id="sku-master-edit-reason" required placeholder="Example: corrected barcode, corrected variant, corrected size"></textarea></label>
       <button class="primary" type="submit">Save SKU master edit</button>
     </form>
@@ -668,6 +679,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260812-reopen-cancel-hotfix-1"></script>
+  <script type="module" src="app.js?v=20260812-barcode-less-putaway-1"></script>
 </body>
 </html>
