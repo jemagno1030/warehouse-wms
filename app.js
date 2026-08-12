@@ -259,7 +259,7 @@ function setupStaticEvents() {
   $('pick-lock-btn').addEventListener('click', lockPickLocation);
   $('pick-so').addEventListener('change', refreshPickSalesOrderStatus);
   $('pick-so').addEventListener('blur', refreshPickSalesOrderStatus);
-  $('pick-so-override').addEventListener('change', syncPickOverrideControls);
+  $('pick-so-reopen-request-btn').addEventListener('click', requestReopenCompletedSalesOrder);
   $('pick-barcode').addEventListener('change', () => loadOperationLots('pick'));
   $('pick-lot').addEventListener('change', () => handleOperationLotChange('pick'));
   $('pick-qty').addEventListener('input', updatePickQtyNote);
@@ -1890,16 +1890,61 @@ async function lockPickLocation() {
   }
 
   if (state.pickOrder.status === 'COMPLETED') {
-    if (!$('pick-so-override').checked) {
-      return toast('This Sales Order is completed. Check the reopen option and obtain Supervisor/Admin/Owner approval.', 'error');
-    }
-    const reopenReason = $('pick-so-override-reason').value.trim();
-    if (!reopenReason) return toast('Enter the reason for reopening this completed Sales Order.', 'error');
-    if (!state.session?.user?.id) return toast('Your warehouse session is no longer active. Sign in again.', 'error');
+    const reopened = await requestReopenCompletedSalesOrder();
+    if (!reopened) return;
+  }
 
+  const locked = await acquireOperationLock('pick', location, 'PICK', so);
+  if (locked) {
+    $('pick-so-override').checked = false;
+    $('pick-so-override-reason').value = '';
+    await refreshPickSalesOrderStatus();
+  }
+}
+
+
+async function requestReopenCompletedSalesOrder() {
+  const so = $('pick-so').value.trim();
+  if (!so || isStockAdjustmentSalesOrder(so)) {
+    toast('Enter a completed normal Sales Order number first.', 'error');
+    return false;
+  }
+  if (state.pick.lockToken) {
+    toast('Complete or cancel the current rack before reopening another Sales Order.', 'error');
+    return false;
+  }
+
+  const statusOk = await refreshPickSalesOrderStatus();
+  if (!statusOk) {
+    toast('The Sales Order status could not be verified. Please try again.', 'error');
+    return false;
+  }
+  if (state.pickOrder.status === 'OPEN') {
+    return Boolean(state.pickOrder.isCurrentOwner);
+  }
+  if (state.pickOrder.status !== 'COMPLETED') {
+    toast('This Sales Order is not currently completed, so reopening approval is not required.', 'error');
+    return false;
+  }
+
+  const reopenReason = $('pick-so-override-reason').value.trim();
+  if (!reopenReason) {
+    $('pick-so-override-reason').focus();
+    toast('Enter the reason for reopening this completed Sales Order.', 'error');
+    return false;
+  }
+  if (!state.session?.user?.id) {
+    toast('Your warehouse session is no longer active. Sign in again.', 'error');
+    return false;
+  }
+
+  const requestButton = $('pick-so-reopen-request-btn');
+  setBusy(requestButton, true, 'Awaiting approval…');
+
+  try {
     const approval = await requestWarehouseApproval({
       title: 'Approve Sales Order Reopen',
-      contextHtml: `<strong>Completed Sales Order: ${escapeHtml(so)}</strong><br>Requested by: ${escapeHtml(state.profile?.username || 'current warehouse user')}<br>Reason: ${escapeHtml(reopenReason)}<br><span class="small-note">A currently active Supervisor, Admin, or Owner must approve with their normal WMS login password. The database checks the approver's current role again when the Sales Order is reopened.</span>`,
+      contextHtml: `<strong>Completed Sales Order: ${escapeHtml(so)}</strong><br>Requested by: ${escapeHtml(state.profile?.username || 'current warehouse user')}<br>Reason: ${escapeHtml(reopenReason)}<br><span class="small-note">A currently active Supervisor, Admin, or Owner must enter their normal WMS login email and password. The database checks the approver's current role again when the Sales Order is reopened.</span>`,
       rpcName: 'approve_sales_order_reopen_request',
       rpcArgs: {
         p_requested_by: state.session.user.id,
@@ -1908,31 +1953,34 @@ async function lockPickLocation() {
       },
       confirmLabel: 'APPROVE REOPEN'
     });
-    if (!approval) return;
+    if (!approval) return false;
 
     const { data: reopened, error: reopenError } = await supabase.rpc('reopen_completed_sales_order_approved', {
       p_sales_order: so,
       p_reason: reopenReason,
       p_approval_token: approval.approval_token
     });
-    if (reopenError) return toast(friendlyError(reopenError), 'error');
+    if (reopenError) {
+      toast(friendlyError(reopenError), 'error');
+      return false;
+    }
 
     const reopenedRow = reopened?.[0];
-    toast(`Sales Order ${so} reopened · approved by ${reopenedRow?.approved_by_username || approval.approver_username || 'Supervisor'} (${String(reopenedRow?.approved_by_role || approval.approver_role || '').toUpperCase()}).`, 'success');
     $('pick-so-override').checked = false;
     $('pick-so-override-reason').value = '';
 
     const refreshed = await refreshPickSalesOrderStatus();
     if (!refreshed || state.pickOrder.status !== 'OPEN' || !state.pickOrder.isCurrentOwner) {
-      return toast('Sales Order was reopened, but its current ownership could not be verified. Refresh Picking before locking a rack.', 'error');
+      toast('Sales Order was reopened, but its current ownership could not be verified. Refresh Picking before locking a rack.', 'error');
+      return false;
     }
-  }
 
-  const locked = await acquireOperationLock('pick', location, 'PICK', so);
-  if (locked) {
-    $('pick-so-override').checked = false;
-    $('pick-so-override-reason').value = '';
-    await refreshPickSalesOrderStatus();
+    toast(`Sales Order ${so} reopened · approved by ${reopenedRow?.approved_by_username || approval.approver_username || 'Supervisor'} (${String(reopenedRow?.approved_by_role || approval.approver_role || '').toUpperCase()}). You may now lock the source rack.`, 'success');
+    return true;
+  } finally {
+    setBusy(requestButton, false);
+    syncPickOverrideControls();
+    updatePickSalesOrderControls();
   }
 }
 
@@ -1993,11 +2041,10 @@ async function acquireOperationLock(operation, location, type, salesOrder, optio
   if (error) {
     const message = friendlyError(error);
     if (message.includes('SALES_ORDER_ALREADY_COMPLETED') || message.includes('SUPERVISOR_APPROVAL_REQUIRED')) {
-      $('pick-so-override').checked = true;
+      await refreshPickSalesOrderStatus();
       $('pick-so-override-reason').disabled = false;
       $('pick-so-override-reason').focus();
-      toast('This Sales Order requires Supervisor/Admin/Owner login-password approval before it can be reopened.', 'error');
-      await refreshPickSalesOrderStatus();
+      toast('This Sales Order is completed. Enter a reopening reason, then click Request Supervisor/Admin/Owner approval.', 'error');
       return false;
     }
     toast(message, 'error');
@@ -2978,6 +3025,8 @@ function updatePickSalesOrderControls() {
   const hasSo = Boolean($('pick-so').value.trim());
   const adjustmentMode = isStockAdjustmentSalesOrder($('pick-so').value);
   const orderOpen = state.pickOrder.status === 'OPEN';
+  const orderCompleted = state.pickOrder.status === 'COMPLETED';
+  const orderNew = state.pickOrder.status === 'NEW';
   const hasSavedPick = Number(state.pickOrder.pickCount || 0) > 0;
   const unlocked = !state.pick.lockToken;
   const soLocked = isPickSalesOrderInputLocked();
@@ -2992,9 +3041,12 @@ function updatePickSalesOrderControls() {
   $('pick-finish-so-btn').disabled = adjustmentMode || !(state.mode === 'ACTIVE' && hasSo && orderOpen && hasSavedPick && unlocked);
   $('pick-finish-so-btn').title = adjustmentMode ? 'Sales Order 0 is reusable Stock Adjustment mode and does not need to be finished.' : '';
 
-  // Normal Sales Orders use the existing whole-order cancellation rule.
-  // Sales Order 0 repurposes this button as a clean way to LEAVE
-  // Warehouse Stock Adjustment mode.
+  // "Cancel picking" has two safe meanings:
+  // 1) NEW or COMPLETED Sales Order with no active rack: clear only this screen.
+  //    No database Sales Order/history record is changed.
+  // 2) OPEN empty Sales Order owned by this user: use the existing database
+  //    cancellation RPC so the Sales Order number is released properly.
+  // Sales Order 0 continues to use this button as Exit stock adjustment.
   const cancelWhole = $('pick-cancel-order-btn');
   if (cancelWhole) {
     if (adjustmentMode) {
@@ -3005,34 +3057,47 @@ function updatePickSalesOrderControls() {
         : 'Leave Sales Order 0 Warehouse Stock Adjustment mode.';
     } else {
       cancelWhole.textContent = 'Cancel picking';
-      cancelWhole.disabled = !(state.mode === 'ACTIVE' && hasSo && orderOpen && !hasSavedPick && Boolean(state.pickOrder.isCurrentOwner));
-      cancelWhole.title = hasSavedPick
-        ? 'This Sales Order already has a saved pick and can no longer be cancelled as an empty picking session.'
-        : 'Cancel the entire empty picking session and release this Sales Order number for reuse.';
+
+      if (orderCompleted && unlocked && hasSo) {
+        cancelWhole.disabled = false;
+        cancelWhole.title = 'Leave this completed Sales Order without reopening it. This only clears the Picking screen; the completed Sales Order is not changed.';
+      } else if (orderNew && unlocked && hasSo) {
+        cancelWhole.disabled = false;
+        cancelWhole.title = 'Clear this not-yet-opened Sales Order from the Picking screen. No database record is changed.';
+      } else {
+        cancelWhole.disabled = !(state.mode === 'ACTIVE' && hasSo && orderOpen && !hasSavedPick && Boolean(state.pickOrder.isCurrentOwner));
+        cancelWhole.title = hasSavedPick
+          ? 'This Sales Order already has a saved pick and can no longer be cancelled as an empty picking session.'
+          : 'Cancel the entire empty picking session and release this Sales Order number for reuse.';
+      }
     }
   }
 }
 
 function syncPickOverrideControls() {
   const panel = $('pick-so-override-panel');
-  const checkbox = $('pick-so-override');
+  const legacyFlag = $('pick-so-override');
   const reason = $('pick-so-override-reason');
-  if (!panel || !checkbox || !reason) return;
+  const requestButton = $('pick-so-reopen-request-btn');
+  if (!panel || !legacyFlag || !reason || !requestButton) return;
 
   const completed = state.pickOrder.status === 'COMPLETED';
   const adjustmentMode = isStockAdjustmentSalesOrder($('pick-so').value);
-  const available = !adjustmentMode && completed && !state.pick.lockToken;
+  const available = state.mode === 'ACTIVE' && !adjustmentMode && completed && !state.pick.lockToken;
+
   panel.classList.toggle('hidden', !completed || adjustmentMode);
 
-  // The override belongs only to the completed sales order currently displayed.
-  // Clear it as soon as the user switches to a NEW or OPEN sales order.
+  // Keep the old hidden compatibility flag false. Reopening is now driven by
+  // the explicit Request approval button, which is clearer for warehouse users.
+  legacyFlag.checked = false;
+  legacyFlag.disabled = true;
+
   if (!completed) {
-    checkbox.checked = false;
     reason.value = '';
   }
 
-  checkbox.disabled = !available;
-  reason.disabled = !available || !checkbox.checked;
+  reason.disabled = !available;
+  requestButton.disabled = !available;
 }
 
 async function refreshPickSalesOrderStatus() {
@@ -3174,6 +3239,46 @@ async function exitStockAdjustmentMode() {
   }
 }
 
+
+async function clearUnstartedPickingScreen(message) {
+  // This is intentionally LOCAL-ONLY. It is used when a Sales Order was merely
+  // typed into the screen but no active/open picking session needs to be cancelled.
+  // It never changes pick_sales_orders, transactions, inventory, or rack locks.
+  stopHeartbeat(state.pick);
+  state.pick = freshOperationState();
+
+  $('pick-so').value = '';
+  $('pick-location').value = '';
+  $('pick-barcode').value = '';
+  $('pick-lot').innerHTML = '<option value="">Scan a barcode first</option>';
+  $('pick-qty').value = '';
+  $('pick-so-override').checked = false;
+  $('pick-so-override-reason').value = '';
+  $('pick-so-override-reason').disabled = true;
+
+  clearPickBarcodeMatch();
+  $('pick-fefo-note').classList.add('hidden');
+  $('pick-qty-note').classList.add('hidden');
+  $('pick-rack-title').textContent = 'Source rack contents';
+  $('pick-rack-contents').innerHTML = emptyState('Lock a source rack to display its available items.');
+
+  state.pickOrder = {
+    salesOrder: null,
+    status: null,
+    pickCount: 0,
+    openedBy: null,
+    isCurrentOwner: false
+  };
+  state.pickOrderSummary = [];
+
+  configureOperationUi('pick', false);
+  renderOperationCart('pick');
+  await refreshPickSalesOrderStatus();
+
+  toast(message || 'Picking entry cleared. No warehouse records were changed.', 'success');
+  return true;
+}
+
 async function cancelEntirePicking() {
   const so = $('pick-so').value.trim();
   if (!so) return toast('Enter the sales order number.', 'error');
@@ -3182,10 +3287,29 @@ async function cancelEntirePicking() {
   }
 
   // Refresh immediately before cancellation so an older client status cannot
-  // accidentally release an order that already has a completed rack pick.
+  // accidentally release or alter a Sales Order whose state has changed.
   const statusOk = await refreshPickSalesOrderStatus();
   if (!statusOk) return toast('The sales order status could not be verified. Please try again.', 'error');
-  if (state.pickOrder.status !== 'OPEN') return toast('Only an OPEN picking session can be cancelled.', 'error');
+
+  // A COMPLETED Sales Order has not been reopened yet, so "Cancel picking"
+  // simply lets the user back out of the mistaken entry. Nothing in the DB changes.
+  if (state.pickOrder.status === 'COMPLETED') {
+    if (state.pick.lockToken) {
+      return toast('A completed Sales Order should not have an active rack lock. Refresh Picking before continuing.', 'error');
+    }
+    if (!window.confirm(`Leave completed Sales Order ${so} without reopening it?\n\nThis only clears the Picking screen. The completed Sales Order, inventory, and history will NOT be changed.`)) return;
+    return clearUnstartedPickingScreen(`Sales Order ${so} was left closed. No warehouse records were changed.`);
+  }
+
+  // A NEW Sales Order has not been opened in the database yet. Clearing it is local-only.
+  if (state.pickOrder.status === 'NEW') {
+    if (state.pick.lockToken) {
+      return toast('Cancel/restart the current rack before clearing this Sales Order.', 'error');
+    }
+    return clearUnstartedPickingScreen('Picking entry cleared. The Sales Order was never opened, so no warehouse records were changed.');
+  }
+
+  if (state.pickOrder.status !== 'OPEN') return toast('Only an OPEN, NEW, or completed-but-not-reopened Sales Order can be cancelled from this screen.', 'error');
   if (!state.pickOrder.isCurrentOwner) return toast('Only the user who opened this empty picking session may cancel it.', 'error');
   if (Number(state.pickOrder.pickCount || 0) > 0) {
     return toast('This Sales Order already has a saved rack pick. It can no longer be cancelled as an empty picking session.', 'error');

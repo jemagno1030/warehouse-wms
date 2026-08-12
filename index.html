@@ -223,9 +223,14 @@
           <div id="pick-so-status" class="info-box"><strong>Sales order status:</strong> enter a sales order number. A completed Sales Order requires Supervisor/Admin/Owner login-password approval before reuse.</div>
           <div class="info-box"><strong>Warehouse Stock Adjustment:</strong> use Sales Order <strong>0</strong> when stock must be converted/reclassified physically. Example: OUT 1 damaged/incomplete CASE under SO 0, then Put-away the remaining usable PIECES. SO 0 is reusable indefinitely; normal Sales Order rules are unchanged.</div>
           <div id="pick-so-override-panel" class="warning-box hidden">
-            <label><input id="pick-so-override" type="checkbox" /> Reopen this completed Sales Order — Supervisor/Admin/Owner approval required</label>
-            <label>Reason for reopening *<input id="pick-so-override-reason" type="text" placeholder="Required before requesting approval" disabled /></label>
-            <p class="small-note">The approver enters their normal WMS login email and password on this device. The Picker remains signed in, and the database checks the approver's current active role again when the Sales Order is reopened.</p>
+            <strong>Completed Sales Order — approval required</strong>
+            <p class="small-note">If this Sales Order really needs to be reopened, enter the reason below and request approval. If it was entered by mistake, use <strong>Cancel picking</strong> to leave it closed.</p>
+            <input id="pick-so-override" type="checkbox" class="hidden" aria-hidden="true" tabindex="-1" />
+            <label>Reason for reopening *<input id="pick-so-override-reason" type="text" placeholder="Example: additional items were missed from the original pick" disabled /></label>
+            <div class="form-actions">
+              <button id="pick-so-reopen-request-btn" class="primary" type="button" disabled>Request Supervisor / Admin / Owner approval</button>
+            </div>
+            <p class="small-note">The approver enters their normal WMS login email and password on this device. The Picker remains signed in. The database verifies that the approver is currently an active Supervisor, Admin, or Owner when approval is granted and checks that authority again when the Sales Order is reopened.</p>
           </div>
           <div class="info-box"><strong>Barcode-controlled deduction:</strong> a CASE barcode deducts CASE stock, a PACK barcode deducts PACK stock, and a PIECE barcode deducts PIECE stock. If the required unit barcode is stored as N/A, enter N/A and select the exact eligible item. <strong>Shipper:</strong> scanning a Shipper CASE selects a complete SEALED physical box; scanning a child PACK barcode selects a specific content SKU/expiry and opens that box when picked.</div>
           <div class="card-head compact"><div><h3 id="pick-rack-title">Source rack contents</h3><p>Displayed for reference. Use the registered barcode normally; if it is physically unreadable, request Supervisor/Admin/Owner approval for a controlled bypass.</p></div></div>
@@ -663,6 +668,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js"></script>
+  <script type="module" src="app.js?v=20260812-reopen-cancel-hotfix-1"></script>
 </body>
 </html>
