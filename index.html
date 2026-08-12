@@ -233,6 +233,11 @@
           <div id="pick-qty-note" class="info-box hidden"></div>
           <div id="pick-so-status" class="info-box"><strong>Sales order status:</strong> enter a sales order number. A completed Sales Order requires Supervisor/Admin/Owner login-password approval before reuse.</div>
           <div class="info-box"><strong>Warehouse Stock Adjustment:</strong> use Sales Order <strong>0</strong> when stock must be converted/reclassified physically. Example: OUT 1 damaged/incomplete CASE under SO 0, then Put-away the remaining usable PIECES. SO 0 is reusable indefinitely; normal Sales Order rules are unchanged.</div>
+          <div id="pick-adjustment-remarks-panel" class="warning-box hidden">
+            <strong>Stock adjustment reason / remarks *</strong>
+            <p class="small-note">Required for every completed Sales Order 0 rack adjustment. State why the stock adjustment is necessary. The remark is saved with the PICK transaction and is searchable in Transaction History.</p>
+            <label>Reason / remarks *<textarea id="pick-adjustment-remarks" maxlength="500" placeholder="Example: Broke 1 piece; incomplete case must be converted to loose pieces"></textarea></label>
+          </div>
           <div id="pick-so-override-panel" class="warning-box hidden">
             <strong>Completed Sales Order — approval required</strong>
             <p class="small-note">If this Sales Order really needs to be reopened, enter the reason below and request approval. If it was entered by mistake, use <strong>Cancel picking</strong> to leave it closed.</p>
@@ -466,8 +471,8 @@
 
       <section id="screen-history" class="screen">
         <article class="card">
-          <div class="card-head"><div><h3>Transaction history</h3><p>Every movement, FEFO override, edit, system-control action, and saved Put-away / Transfer remarks</p></div><button class="secondary export-btn" data-export="history">Export CSV</button></div>
-          <div class="filters grid"><input id="history-search" placeholder="Search transaction, user, SO, SKU..." /><select id="history-type"><option value="">All actions</option><option>PUTAWAY</option><option>PICK</option><option>TRANSFER</option><option>PICK_CANCEL</option><option>TRANSFER_CANCEL</option><option>ADMIN_PAUSE</option><option>ADMIN_RESUME</option></select></div>
+          <div class="card-head"><div><h3>Transaction history</h3><p>Every movement, FEFO override, edit, system-control action, and saved Put-away / Transfer / Stock Adjustment remarks</p></div><button class="secondary export-btn" data-export="history">Export CSV</button></div>
+          <div class="filters grid"><input id="history-search" placeholder="Search transaction, user, SO, SKU, remarks..." /><select id="history-type"><option value="">All actions</option><option>PUTAWAY</option><option>PICK</option><option>TRANSFER</option><option>PICK_CANCEL</option><option>TRANSFER_CANCEL</option><option>ADMIN_PAUSE</option><option>ADMIN_RESUME</option></select></div>
           <div id="history-table" class="table-wrap"></div>
           <div class="card-head audit-head"><div><h3>System audit events</h3><p>Before/after records plus stored Put-away / Stock Transfer remarks when available</p></div><button class="secondary export-btn" data-export="audit">Export audit CSV</button></div>
           <div id="audit-history-table" class="table-wrap"></div>
@@ -679,6 +684,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260812-barcode-less-putaway-1"></script>
+  <script type="module" src="app.js?v=20260812-so0-remarks-full-reset-1"></script>
 </body>
 </html>

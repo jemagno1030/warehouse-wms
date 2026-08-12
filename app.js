@@ -3302,6 +3302,14 @@ function isPickSalesOrderInputLocked() {
 function updatePickSalesOrderControls() {
   const hasSo = Boolean($('pick-so').value.trim());
   const adjustmentMode = isStockAdjustmentSalesOrder($('pick-so').value);
+
+  const adjustmentRemarksPanel = $('pick-adjustment-remarks-panel');
+  const adjustmentRemarks = $('pick-adjustment-remarks');
+  if (adjustmentRemarksPanel && adjustmentRemarks) {
+    adjustmentRemarksPanel.classList.toggle('hidden', !adjustmentMode);
+    adjustmentRemarks.disabled = !(adjustmentMode && state.mode === 'ACTIVE');
+    if (!adjustmentMode) adjustmentRemarks.value = '';
+  }
   const orderOpen = state.pickOrder.status === 'OPEN';
   const orderCompleted = state.pickOrder.status === 'COMPLETED';
   const orderNew = state.pickOrder.status === 'NEW';
@@ -3482,6 +3490,7 @@ async function exitStockAdjustmentMode() {
     $('pick-barcode').value = '';
     $('pick-lot').innerHTML = '<option value="">Scan a barcode first</option>';
     $('pick-qty').value = '';
+    if ($('pick-adjustment-remarks')) $('pick-adjustment-remarks').value = '';
     $('pick-so-override').checked = false;
     $('pick-so-override-reason').value = '';
     $('pick-so-override-reason').disabled = true;
@@ -3530,6 +3539,7 @@ async function clearUnstartedPickingScreen(message) {
   $('pick-barcode').value = '';
   $('pick-lot').innerHTML = '<option value="">Scan a barcode first</option>';
   $('pick-qty').value = '';
+  if ($('pick-adjustment-remarks')) $('pick-adjustment-remarks').value = '';
   $('pick-so-override').checked = false;
   $('pick-so-override-reason').value = '';
   $('pick-so-override-reason').disabled = true;
@@ -3612,6 +3622,7 @@ async function cancelEntirePicking() {
   $('pick-barcode').value = '';
   $('pick-lot').innerHTML = '<option value="">Scan a barcode first</option>';
   $('pick-qty').value = '';
+  if ($('pick-adjustment-remarks')) $('pick-adjustment-remarks').value = '';
   $('pick-so-override').checked = false;
   $('pick-so-override-reason').value = '';
   $('pick-so-override-reason').disabled = true;
@@ -3663,6 +3674,14 @@ async function finishPickSalesOrder() {
 
 async function completePicking() {
   if (!state.pick.cart.length) return toast('Add at least one item.', 'error');
+  const so = $('pick-so').value.trim();
+  const adjustmentMode = isStockAdjustmentSalesOrder(so);
+  const adjustmentRemarks = adjustmentMode ? ($('pick-adjustment-remarks')?.value || '').trim() : '';
+
+  if (adjustmentMode && !adjustmentRemarks) {
+    return toast('Enter the Stock Adjustment reason / remarks before completing this rack.', 'error');
+  }
+
   const requiresOverride = state.pick.cart.some((x) => x.expiry_date > x.earliest_expiry);
   let reason = null;
   if (requiresOverride) {
@@ -3670,8 +3689,6 @@ async function completePicking() {
     if (!reason?.trim()) return toast('Picking was not completed because an override reason is required.', 'error');
   }
   const button = $('pick-complete-btn');
-  const so = $('pick-so').value.trim();
-  const adjustmentMode = isStockAdjustmentSalesOrder(so);
 
   if (adjustmentMode && !state.pick.adjustmentSessionKey) {
     return toast('The Stock Adjustment session key is missing. Cancel/restart the rack and lock it again.', 'error');
@@ -3685,13 +3702,14 @@ async function completePicking() {
 
   setBusy(button, true, adjustmentMode ? 'Saving adjustment…' : 'Completing…');
 
-  const rpcName = adjustmentMode ? 'complete_stock_adjustment_picking' : 'complete_picking_with_approvals';
+  const rpcName = adjustmentMode ? 'complete_stock_adjustment_picking_with_remarks' : 'complete_picking_with_approvals';
   const rpcArgs = adjustmentMode
     ? {
         p_location_code: state.pick.locationCode,
         p_lock_token: state.pick.lockToken,
         p_adjustment_session_key: state.pick.adjustmentSessionKey,
         p_items: items,
+        p_adjustment_remarks: adjustmentRemarks,
         p_allow_fefo_override: requiresOverride,
         p_override_reason: reason
       }
@@ -3718,6 +3736,7 @@ async function completePicking() {
   invalidateReports();
   resetOperation('pick');
   $('pick-so').value = so;
+  if (adjustmentMode && $('pick-adjustment-remarks')) $('pick-adjustment-remarks').value = '';
   await refreshPickSalesOrderStatus();
 }
 
