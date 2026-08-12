@@ -89,7 +89,8 @@ const state = {
   transfer: freshOperationState(),
   data: { inventory: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], locations: [], rackMap: [] },
   selectedQrLocations: new Set(),
-  accountAccessTimer: null
+  accountAccessTimer: null,
+  warehouseApproval: null
 };
 
 function freshOperationState() {
@@ -112,7 +113,8 @@ function freshShipperPutawayState() {
     contents: [],
     contentSku: null,
     contentLookupSequence: 0,
-    duplicateContentSkuId: null
+    duplicateContentSkuId: null,
+    pendingBatchPayload: null
   };
 }
 
@@ -172,31 +174,6 @@ function isAdminOrOwner() {
   return ['admin', 'owner'].includes(state.profile?.role);
 }
 
-function syncShipperBatchApprovalControl(showMessage = false) {
-  const input = $('sp-case-count');
-  if (!input) return;
-  const approvedRole = isSupervisor();
-  input.max = approvedRole ? '500' : '1';
-  input.title = approvedRole
-    ? 'Supervisor-or-higher approval active: 1 to 500 identical physical Shipper cases may be created.'
-    : 'User/Picker accounts may create only 1 physical Shipper case at a time. Quantity 2+ requires Supervisor, Admin, or Owner approval.';
-
-  const raw = String(input.value || '').trim();
-  const qty = Number(raw);
-  if (!approvedRole && /^\d+$/.test(raw) && qty > 1) {
-    input.value = '1';
-    if (showMessage) toast('Supervisor approval is required for more than 1 identical Shipper case. User/Picker accounts are limited to 1 case.', 'error');
-  }
-
-  const note = $('sp-batch-approval-note');
-  if (note) {
-    note.innerHTML = approvedRole
-      ? '<strong>Batch approval active:</strong> Your role may approve and create 2–500 identical Shipper cases.'
-      : '<strong>Supervisor approval required:</strong> User/Picker accounts may put away 1 Shipper case only. Quantity 2+ must be completed by a Supervisor, Admin, or Owner.';
-    note.className = approvedRole ? 'info-box' : 'warning-box';
-  }
-}
-
 function setupStaticEvents() {
   qsa('[data-auth-tab]').forEach((btn) => btn.addEventListener('click', () => {
     qsa('[data-auth-tab]').forEach((b) => b.classList.toggle('active', b === btn));
@@ -236,7 +213,6 @@ function setupStaticEvents() {
   $('pa-mode-select').addEventListener('change', switchPutawayMode);
   $('shipper-putaway-form').addEventListener('submit', (event) => event.preventDefault());
   $('sp-case').addEventListener('change', resolveShipperSku);
-  $('sp-case-count').addEventListener('input', () => syncShipperBatchApprovalControl(true));
   $('sp-content-pack').addEventListener('change', resolveShipperContentSku);
   ['sp-brand', 'sp-description', 'sp-variant', 'sp-size'].forEach((id) => $(id).addEventListener('input', () => {
     clearTimeout(putawayDetailsTimer);
@@ -250,6 +226,18 @@ function setupStaticEvents() {
   $('sp-clear-content-btn').addEventListener('click', clearShipperContentLine);
   $('sp-cancel-btn').addEventListener('click', resetShipperPutaway);
   $('sp-complete-btn').addEventListener('click', completeShipperPutaway);
+  $('shipper-batch-approval-close').addEventListener('click', closeShipperBatchApprovalDialog);
+  $('shipper-batch-approval-form').addEventListener('submit', submitShipperBatchApproval);
+  $('shipper-batch-approval-dialog').addEventListener('close', () => {
+    $('shipper-batch-approver-password').value = '';
+    state.shipperPutaway.pendingBatchPayload = null;
+  });
+  $('warehouse-approval-close').addEventListener('click', cancelWarehouseApproval);
+  $('warehouse-approval-form').addEventListener('submit', submitWarehouseApproval);
+  $('warehouse-approval-dialog').addEventListener('cancel', (event) => {
+    event.preventDefault();
+    cancelWarehouseApproval();
+  });
 
   // Barcode entry must always remain exactly what the user typed/scanned.
   // Disable browser form-history/autocomplete so a partial code such as 12345
@@ -487,7 +475,6 @@ function applyCurrentProfile(profile) {
   }
   const controlNav = document.querySelector('#main-nav [data-screen="control"]');
   if (controlNav) controlNav.classList.toggle('hidden', !isOwner());
-  syncShipperBatchApprovalControl(false);
 }
 
 async function refreshOwnAccountAccess() {
@@ -1642,7 +1629,6 @@ function resetShipperPutaway(preserveResult = false) {
   state.shipperPutaway = freshShipperPutawayState();
   $('shipper-putaway-form').reset();
   syncNoExpiryControl('sp-content-expiry', 'sp-content-no-expiry');
-  syncShipperBatchApprovalControl(false);
   if (!preserveResult) { $('sp-result').classList.add('hidden'); $('sp-result').innerHTML = ''; }
   setShipperDetailsReadonly(false);
   setShipperContentDetailsReadonly(false);
@@ -1666,9 +1652,6 @@ async function completeShipperPutaway() {
   if (!/^\d+$/.test(rawBoxCount) || !Number.isSafeInteger(boxCount) || boxCount < 1 || boxCount > 500) {
     return toast('Number of identical Shipper cases must be a whole number from 1 to 500.', 'error');
   }
-  if (boxCount > 1 && !isSupervisor()) {
-    return toast('Supervisor approval is required for more than 1 identical Shipper case. Ask a Supervisor, Admin, or Owner to complete this batch.', 'error');
-  }
   if (!state.shipperPutaway.contents.length) return toast('Add at least one PACK content line inside this Shipper Box.', 'error');
 
   await resolveShipperSku();
@@ -1682,25 +1665,189 @@ async function completeShipperPutaway() {
     return toast('ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE, or select Still Add Shipper to Database.', 'error');
   }
 
+  const payload = {
+    location,
+    shipperCase,
+    brand,
+    description,
+    variant,
+    size,
+    container,
+    contents: state.shipperPutaway.contents.map((row) => ({ ...row })),
+    boxCount,
+    allowDuplicate: $('sp-still-add').checked,
+    note: $('sp-note').value.trim() || null
+  };
+
   if (boxCount > 1) {
-    const confirmed = window.confirm(`Create ${boxCount} independent physical Shipper Boxes with EXACTLY the same encoded contents, quantities, expiries, container, and rack? Each CASE will receive its own SB ID.`);
+    const confirmed = window.confirm(`Request approval to create ${boxCount} independent physical Shipper Boxes with EXACTLY the same encoded contents, quantities, expiries, container, and rack? Each CASE will receive its own SB ID.`);
     if (!confirmed) return;
+    openShipperBatchApprovalDialog(payload);
+    return;
   }
 
+  await submitShipperPutawayBatch(payload, null, null);
+}
+
+function openShipperBatchApprovalDialog(payload) {
+  state.shipperPutaway.pendingBatchPayload = payload;
+  $('shipper-batch-approval-context').innerHTML = `<strong>${escapeHtml(payload.boxCount)} identical Shipper cases</strong><br>Shipper: ${escapeHtml(payload.shipperCase)} · Rack: ${escapeHtml(payload.location)} · Container: ${escapeHtml(payload.container)}<br><span class="small-note">Approval is valid only for this exact batch and expires after 5 minutes.</span>`;
+  $('shipper-batch-approver-email').value = '';
+  $('shipper-batch-approver-password').value = '';
+  $('shipper-batch-approval-dialog').showModal();
+  $('shipper-batch-approver-email').focus();
+}
+
+function closeShipperBatchApprovalDialog() {
+  $('shipper-batch-approver-password').value = '';
+  state.shipperPutaway.pendingBatchPayload = null;
+  $('shipper-batch-approval-dialog').close();
+}
+
+async function submitShipperBatchApproval(event) {
+  event.preventDefault();
+  const payload = state.shipperPutaway.pendingBatchPayload;
+  if (!payload || payload.boxCount <= 1) return toast('No batch Shipper approval request is pending.', 'error');
+  if (!state.session?.user?.id) return toast('Your Picker session is no longer active. Sign in again.', 'error');
+
+  const email = $('shipper-batch-approver-email').value.trim();
+  const password = $('shipper-batch-approver-password').value;
+  if (!email || !password) return toast('Enter the Supervisor/Admin/Owner login email and password.', 'error');
+
+  const button = $('shipper-batch-approval-confirm');
+  setBusy(button, true, 'Verifying approval…');
+  let approvalClient = null;
+  try {
+    // Use an isolated, non-persistent Supabase Auth client so the approver can verify
+    // with their normal WMS login password without replacing the Picker's live session.
+    approvalClient = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+    });
+
+    const { error: authError } = await approvalClient.auth.signInWithPassword({ email, password });
+    if (authError) throw new Error('Approval failed: the approver email or login password is incorrect.');
+
+    const { data, error } = await approvalClient.rpc('approve_shipper_batch_request', {
+      p_requested_by: state.session.user.id,
+      p_location_code: payload.location,
+      p_shipper_case_barcode: payload.shipperCase,
+      p_shipper_brand: payload.brand,
+      p_shipper_description: payload.description,
+      p_shipper_variant: payload.variant,
+      p_shipper_size: payload.size,
+      p_container_no: payload.container,
+      p_contents: payload.contents,
+      p_box_count: payload.boxCount,
+      p_allow_duplicate_shipper_details: payload.allowDuplicate,
+      p_note: payload.note
+    });
+    if (error) throw error;
+
+    const approval = data?.[0];
+    if (!approval?.approval_token) throw new Error('Supervisor approval could not be created.');
+
+    $('shipper-batch-approver-password').value = '';
+    $('shipper-batch-approval-dialog').close();
+    state.shipperPutaway.pendingBatchPayload = null;
+    toast(`Approved by ${approval.approver_username || 'Supervisor'} (${String(approval.approver_role || '').toUpperCase()}).`, 'success');
+
+    await submitShipperPutawayBatch(payload, approval.approval_token, approval);
+  } catch (error) {
+    $('shipper-batch-approver-password').value = '';
+    toast(friendlyError(error), 'error');
+  } finally {
+    if (approvalClient) {
+      try { await approvalClient.auth.signOut({ scope: 'local' }); } catch (_) { /* isolated non-persistent session expires on its own */ }
+    }
+    setBusy(button, false);
+  }
+}
+
+function requestWarehouseApproval({ title, contextHtml, rpcName, rpcArgs, confirmLabel = 'APPROVE ACTION' }) {
+  if (state.warehouseApproval) {
+    toast('Another approval request is already open.', 'error');
+    return Promise.resolve(null);
+  }
+
+  return new Promise((resolve) => {
+    state.warehouseApproval = { resolve, rpcName, rpcArgs };
+    $('warehouse-approval-title').textContent = title || 'Approve controlled action';
+    $('warehouse-approval-context').innerHTML = contextHtml || '';
+    $('warehouse-approver-email').value = '';
+    $('warehouse-approver-password').value = '';
+    $('warehouse-approval-confirm').textContent = confirmLabel;
+    $('warehouse-approval-dialog').showModal();
+    $('warehouse-approver-email').focus();
+  });
+}
+
+function finishWarehouseApproval(result) {
+  const pending = state.warehouseApproval;
+  state.warehouseApproval = null;
+  $('warehouse-approver-password').value = '';
+  if ($('warehouse-approval-dialog').open) $('warehouse-approval-dialog').close();
+  if (pending?.resolve) pending.resolve(result || null);
+}
+
+function cancelWarehouseApproval() {
+  finishWarehouseApproval(null);
+}
+
+async function submitWarehouseApproval(event) {
+  event.preventDefault();
+  const pending = state.warehouseApproval;
+  if (!pending) return toast('No controlled approval request is pending.', 'error');
+  if (!state.session?.user?.id) return toast('Your warehouse session is no longer active. Sign in again.', 'error');
+
+  const email = $('warehouse-approver-email').value.trim();
+  const password = $('warehouse-approver-password').value;
+  if (!email || !password) return toast('Enter the Supervisor/Admin/Owner login email and password.', 'error');
+
+  const button = $('warehouse-approval-confirm');
+  setBusy(button, true, 'Verifying approval…');
+  let approvalClient = null;
+  try {
+    approvalClient = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+    });
+
+    const { error: authError } = await approvalClient.auth.signInWithPassword({ email, password });
+    if (authError) throw new Error('Approval failed: the approver email or login password is incorrect.');
+
+    const { data, error } = await approvalClient.rpc(pending.rpcName, pending.rpcArgs);
+    if (error) throw error;
+    const approval = data?.[0];
+    if (!approval?.approval_token) throw new Error('Supervisor/Admin/Owner approval could not be created.');
+
+    toast(`Approved by ${approval.approver_username || 'Supervisor'} (${String(approval.approver_role || '').toUpperCase()}).`, 'success');
+    finishWarehouseApproval(approval);
+  } catch (error) {
+    $('warehouse-approver-password').value = '';
+    toast(friendlyError(error), 'error');
+  } finally {
+    if (approvalClient) {
+      try { await approvalClient.auth.signOut({ scope: 'local' }); } catch (_) { /* isolated non-persistent session expires on its own */ }
+    }
+    setBusy(button, false);
+  }
+}
+
+async function submitShipperPutawayBatch(payload, approvalToken = null, approval = null) {
   const button = $('sp-complete-btn');
-  setBusy(button, true, boxCount > 1 ? `Creating ${boxCount} boxes…` : 'Completing…');
+  setBusy(button, true, payload.boxCount > 1 ? `Creating ${payload.boxCount} boxes…` : 'Completing…');
   const { data, error } = await supabase.rpc('complete_shipper_putaway_batch', {
-    p_location_code: location,
-    p_shipper_case_barcode: shipperCase,
-    p_shipper_brand: brand,
-    p_shipper_description: description,
-    p_shipper_variant: variant,
-    p_shipper_size: size,
-    p_container_no: container,
-    p_contents: state.shipperPutaway.contents,
-    p_box_count: boxCount,
-    p_allow_duplicate_shipper_details: $('sp-still-add').checked,
-    p_note: $('sp-note').value.trim() || null
+    p_location_code: payload.location,
+    p_shipper_case_barcode: payload.shipperCase,
+    p_shipper_brand: payload.brand,
+    p_shipper_description: payload.description,
+    p_shipper_variant: payload.variant,
+    p_shipper_size: payload.size,
+    p_container_no: payload.container,
+    p_contents: payload.contents,
+    p_box_count: payload.boxCount,
+    p_allow_duplicate_shipper_details: payload.allowDuplicate,
+    p_note: payload.note,
+    p_approval_token: approvalToken
   });
   setBusy(button, false);
   if (error) return toast(friendlyError(error), 'error');
@@ -1708,7 +1855,7 @@ async function completeShipperPutaway() {
   const rows = data || [];
   const boxNos = rows.map((row) => row.shipper_box_no).filter(Boolean);
   const transactionNos = rows.map((row) => row.transaction_no).filter(Boolean);
-  const createdCount = boxNos.length || boxCount;
+  const createdCount = boxNos.length || payload.boxCount;
   toast(`${createdCount} physical Shipper ${createdCount === 1 ? 'box' : 'boxes'} created successfully.`, 'success');
   invalidateReports();
   resetShipperPutaway(true);
@@ -1719,7 +1866,10 @@ async function completeShipperPutaway() {
   const txHtml = transactionNos.length
     ? `<div class="small-note" style="margin-top:6px">Put-away transactions: ${transactionNos.map(escapeHtml).join(' · ')}</div>`
     : '';
-  $('sp-result').innerHTML = `<strong>${createdCount} Physical Shipper ID${createdCount === 1 ? '' : 's'} created.</strong><br>Write or attach the correct SB number to each physical box. These boxes are independent even though this batch used identical contents.${idsHtml}${txHtml}`;
+  const approvalHtml = approval && payload.boxCount > 1
+    ? `<div class="small-note" style="margin-top:6px">Approved by: ${escapeHtml(approval.approver_username || 'Supervisor')} (${escapeHtml(String(approval.approver_role || '').toUpperCase())})</div>`
+    : '';
+  $('sp-result').innerHTML = `<strong>${createdCount} Physical Shipper ID${createdCount === 1 ? '' : 's'} created.</strong><br>Write or attach the correct SB number to each physical box. These boxes are independent even though this batch used identical contents.${approvalHtml}${idsHtml}${txHtml}`;
   $('sp-result').classList.remove('hidden');
 }
 
@@ -1734,24 +1884,51 @@ async function lockPickLocation() {
     return;
   }
 
-  // Verify the sales order immediately before locking. This prevents a stale status
-  // or an Admin override left checked from a previously entered sales order.
   const statusOk = await refreshPickSalesOrderStatus();
   if (!statusOk || !['NEW', 'OPEN', 'COMPLETED'].includes(state.pickOrder.status)) {
     return toast('The sales order status could not be verified. Please try again.', 'error');
   }
 
-  const isCompletedOrder = state.pickOrder.status === 'COMPLETED';
-  const overrideCompleted = isAdminOrOwner() && isCompletedOrder && $('pick-so-override').checked;
-  const overrideReason = overrideCompleted ? $('pick-so-override-reason').value.trim() : '';
-  if (overrideCompleted && !overrideReason) {
-    return toast('Enter the Admin override reason before reopening a completed sales order.', 'error');
+  if (state.pickOrder.status === 'COMPLETED') {
+    if (!$('pick-so-override').checked) {
+      return toast('This Sales Order is completed. Check the reopen option and obtain Supervisor/Admin/Owner approval.', 'error');
+    }
+    const reopenReason = $('pick-so-override-reason').value.trim();
+    if (!reopenReason) return toast('Enter the reason for reopening this completed Sales Order.', 'error');
+    if (!state.session?.user?.id) return toast('Your warehouse session is no longer active. Sign in again.', 'error');
+
+    const approval = await requestWarehouseApproval({
+      title: 'Approve Sales Order Reopen',
+      contextHtml: `<strong>Completed Sales Order: ${escapeHtml(so)}</strong><br>Requested by: ${escapeHtml(state.profile?.username || 'current warehouse user')}<br>Reason: ${escapeHtml(reopenReason)}<br><span class="small-note">A currently active Supervisor, Admin, or Owner must approve with their normal WMS login password. The database checks the approver's current role again when the Sales Order is reopened.</span>`,
+      rpcName: 'approve_sales_order_reopen_request',
+      rpcArgs: {
+        p_requested_by: state.session.user.id,
+        p_sales_order: so,
+        p_reason: reopenReason
+      },
+      confirmLabel: 'APPROVE REOPEN'
+    });
+    if (!approval) return;
+
+    const { data: reopened, error: reopenError } = await supabase.rpc('reopen_completed_sales_order_approved', {
+      p_sales_order: so,
+      p_reason: reopenReason,
+      p_approval_token: approval.approval_token
+    });
+    if (reopenError) return toast(friendlyError(reopenError), 'error');
+
+    const reopenedRow = reopened?.[0];
+    toast(`Sales Order ${so} reopened · approved by ${reopenedRow?.approved_by_username || approval.approver_username || 'Supervisor'} (${String(reopenedRow?.approved_by_role || approval.approver_role || '').toUpperCase()}).`, 'success');
+    $('pick-so-override').checked = false;
+    $('pick-so-override-reason').value = '';
+
+    const refreshed = await refreshPickSalesOrderStatus();
+    if (!refreshed || state.pickOrder.status !== 'OPEN' || !state.pickOrder.isCurrentOwner) {
+      return toast('Sales Order was reopened, but its current ownership could not be verified. Refresh Picking before locking a rack.', 'error');
+    }
   }
 
-  const locked = await acquireOperationLock('pick', location, 'PICK', so, {
-    overrideCompleted,
-    overrideReason: overrideReason || null
-  });
+  const locked = await acquireOperationLock('pick', location, 'PICK', so);
   if (locked) {
     $('pick-so-override').checked = false;
     $('pick-so-override-reason').value = '';
@@ -1809,17 +1986,17 @@ async function acquireOperationLock(operation, location, type, salesOrder, optio
     p_location_code: location,
     p_operation: type,
     p_sales_order: salesOrder,
-    p_override_completed: Boolean(options.overrideCompleted),
-    p_override_reason: options.overrideReason || null
+    p_override_completed: false,
+    p_override_reason: null
   });
   setBusy(button, false);
   if (error) {
     const message = friendlyError(error);
-    if (message.includes('SALES_ORDER_ALREADY_COMPLETED') && isAdminOrOwner()) {
+    if (message.includes('SALES_ORDER_ALREADY_COMPLETED') || message.includes('SUPERVISOR_APPROVAL_REQUIRED')) {
       $('pick-so-override').checked = true;
       $('pick-so-override-reason').disabled = false;
       $('pick-so-override-reason').focus();
-      toast('This sales order is completed. Enter an Admin override reason, then lock the rack again.', 'error');
+      toast('This Sales Order requires Supervisor/Admin/Owner login-password approval before it can be reopened.', 'error');
       await refreshPickSalesOrderStatus();
       return false;
     }
@@ -1966,9 +2143,7 @@ function renderPickRackContents() {
   container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Available</th><th>Queued</th><th></th></tr></thead><tbody>${rows.map((lot) => {
     const queued = state.pick.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
     const remaining = Math.max(Number(lot.qty) - queued, 0);
-    const bypassAction = isSupervisor()
-      ? `<button class="link-btn" type="button" data-pick-bypass-lot="${lot.lot_id}">Bypass unreadable barcode</button>`
-      : '<small>Correct barcode required</small>';
+    const bypassAction = `<button class="link-btn" type="button" data-pick-bypass-lot="${lot.lot_id}">Request barcode bypass</button>`;
     return `<tr>
       <td class="wrap"><strong>${escapeHtml(lot.sku_name)}</strong></td>
       <td>${shipperBadge(lot)}</td>
@@ -2425,13 +2600,16 @@ async function loadOperationLots(operation) {
 }
 
 async function addSupervisorBarcodeBypass(lotId) {
-  if (!isSupervisor()) return toast('Only a supervisor can bypass an unreadable barcode.', 'error');
   if (!state.pick.lockToken || !state.pick.locationCode) return toast('Lock the source rack first.', 'error');
+  if (!state.session?.user?.id) return toast('Your warehouse session is no longer active. Sign in again.', 'error');
   const lot = state.pick.rackLots.find((row) => row.lot_id === lotId);
   if (!lot) return toast('The selected rack item is no longer available. Refresh the source rack.', 'error');
+  if (state.pick.cart.some((line) => line.lot_id === lotId && line.supervisor_bypass)) {
+    return toast('An approved barcode bypass for this inventory lot is already queued. Remove it first if you need to change the quantity or reason.', 'error');
+  }
 
-  const reason = window.prompt(`Supervisor bypass reason for ${lot.sku_name} (${lot.uom}). Explain why the barcode cannot be read:`);
-  if (!reason?.trim()) return toast('A supervisor bypass reason is required.', 'error');
+  const reason = window.prompt(`Barcode bypass reason for ${lot.sku_name} (${lot.uom}). Explain why the barcode cannot be read:`);
+  if (!reason?.trim()) return toast('A barcode bypass reason is required.', 'error');
 
   const qtyText = window.prompt(`Enter the ${lot.uom} quantity to pick. Available: ${Number(lot.qty).toLocaleString()}`);
   if (qtyText === null) return;
@@ -2471,12 +2649,35 @@ async function addSupervisorBarcodeBypass(lotId) {
     return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
   }
 
+  const visibleSo = $('pick-so').value.trim();
+  const approvalSalesOrder = isStockAdjustmentSalesOrder(visibleSo) ? state.pick.adjustmentSessionKey : visibleSo;
+  if (!approvalSalesOrder) return toast('The active Sales Order/session could not be identified. Cancel/restart the rack and try again.', 'error');
+
+  const approval = await requestWarehouseApproval({
+    title: 'Approve Unreadable Barcode Bypass',
+    contextHtml: `<strong>${escapeHtml(lot.sku_name)}</strong><br>Sales Order: <strong>${escapeHtml(visibleSo || approvalSalesOrder)}</strong> · Rack: <strong>${escapeHtml(state.pick.locationCode)}</strong><br>Lot: ${escapeHtml(lot.container_no)} · ${fmtDate(lot.expiry_date)} · ${fmtQtyUom(qty, lot.uom)}<br>Reason: ${escapeHtml(reason.trim())}<br><span class="small-note">Approval is one-time, expires after 5 minutes, and is tied to this exact user, rack, Sales Order/session, inventory lot, quantity, and reason.</span>`,
+    rpcName: 'approve_barcode_bypass_request',
+    rpcArgs: {
+      p_requested_by: state.session.user.id,
+      p_sales_order: approvalSalesOrder,
+      p_location_code: state.pick.locationCode,
+      p_lot_id: lot.lot_id,
+      p_qty: qty,
+      p_reason: reason.trim()
+    },
+    confirmLabel: 'APPROVE BARCODE BYPASS'
+  });
+  if (!approval) return;
+
   state.pick.cart.push({
     lot_id: lot.lot_id,
     qty,
     barcode: null,
     supervisor_bypass: true,
     bypass_reason: reason.trim(),
+    bypass_approval_token: approval.approval_token,
+    bypass_approved_by: approval.approver_username || null,
+    bypass_approved_role: approval.approver_role || null,
     sku_name: lot.sku_name,
     container_no: lot.container_no,
     expiry_date: lot.expiry_date,
@@ -2493,7 +2694,7 @@ async function addSupervisorBarcodeBypass(lotId) {
   });
   renderOperationCart('pick');
   renderPickRackContents();
-  toast('Supervisor barcode bypass added and will be recorded in history.', 'success');
+  toast(`Barcode bypass approved by ${approval.approver_username || 'Supervisor'} (${String(approval.approver_role || '').toUpperCase()}) and queued for this rack.`, 'success');
 }
 
 function updatePickFefoNote() {
@@ -2570,7 +2771,10 @@ async function addOperationItem(operation) {
     shipper_status: lot.shipper_status || null,
     shipper_lot_role: lot.shipper_lot_role || null,
     supervisor_bypass: false,
-    bypass_reason: null
+    bypass_reason: null,
+    bypass_approval_token: null,
+    bypass_approved_by: null,
+    bypass_approved_role: null
   });
   renderOperationCart(operation);
   if (pick) {
@@ -2602,7 +2806,7 @@ function renderOperationCart(operation) {
     <td class="wrap">${escapeHtml(r.sku_name)}</td><td>${r.shipper_box_id ? `<span class="pill near">${escapeHtml(r.shipper_box_no || 'Shipper')} · ${escapeHtml(r.shipper_lot_role === 'HEADER' ? 'Complete' : 'Content')}</span>` : '<span class="pill">Loose</span>'}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td>
     <td class="wrap">${pick
       ? (r.supervisor_bypass
-        ? `<span class="pill override">Supervisor bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>`
+        ? `<span class="pill override">Approved barcode bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>${r.bypass_approved_by ? `<br><small>Approved by ${escapeHtml(r.bypass_approved_by)} (${escapeHtml(String(r.bypass_approved_role || '').toUpperCase())})</small>` : ''}`
         : `${normalizeBarcode(r.barcode) === 'N/A'
           ? `<span class="pill near">N/A ${escapeHtml((r.uom || '').toUpperCase())} selected</span>`
           : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span>`}${r.fefo_override_confirmed ? '<br><span class="pill override">FEFO override confirmed</span>' : ''}`)
@@ -2810,13 +3014,15 @@ function updatePickSalesOrderControls() {
 }
 
 function syncPickOverrideControls() {
+  const panel = $('pick-so-override-panel');
   const checkbox = $('pick-so-override');
   const reason = $('pick-so-override-reason');
-  if (!checkbox || !reason) return;
+  if (!panel || !checkbox || !reason) return;
 
   const completed = state.pickOrder.status === 'COMPLETED';
   const adjustmentMode = isStockAdjustmentSalesOrder($('pick-so').value);
-  const available = !adjustmentMode && isAdminOrOwner() && completed && !state.pick.lockToken;
+  const available = !adjustmentMode && completed && !state.pick.lockToken;
+  panel.classList.toggle('hidden', !completed || adjustmentMode);
 
   // The override belongs only to the completed sales order currently displayed.
   // Clear it as soon as the user switches to a NEW or OPEN sales order.
@@ -2836,7 +3042,7 @@ async function refreshPickSalesOrderStatus() {
 
   if (!so) {
     state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
-    box.innerHTML = '<strong>Sales order status:</strong> enter a sales order number. A completed sales order cannot be reused by a regular user.';
+    box.innerHTML = '<strong>Sales order status:</strong> enter a sales order number. A completed Sales Order requires Supervisor/Admin/Owner login-password approval before reuse.';
     syncPickOverrideControls();
     updatePickSalesOrderControls();
     await loadPickSalesOrderSummary();
@@ -2880,7 +3086,7 @@ async function refreshPickSalesOrderStatus() {
       isCurrentOwner: Boolean(row.is_current_owner)
     };
     if (row.order_status === 'COMPLETED') {
-      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was completed ${row.completed_at ? `on ${escapeHtml(fmtDateTime(row.completed_at))}` : ''}. It cannot be reused unless an Admin or Owner checks the override and records a reason.`;
+      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was completed ${row.completed_at ? `on ${escapeHtml(fmtDateTime(row.completed_at))}` : ''}. It can be reopened only after a currently active Supervisor, Admin, or Owner approves with their normal WMS login password.`;
     } else {
       const lockMessage = row.is_current_owner
         ? ' · Sales Order number is locked until you finish this Sales Order.'
@@ -3069,14 +3275,15 @@ async function completePicking() {
     return toast('The Stock Adjustment session key is missing. Cancel/restart the rack and lock it again.', 'error');
   }
 
-  const items = state.pick.cart.map(({ lot_id, qty, barcode, supervisor_bypass, bypass_reason, fefo_override_confirmed }) => ({
+  const items = state.pick.cart.map(({ lot_id, qty, barcode, supervisor_bypass, bypass_reason, bypass_approval_token, fefo_override_confirmed }) => ({
     lot_id, qty, barcode, supervisor_bypass: Boolean(supervisor_bypass), bypass_reason: bypass_reason || null,
+    bypass_approval_token: bypass_approval_token || null,
     fefo_override_confirmed: Boolean(fefo_override_confirmed)
   }));
 
   setBusy(button, true, adjustmentMode ? 'Saving adjustment…' : 'Completing…');
 
-  const rpcName = adjustmentMode ? 'complete_stock_adjustment_picking' : 'complete_picking';
+  const rpcName = adjustmentMode ? 'complete_stock_adjustment_picking' : 'complete_picking_with_approvals';
   const rpcArgs = adjustmentMode
     ? {
         p_location_code: state.pick.locationCode,
@@ -3189,15 +3396,15 @@ function renderInventory() {
   });
   const summaryRows = [...grouped.values()].sort((a, b) => a.sku_name.localeCompare(b.sku_name));
   $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
-  const actionHeader = isAdminOrOwner() ? '<th>Actions</th>' : '';
+  const actionHeader = isSupervisor() ? '<th>Actions</th>' : '';
   $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => `<tr>
     <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${isNoExpiryDate(r.expiry_date) ? '<span class="pill">N/A</span>' : expiryPill(r.expiry_status)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
-    ${isAdminOrOwner() ? (r.shipper_box_id ? `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button><br><small>Shipper-safe correction · ${escapeHtml(r.shipper_box_no || '')}</small></td>` : `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button> <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button></td>`) : ''}
+    ${isSupervisor() ? (r.shipper_box_id ? `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button><br><small>Shipper-safe correction · ${escapeHtml(r.shipper_box_no || '')}</small></td>` : `<td><button class="link-btn" data-inventory-edit="${escapeHtml(r.lot_id)}">Edit</button>${isAdminOrOwner() ? ` <button class="link-btn" data-inventory-delete="${escapeHtml(r.lot_id)}">Delete</button>` : '<br><small>Delete: Admin / Owner only</small>'}</td>`) : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching inventory.');
 }
 
 async function openInventoryLotEdit(lotId) {
-  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+  if (!isSupervisor()) return toast('Supervisor, Admin, or Owner access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
 
@@ -3296,7 +3503,7 @@ async function openInventoryLotEdit(lotId) {
 
 async function submitInventoryLotEdit(event) {
   event.preventDefault();
-  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+  if (!isSupervisor()) return toast('Supervisor, Admin, or Owner access is required.', 'error');
 
   const lotId = $('inventory-adjust-lot-id').value;
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
