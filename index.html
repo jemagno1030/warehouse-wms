@@ -483,7 +483,7 @@
       <section id="screen-locations" class="screen">
         <div class="content-grid two">
           <form id="location-form" class="card form-card">
-            <div class="card-head"><div><h3>Add another location</h3><p>Your 738 supplied rack locations and PENDING are preloaded. Use this form only for future additions.</p></div></div>
+            <div class="card-head"><div><h3>Add another location</h3><p>Your supplied physical racks and virtual pending locations are stored in one location master. Add future physical or virtual locations here.</p></div></div>
             <div class="form-grid two">
               <label>Location code *<input id="loc-code" required placeholder="L1" /></label>
               <label>Display name<input id="loc-name" placeholder="Rack L1" /></label>
@@ -497,7 +497,7 @@
           </form>
           <article class="card">
             <div class="card-head">
-              <div><h3>Location QR labels</h3><p>Filter by rack row, select the visible locations, then print.</p></div>
+              <div><h3>Location QR labels & virtual location manager</h3><p>Filter/print QR labels. Supervisor and above may Rename or Delete virtual/pending locations only. Physical racks remain protected.</p></div>
               <div class="button-cluster">
                 <button id="select-visible-qr-btn" class="secondary" type="button">Select visible</button>
                 <button id="clear-qr-btn" class="secondary" type="button">Clear</button>
@@ -509,6 +509,7 @@
               <input id="location-search" placeholder="Search location..." />
             </div>
             <p id="location-count" class="small-note">0 shown · 0 selected</p>
+            <p class="small-note"><strong>Safe maintenance:</strong> Rename/Delete requires Administrative Pause. Before changing a pending location, confirm no warehouse user has an unsaved Put-away session targeting it. Delete is allowed only when the location is empty and unlocked; historical references remain preserved.</p>
             <div id="locations-table" class="table-wrap"></div>
           </article>
         </div>
@@ -605,6 +606,21 @@
     </form>
   </dialog>
 
+  <dialog id="pending-location-rename-dialog" class="edit-dialog">
+    <div class="scanner-head"><div><h3>Rename virtual location</h3><p>Supervisor / Admin / Owner. Administrative Pause is required. Physical rack locations cannot be changed here.</p></div><button id="pending-location-rename-close" class="icon-button" type="button">✕</button></div>
+    <form id="pending-location-rename-form" class="stack">
+      <input id="pending-location-rename-id" type="hidden" />
+      <div id="pending-location-rename-current" class="info-box"></div>
+      <div class="form-grid two">
+        <label>New location code *<input id="pending-location-rename-code" required placeholder="PENDING-IMPORTED COLD" /></label>
+        <label>Display name<input id="pending-location-rename-name" placeholder="Imported Cold Pending" /></label>
+      </div>
+      <label>Reason for rename *<textarea id="pending-location-rename-reason" required placeholder="Example: renamed staging area to match warehouse signage"></textarea></label>
+      <p class="small-note">Before renaming, confirm no user has an unsaved Put-away session targeting this location. Renaming preserves the same internal location and any current stock assigned to it. If the location code changes, print a new QR label; the old QR value will no longer be valid. Historical rows that resolve the current location name will show the new code, while Audit History records the old and new values.</p>
+      <button class="primary" type="submit">Save virtual location rename</button>
+    </form>
+  </dialog>
+
   <dialog id="scanner-dialog" class="scanner-dialog">
     <div class="scanner-head"><div><h3 id="scanner-title">Scan code</h3><p>Point the camera at the barcode or QR code.</p></div><button id="scanner-close" class="icon-button" aria-label="Close">✕</button></div>
     <video id="scanner-video" playsinline muted></video>
@@ -685,6 +701,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260813-pending-location-name-display-1"></script>
+  <script type="module" src="app.js?v=20260813-pending-location-master-1"></script>
 </body>
 </html>

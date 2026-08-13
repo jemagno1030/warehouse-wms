@@ -319,6 +319,8 @@ function setupStaticEvents() {
   $('select-visible-qr-btn').addEventListener('click', selectVisibleQrLocations);
   $('clear-qr-btn').addEventListener('click', clearQrSelection);
   $('print-qr-btn').addEventListener('click', printSelectedQrLabels);
+  $('pending-location-rename-close').addEventListener('click', () => $('pending-location-rename-dialog').close());
+  $('pending-location-rename-form').addEventListener('submit', submitPendingLocationRename);
   $('admin-code-btn').addEventListener('click', applyAdministrativeCode);
   $('full-reset-open-btn').addEventListener('click', openFullResetDialog);
   $('full-reset-close').addEventListener('click', () => $('full-reset-dialog').close());
@@ -380,6 +382,10 @@ function setupStaticEvents() {
     if (userActive) toggleManagedUserActive(userActive.dataset.userActive);
     const bypassPick = event.target.closest('[data-pick-bypass-lot]');
     if (bypassPick) addSupervisorBarcodeBypass(bypassPick.dataset.pickBypassLot);
+    const pendingRename = event.target.closest('[data-pending-location-rename]');
+    if (pendingRename) openPendingLocationRename(pendingRename.dataset.pendingLocationRename);
+    const pendingDelete = event.target.closest('[data-pending-location-delete]');
+    if (pendingDelete) deletePendingLocation(pendingDelete.dataset.pendingLocationDelete);
     const qr = event.target.closest('[data-qr-location]');
     if (qr) toggleQrSelection(qr.dataset.qrLocation, qr.checked);
   });
@@ -4520,6 +4526,7 @@ async function loadRackMap(force = false) {
   const { data, error } = await supabase
     .from('v_location_summary')
     .select('*')
+    .eq('is_active', true)
     .order('sort_order', { ascending: true, nullsFirst: false })
     .order('location_code')
     .limit(10000);
@@ -5109,6 +5116,7 @@ async function loadLocations(force = false) {
   const { data, error } = await supabase
     .from('locations')
     .select('*')
+    .eq('is_active', true)
     .order('sort_order', { ascending: true, nullsFirst: false })
     .order('code')
     .limit(10000);
@@ -5131,8 +5139,9 @@ function filteredLocationRows() {
 function renderLocationsTable() {
   const rows = filteredLocationRows();
   $('location-count').textContent = `${rows.length.toLocaleString()} shown · ${state.selectedQrLocations.size.toLocaleString()} selected`;
-  $('locations-table').innerHTML = rows.length ? `<table><thead><tr><th></th><th>Code</th><th>Row</th><th>Position</th><th>Name</th><th>Zone</th><th>Type</th></tr></thead><tbody>${rows.map((r) => `<tr>
-    <td><input type="checkbox" data-qr-location="${escapeHtml(r.code)}" ${state.selectedQrLocations.has(r.code) ? 'checked' : ''}></td><td><strong>${escapeHtml(r.code)}</strong></td><td>${escapeHtml(r.row_label || '')}</td><td>${escapeHtml(r.bay_label || '')}</td><td class="wrap">${escapeHtml(r.display_name || '')}</td><td>${escapeHtml(r.zone || '')}</td><td>${r.is_pending ? 'Pending' : 'Rack'}</td>
+  $('locations-table').innerHTML = rows.length ? `<table><thead><tr><th></th><th>Code</th><th>Row</th><th>Position</th><th>Name</th><th>Zone</th><th>Type</th><th>Virtual location manager</th></tr></thead><tbody>${rows.map((r) => `<tr>
+    <td><input type="checkbox" data-qr-location="${escapeHtml(r.code)}" ${state.selectedQrLocations.has(r.code) ? 'checked' : ''}></td><td><strong>${escapeHtml(r.code)}</strong></td><td>${escapeHtml(r.row_label || '')}</td><td>${escapeHtml(r.bay_label || '')}</td><td class="wrap">${escapeHtml(r.display_name || '')}</td><td>${escapeHtml(r.zone || '')}</td><td>${r.is_pending ? '<span class="pill near">Pending</span>' : 'Rack'}</td>
+    <td>${r.is_pending ? `<button class="link-btn" type="button" data-pending-location-rename="${escapeHtml(r.id)}">Rename</button> <button class="link-btn" type="button" data-pending-location-delete="${escapeHtml(r.id)}">Delete</button>` : '<small>Physical rack protected</small>'}</td>
   </tr>`).join('')}</tbody></table>` : emptyState('No locations match the selected row or search.');
 }
 
@@ -5166,6 +5175,80 @@ async function addLocation(event) {
   state.data.rackMap = [];
   state.data.audit = [];
   toast('Location added.', 'success');
+  await loadLocations(true);
+}
+
+function openPendingLocationRename(locationId) {
+  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+  if (state.mode !== 'ADMINISTRATIVE_PAUSE') return toast('Activate Administrative Pause before renaming a virtual location.', 'error');
+  const row = state.data.locations.find((location) => location.id === locationId);
+  if (!row) return toast('Virtual location not found. Refresh Locations & QR and try again.', 'error');
+  if (!row.is_pending) return toast('Only virtual/pending locations can be renamed here.', 'error');
+
+  $('pending-location-rename-id').value = row.id;
+  $('pending-location-rename-current').innerHTML = `<strong>Current virtual location:</strong> ${escapeHtml(row.code)}${row.display_name ? ` · ${escapeHtml(row.display_name)}` : ''}<br><small>The same internal location ID is preserved. If the code changes, reprint the QR label because the old QR code will no longer be valid.</small>`;
+  $('pending-location-rename-code').value = row.code || '';
+  $('pending-location-rename-name').value = row.display_name || row.code || '';
+  $('pending-location-rename-reason').value = '';
+  $('pending-location-rename-dialog').showModal();
+  $('pending-location-rename-code').focus();
+}
+
+async function submitPendingLocationRename(event) {
+  event.preventDefault();
+  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+  if (state.mode !== 'ADMINISTRATIVE_PAUSE') return toast('Administrative Pause is required for virtual-location maintenance.', 'error');
+
+  const locationId = $('pending-location-rename-id').value;
+  const oldRow = state.data.locations.find((location) => location.id === locationId);
+  const newCode = $('pending-location-rename-code').value.trim();
+  const newName = $('pending-location-rename-name').value.trim();
+  const reason = $('pending-location-rename-reason').value.trim();
+  if (!newCode) return toast('New virtual location code is required.', 'error');
+  if (!reason) return toast('Reason for renaming is required.', 'error');
+
+  const button = event.submitter;
+  setBusy(button, true, 'Renaming…');
+  const { data, error } = await supabase.rpc('supervisor_rename_pending_location', {
+    p_location_id: locationId,
+    p_new_code: newCode,
+    p_new_display_name: newName || null,
+    p_reason: reason
+  });
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  $('pending-location-rename-dialog').close();
+  if (oldRow?.code) state.selectedQrLocations.delete(oldRow.code);
+  state.data.locations = [];
+  invalidateReports();
+  const row = data?.[0] || {};
+  toast(`Virtual location renamed: ${row.old_code || oldRow?.code || 'location'} → ${row.new_code || newCode}. Reprint its QR label.`, 'success');
+  await loadLocations(true);
+}
+
+async function deletePendingLocation(locationId) {
+  if (!isSupervisor()) return toast('Supervisor access is required.', 'error');
+  if (state.mode !== 'ADMINISTRATIVE_PAUSE') return toast('Activate Administrative Pause before deleting a virtual location.', 'error');
+  const row = state.data.locations.find((location) => location.id === locationId);
+  if (!row) return toast('Virtual location not found. Refresh Locations & QR and try again.', 'error');
+  if (!row.is_pending) return toast('Physical rack locations are protected. Only virtual/pending locations can be deleted here.', 'error');
+
+  const reason = window.prompt(`Reason for deleting virtual location ${row.code} (required):`);
+  if (!reason?.trim()) return toast('Virtual location was not deleted because a reason is required.', 'error');
+  const confirmed = window.confirm(`Delete ${row.code} from active warehouse locations?\n\nSafety rules:\n• It must contain ZERO remaining stock.\n• It must have no active Picking/Transfer lock.\n• Confirm nobody has an unsaved Put-away session targeting it.\n• Historical transactions are preserved.\n• The old location code remains reserved and cannot be silently reused.\n\nContinue?`);
+  if (!confirmed) return;
+
+  const { data, error } = await supabase.rpc('supervisor_delete_pending_location', {
+    p_location_id: locationId,
+    p_reason: reason.trim()
+  });
+  if (error) return toast(friendlyError(error), 'error');
+
+  state.selectedQrLocations.delete(row.code);
+  state.data.locations = [];
+  invalidateReports();
+  toast(`Virtual location ${data?.[0]?.result_location_code || row.code} removed from active warehouse use. History was preserved.`, 'success');
   await loadLocations(true);
 }
 
