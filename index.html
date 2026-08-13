@@ -299,7 +299,8 @@
       <section id="screen-inventory" class="screen">
         <article class="card">
           <div class="card-head"><div><h3>Inventory by lot and location</h3><p>Current positive stock only</p></div><button class="secondary export-btn" data-export="inventory">Export CSV</button></div>
-          <div class="filters"><input id="inventory-search" placeholder="Search SKU, CASE/PACK/PIECE barcode, container, location, expiry, remarks, or ON HOLD reason..." /></div>
+          <div class="filters"><div class="scan-field"><input id="inventory-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search SKU, CASE/PACK/PIECE barcode, container, location, expiry, remarks, ON HOLD reason, or PENDING..." /><button type="button" class="scan-btn" data-scan-target="inventory-search" data-scan-kind="barcode" title="Scan CASE, PACK, or PIECE barcode">Scan</button></div></div>
+          <p class="small-note">Scan a CASE, PACK, or PIECE barcode to filter Inventory immediately. Stock in the virtual <strong>PENDING</strong> location is included in Inventory search and Detailed Lots and is clearly marked as PENDING.</p>
           <h4>SKU summary</h4>
           <div id="inventory-summary-table" class="table-wrap"></div>
           <h4>Detailed lots</h4>
@@ -684,6 +685,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260812-inventory-lot-hold-1"></script>
+  <script type="module" src="app.js?v=20260813-inventory-scan-pending-1"></script>
 </body>
 </html>

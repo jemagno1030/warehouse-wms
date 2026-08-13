@@ -297,6 +297,7 @@ function setupStaticEvents() {
   $('tr-complete-btn').addEventListener('click', completeTransfer);
 
   $('inventory-search').addEventListener('input', renderInventory);
+  $('inventory-search').addEventListener('change', renderInventory); // Scanner writes the barcode then dispatches change.
   $('sku-master-search').addEventListener('input', renderSkuMaster);
   $('sku-health-search').addEventListener('input', renderSkuHealth);
   $('sku-health-filter').addEventListener('change', renderSkuHealth);
@@ -3873,6 +3874,7 @@ function renderInventory() {
     r.container_no, r.location_code, isNoExpiryDate(r.expiry_date) ? 'N/A no expiry' : r.expiry_date,
     r.uom, r.putaway_remarks, r.transfer_remarks,
     r.shipper_box_no, r.shipper_status, r.shipper_lot_role,
+    r.is_pending ? 'PENDING pending location awaiting rack vacancy' : '',
     r.is_on_hold ? 'on hold frozen freeze' : '', r.hold_reason
   ].join(' ').toLowerCase().includes(term));
   const grouped = new Map();
@@ -3891,8 +3893,11 @@ function renderInventory() {
   $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => {
     const expiry = isNoExpiryDate(r.expiry_date) ? '<span class="pill">N/A</span>' : expiryPill(r.expiry_status);
     const hold = inventoryHoldStatus(r);
+    const locationDisplay = r.is_pending
+      ? '<span class="pill near">PENDING</span><br><small>Awaiting rack vacancy</small>'
+      : escapeHtml(r.location_code);
     return `<tr>
-      <td>${escapeHtml(r.location_code)}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${expiry}${hold ? `<br>${hold}` : ''}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
+      <td>${locationDisplay}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${expiry}${hold ? `<br>${hold}` : ''}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
       ${inventoryLotActions(r)}
     </tr>`;
   }).join('')}</tbody></table>` : emptyState('No matching inventory.');
