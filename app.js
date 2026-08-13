@@ -3894,7 +3894,7 @@ function renderInventory() {
     const expiry = isNoExpiryDate(r.expiry_date) ? '<span class="pill">N/A</span>' : expiryPill(r.expiry_status);
     const hold = inventoryHoldStatus(r);
     const locationDisplay = r.is_pending
-      ? '<span class="pill near">PENDING</span><br><small>Awaiting rack vacancy</small>'
+      ? `<strong>${escapeHtml(r.location_code || 'PENDING')}</strong><br><span class="pill near">PENDING</span>`
       : escapeHtml(r.location_code);
     return `<tr>
       <td>${locationDisplay}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${expiry}${hold ? `<br>${hold}` : ''}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
