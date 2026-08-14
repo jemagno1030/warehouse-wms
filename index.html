@@ -158,7 +158,6 @@
             <label>Case quantity<input id="pa-case-qty" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
             <label>Pack quantity<input id="pa-pack-qty" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
             <label>Piece quantity<input id="pa-piece-qty" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
-            <label>Condition (optional)<textarea id="pa-condition" rows="2" maxlength="500" placeholder="Example: slightly dented"></textarea></label>
             <label>Remarks<textarea id="pa-note" rows="2"></textarea></label>
           </div>
           <div id="pa-match-note" class="info-box hidden"></div>
@@ -188,7 +187,7 @@
             <label>Remarks<textarea id="sp-note" rows="2"></textarea></label>
           </div>
           <div id="sp-batch-approval-note" class="warning-box"><strong>Supervisor approval required for quantity 2+:</strong> The Picker stays signed in. A Supervisor, Admin, or Owner approves on this device using their normal WMS login email and login password. The password is verified by Supabase Auth and is not stored in WMS history.</div>
-          <div class="warning-box"><strong>Identical-case batch rule:</strong> If an approved Supervisor-or-higher user enters more than 1 case, every generated physical SB will receive the exact same child SKUs, PACK quantities, expiry dates, Condition remarks, container, and rack. If even one physical case is different, encode that case in a separate batch.</div>
+          <div class="warning-box"><strong>Identical-case batch rule:</strong> If an approved Supervisor-or-higher user enters more than 1 case, every generated physical SB will receive the exact same child SKUs, PACK quantities, expiry dates, container, and rack. If even one physical case is different, encode that case in a separate batch.</div>
           <div id="sp-match-note" class="info-box hidden"></div>
           <div id="sp-duplicate-warning" class="warning-box hidden">
             <strong>ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE</strong>
@@ -196,7 +195,7 @@
             <label class="check-line"><input id="sp-still-add" type="checkbox" /> Still Add Shipper to Database</label>
           </div>
 
-          <div class="card-head compact"><div><h3>Contents of this physical Shipper Box</h3><p>Encode each PACK-level SKU lot. Different expiry dates or different Condition remarks remain separate. Same SKU + same expiry + same Condition is consolidated automatically when saved.</p></div></div>
+          <div class="card-head compact"><div><h3>Contents of this physical Shipper Box</h3><p>Encode each PACK-level SKU lot. Different expiry dates remain separate. Same SKU + same expiry is consolidated automatically when saved.</p></div></div>
           <div class="form-grid three">
             <label>Content PACK barcode *<div class="scan-field"><input id="sp-content-pack" autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="sp-content-pack">Scan</button></div></label>
             <label>Expiry date *<input id="sp-content-expiry" type="date" required /></label>
@@ -206,7 +205,6 @@
             <label>Description *<input id="sp-content-description" /></label>
             <label>Variant *<input id="sp-content-variant" /></label>
             <label>Size *<input id="sp-content-size" /></label>
-            <label>Condition (optional)<textarea id="sp-content-condition" rows="2" maxlength="500" placeholder="Example: slightly dented"></textarea></label>
           </div>
           <div id="sp-content-match-note" class="info-box hidden"></div>
           <div id="sp-content-duplicate-warning" class="warning-box hidden">
@@ -278,7 +276,6 @@
             <label>CASE, PACK, or PIECE barcode *<div class="scan-field with-na"><input id="tr-barcode" name="wms-transfer-barcode-entry" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-autocomplete="none" disabled /><button type="button" class="scan-btn" data-scan-target="tr-barcode" disabled>Scan</button><button type="button" class="na-btn" data-na-target="tr-barcode" disabled>N/A</button></div></label>
             <label>Matching expiry / container<select id="tr-lot" disabled><option value="">Scan a barcode first</option></select></label>
             <label>Transfer quantity (<span id="tr-unit-label">matched unit</span>)<input id="tr-qty" type="number" min="1" step="1" inputmode="numeric" disabled /></label>
-            <label>Condition (optional)<textarea id="tr-condition" rows="2" maxlength="500" disabled placeholder="Current condition is loaded from the selected lot; edit if condition changed during transfer."></textarea></label>
             <label>New location / QR *<div class="scan-field"><input id="tr-destination" disabled /><button type="button" class="scan-btn" data-scan-target="tr-destination" data-scan-kind="location" disabled>Scan</button></div></label>
             <label>Remarks<textarea id="tr-note" rows="2"></textarea></label>
           </div>
@@ -302,8 +299,11 @@
       <section id="screen-inventory" class="screen">
         <article class="card">
           <div class="card-head"><div><h3>Inventory by lot and location</h3><p>Current positive stock only</p></div><button class="secondary export-btn" data-export="inventory">Export CSV</button></div>
-          <div class="filters"><div class="scan-field"><input id="inventory-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search SKU, CASE/PACK/PIECE barcode, container, location, expiry, remarks, ON HOLD reason, or PENDING..." /><button type="button" class="scan-btn" data-scan-target="inventory-search" data-scan-kind="barcode" title="Scan CASE, PACK, or PIECE barcode">Scan</button></div></div>
-          <p class="small-note">Scan a CASE, PACK, or PIECE barcode to filter Inventory immediately. Stock in the virtual <strong>PENDING</strong> location is included in Inventory search and Detailed Lots and is clearly marked as PENDING.</p>
+          <div class="filters">
+            <label><strong>Search 1</strong><div class="scan-field"><input id="inventory-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search SKU, CASE/PACK/PIECE barcode, container, location, expiry, remarks, ON HOLD reason, or PENDING..." /><button type="button" class="scan-btn" data-scan-target="inventory-search" data-scan-kind="barcode" title="Scan CASE, PACK, or PIECE barcode">Scan</button></div></label>
+            <label><strong>Filter 2</strong><input id="inventory-filter" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Narrow the current Search 1 results further..." /></label>
+          </div>
+          <p class="small-note"><strong>Search 1 stays unchanged.</strong> Scan or type as before. <strong>Filter 2</strong> searches the same fields but only inside the rows already returned by Search 1. Example: Search 1 = SKU-B, Filter 2 = dented.</p>
           <h4>SKU summary</h4>
           <div id="inventory-summary-table" class="table-wrap"></div>
           <h4>Detailed lots</h4>
@@ -647,8 +647,22 @@
     </form>
   </dialog>
 
+  <dialog id="inventory-remarks-dialog" class="edit-dialog">
+    <div class="scanner-head"><div><h3>Edit current lot remarks</h3><p>Supervisor / Admin / Owner. This changes the current Inventory/Detailed-Lots display only; original transaction History remains unchanged.</p></div><button id="inventory-remarks-close" class="icon-button" type="button">✕</button></div>
+    <form id="inventory-remarks-form" class="stack">
+      <input id="inventory-remarks-lot-id" type="hidden" />
+      <div id="inventory-remarks-current" class="info-box"></div>
+      <div id="inventory-remarks-history" class="info-box"></div>
+      <label>Current Put-away remarks<textarea id="inventory-remarks-putaway" rows="3" maxlength="1000" placeholder="Blank is allowed"></textarea></label>
+      <label>Current Stock transfer remarks<textarea id="inventory-remarks-transfer" rows="3" maxlength="1000" placeholder="Blank is allowed"></textarea></label>
+      <label>Reason for remark change *<textarea id="inventory-remarks-reason" rows="2" maxlength="500" required placeholder="Example: inspection updated from slightly dented to heavily dented"></textarea></label>
+      <p class="small-note">Remarks are operational/searchable labels only. They do not change SKU, quantity, rack, expiry, FEFO, ON HOLD status, or stock-lot identity.</p>
+      <button class="primary" type="submit">Save current remarks</button>
+    </form>
+  </dialog>
+
   <dialog id="inventory-adjust-dialog" class="edit-dialog">
-    <div class="scanner-head"><div><h3>Inventory lot adjustment</h3><p>Supervisor / Admin / Owner may edit Detailed Lots, including the current Condition remark. Delete remains Admin / Owner only. Changes are written to Audit History.</p></div><button id="inventory-adjust-close" class="icon-button" type="button">✕</button></div>
+    <div class="scanner-head"><div><h3>Inventory lot adjustment</h3><p>Supervisor / Admin / Owner may edit Detailed Lots. Delete remains Admin / Owner only. Changes are written to Audit History.</p></div><button id="inventory-adjust-close" class="icon-button" type="button">✕</button></div>
     <form id="inventory-adjust-form" class="stack">
       <input id="inventory-adjust-lot-id" type="hidden" />
       <input id="inventory-adjust-shipper-box-id" type="hidden" />
@@ -661,7 +675,6 @@
         <label>Expiry date<input id="inventory-adjust-expiry" type="date" required /></label>
         <label>Stock unit<select id="inventory-adjust-uom" required><option value="CASE">CASE</option><option value="PACK">PACK</option><option value="PIECE">PIECE</option></select></label>
         <label>Quantity — whole number<input id="inventory-adjust-qty" type="number" min="1" step="1" inputmode="numeric" required /></label>
-        <label>Condition (optional)<textarea id="inventory-adjust-condition" rows="2" maxlength="500" placeholder="Example: heavily dented"></textarea></label>
       </div>
       <label id="inventory-adjust-putaway-note-wrap" class="hidden">Shipper put-away remarks<textarea id="inventory-adjust-putaway-note" rows="2" placeholder="Original/current Shipper put-away remarks"></textarea></label>
       <p id="inventory-adjust-shipper-help" class="small-note hidden">For Shipper content, changing rack or container corrects the current physical box and all of its active contents together. PACK quantity may be corrected to 0 to remove an erroneous content line. A SEALED Shipper's complete CASE expiry is recalculated from its remaining contents.</p>
@@ -705,6 +718,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260814-condition-remark-1"></script>
+  <script type="module" src="app.js?v=20260814-recovery-second-filter-editable-remarks-2"></script>
 </body>
 </html>
