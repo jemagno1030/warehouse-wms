@@ -20,6 +20,9 @@ const NO_EXPIRY_DATE = '9999-12-31';
 const isNoExpiryDate = (value) => String(value || '').slice(0, 10) === NO_EXPIRY_DATE;
 const fmtDate = (value) => isNoExpiryDate(value) ? 'N/A' : value ? new Date(`${String(value).slice(0, 10)}T00:00:00`).toLocaleDateString() : '—';
 const fmtDateTime = (value) => value ? new Date(value).toLocaleString() : '—';
+const conditionText = (value) => String(value || '').trim();
+const conditionKey = (value) => conditionText(value).replace(/\s+/g, ' ').toLowerCase();
+const conditionSuffix = (row) => conditionText(row?.condition_note) ? ` · ${escapeHtml(conditionText(row.condition_note))}` : '';
 const localDateKey = (value) => {
   if (!value) return '';
   const d = new Date(value);
@@ -1415,6 +1418,7 @@ function putawayLinePayload() {
     size: $('pa-size').value.trim(),
     container_no: $('pa-container').value.trim(),
     expiry_date: $('pa-no-expiry').checked ? NO_EXPIRY_DATE : $('pa-expiry').value,
+    condition_note: conditionText($('pa-condition').value) || null,
     piece_qty: Number($('pa-piece-qty').value || 0),
     pack_qty: Number($('pa-pack-qty').value || 0),
     case_qty: Number($('pa-case-qty').value || 0),
@@ -1458,6 +1462,7 @@ async function addPutawayItem(event) {
     if (allNa && !['existing', 'new'].includes(state.putaway.barcodeLessMode)) {
       return toast('For an item with no CASE/PACK/PIECE barcode, select an existing barcode-less SKU or explicitly create a new one.', 'error');
     }
+    if (conditionText(item.condition_note).length > 500) return toast('Condition is limited to 500 characters.', 'error');
     if ([item.case_qty, item.pack_qty, item.piece_qty].some((qty) => qty < 0)) return toast('Quantities cannot be negative.', 'error');
     if ([item.case_qty, item.pack_qty, item.piece_qty].some((qty) => !Number.isInteger(qty))) return toast('CASE, PACK, and PIECE quantities must be whole numbers only (0, 1, 2, 3, ...).', 'error');
     if (item.case_qty <= 0 && item.pack_qty <= 0 && item.piece_qty <= 0) return toast('Enter at least one CASE, PACK, or PIECE quantity.', 'error');
@@ -1498,7 +1503,7 @@ async function addPutawayItem(event) {
 }
 
 function clearPutawayLine() {
-  ['pa-piece','pa-pack','pa-case','pa-brand','pa-description','pa-variant','pa-size','pa-container','pa-expiry'].forEach((id) => $(id).value = '');
+  ['pa-piece','pa-pack','pa-case','pa-brand','pa-description','pa-variant','pa-size','pa-container','pa-expiry','pa-condition'].forEach((id) => $(id).value = '');
   $('pa-no-expiry').checked = false;
   syncNoExpiryControl('pa-expiry', 'pa-no-expiry');
   ['pa-piece-qty','pa-pack-qty','pa-case-qty'].forEach((id) => $(id).value = '0');
@@ -1518,8 +1523,8 @@ function clearPutawayLine() {
 
 function renderPutawayCart() {
   const rows = state.putaway.cart;
-  $('pa-cart').innerHTML = rows.length ? `<table><thead><tr><th>SKU</th><th>Barcodes</th><th>Container</th><th>Expiry</th><th>Quantities</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
-    <td class="wrap">${escapeHtml([r.brand,r.description,r.variant,r.size].join(' '))}</td><td class="wrap">C: ${escapeHtml(r.case_barcode)}<br>Pk: ${escapeHtml(r.pack_barcode)}<br>P: ${escapeHtml(r.piece_barcode)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${putawayQuantityText(r)}</td>
+  $('pa-cart').innerHTML = rows.length ? `<table><thead><tr><th>SKU</th><th>Barcodes</th><th>Container</th><th>Expiry</th><th>Condition</th><th>Quantities</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
+    <td class="wrap">${escapeHtml([r.brand,r.description,r.variant,r.size].join(' '))}</td><td class="wrap">C: ${escapeHtml(r.case_barcode)}<br>Pk: ${escapeHtml(r.pack_barcode)}<br>P: ${escapeHtml(r.piece_barcode)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${escapeHtml(conditionText(r.condition_note) || '—')}</td><td>${putawayQuantityText(r)}</td>
     <td><button class="link-btn" type="button" data-remove-putaway="${i}">Remove</button></td></tr>`).join('')}</tbody></table>` : emptyState('No SKU lines added to this pallet yet.');
 }
 
@@ -1849,10 +1854,12 @@ async function addShipperContentLine() {
     const description = $('sp-content-description').value.trim();
     const variant = $('sp-content-variant').value.trim();
     const size = $('sp-content-size').value.trim();
+    const condition = conditionText($('sp-content-condition').value);
     if (!pack || pack === 'N/A') return toast('Enter the actual PACK barcode for this Shipper content line.', 'error');
     if (!expiry) return toast('Enter the expiry date, or select No expiry (N/A), for this Shipper content line.', 'error');
     if (!/^\d+$/.test(rawQty) || !Number.isSafeInteger(qty) || qty <= 0) return toast('PACK quantity must be a whole number greater than zero.', 'error');
     if (!brand || !description || !variant || !size) return toast('Brand, description, variant, and size are required for the content SKU.', 'error');
+    if (condition.length > 500) return toast('Condition is limited to 500 characters.', 'error');
 
     const duplicate = await checkShipperContentDuplicateDetails();
     const normalizedDetails = [brand, description, variant, size].map((v) => v.trim().toLowerCase()).join('|');
@@ -1872,22 +1879,28 @@ async function addShipperContentLine() {
     const line = {
       pack_barcode: pack, brand, description, variant, size,
       expiry_date: expiry, pack_qty: qty,
+      condition_note: condition || null,
       allow_duplicate_details: allowDuplicateDetails
     };
-    const existing = state.shipperPutaway.contents.find((x) => x.pack_barcode.toLowerCase() === pack.toLowerCase() && x.expiry_date === expiry);
+    const normalizedCondition = conditionKey(condition);
+    const existing = state.shipperPutaway.contents.find((x) =>
+      x.pack_barcode.toLowerCase() === pack.toLowerCase()
+      && x.expiry_date === expiry
+      && conditionKey(x.condition_note) === normalizedCondition
+    );
     if (existing) existing.pack_qty += qty;
     else state.shipperPutaway.contents.push(line);
     renderShipperContents();
     clearShipperContentLine();
     $('sp-complete-btn').disabled = state.mode !== 'ACTIVE' || !state.shipperPutaway.contents.length;
-    toast(existing ? 'Same SKU + expiry consolidated in this Shipper Box.' : 'PACK content added to this physical Shipper Box.', 'success');
+    toast(existing ? 'Same SKU + expiry + Condition consolidated in this Shipper Box.' : 'PACK content added to this physical Shipper Box.', 'success');
   } finally {
     setBusy(button, false);
   }
 }
 
 function clearShipperContentLine() {
-  ['sp-content-pack','sp-content-brand','sp-content-description','sp-content-variant','sp-content-size','sp-content-expiry','sp-content-qty'].forEach((id) => { $(id).value = ''; });
+  ['sp-content-pack','sp-content-brand','sp-content-description','sp-content-variant','sp-content-size','sp-content-expiry','sp-content-qty','sp-content-condition'].forEach((id) => { $(id).value = ''; });
   $('sp-content-no-expiry').checked = false;
   syncNoExpiryControl('sp-content-expiry', 'sp-content-no-expiry');
   state.shipperPutaway.contentSku = null;
@@ -1900,9 +1913,9 @@ function clearShipperContentLine() {
 
 function renderShipperContents() {
   const rows = state.shipperPutaway.contents;
-  $('sp-content-cart').innerHTML = rows.length ? `<table><thead><tr><th>Content SKU</th><th>PACK barcode</th><th>Expiry</th><th>PACK qty</th><th></th></tr></thead><tbody>${rows.map((r,i) => `<tr>
+  $('sp-content-cart').innerHTML = rows.length ? `<table><thead><tr><th>Content SKU</th><th>PACK barcode</th><th>Expiry</th><th>Condition</th><th>PACK qty</th><th></th></tr></thead><tbody>${rows.map((r,i) => `<tr>
     <td class="wrap"><strong>${escapeHtml([r.brand,r.description,r.variant,r.size].join(' '))}</strong></td>
-    <td>${escapeHtml(r.pack_barcode)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.pack_qty,'PACK')}</td>
+    <td>${escapeHtml(r.pack_barcode)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${escapeHtml(conditionText(r.condition_note) || '—')}</td><td>${fmtQtyUom(r.pack_qty,'PACK')}</td>
     <td><button class="link-btn" type="button" data-remove-shipper-content="${i}">Remove</button></td></tr>`).join('')}</tbody></table>` : emptyState('No Shipper contents added yet.');
 }
 
@@ -2405,7 +2418,7 @@ function syncFullTransferMode() {
   const locked = Boolean(state.transfer.lockToken);
   const bulk = locked && checkbox.checked;
 
-  const manualIds = ['tr-barcode', 'tr-lot', 'tr-qty'];
+  const manualIds = ['tr-barcode', 'tr-lot', 'tr-qty', 'tr-condition'];
   manualIds.forEach((id) => { $(id).disabled = !locked || bulk; });
   qsa('[data-scan-target="tr-barcode"]').forEach((b) => b.disabled = !locked || bulk);
   qsa('[data-na-target="tr-barcode"]').forEach((b) => b.disabled = !locked || bulk);
@@ -2420,6 +2433,7 @@ function syncFullTransferMode() {
     $('tr-barcode').value = '';
     $('tr-lot').innerHTML = '<option value="">Whole-rack transfer selected</option>';
     $('tr-qty').value = '';
+    $('tr-condition').value = '';
     $('tr-unit-label').textContent = 'all units';
     clearTransferBarcodeMatch();
     $('tr-qty-note').classList.add('hidden');
@@ -2477,7 +2491,7 @@ function renderPickRackContents() {
     return;
   }
 
-  container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Physical qty</th><th>Release status</th><th>Queued</th><th></th></tr></thead><tbody>${rows.map((lot) => {
+  container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Condition</th><th>Stock unit</th><th>Physical qty</th><th>Release status</th><th>Queued</th><th></th></tr></thead><tbody>${rows.map((lot) => {
     const queued = state.pick.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
     const remaining = Math.max(Number(lot.qty) - queued, 0);
     const blocked = lot.is_releasable === false;
@@ -2495,6 +2509,7 @@ function renderPickRackContents() {
       <td>${shipperBadge(lot)}</td>
       <td>${escapeHtml(lot.container_no)}</td>
       <td>${fmtDate(lot.expiry_date)} ${expiryPill(lot.expiry_status)}</td>
+      <td class="wrap">${escapeHtml(conditionText(lot.condition_note) || '—')}</td>
       <td><span class="pill">${escapeHtml(lot.uom)}</span></td>
       <td>${fmtQtyUom(remaining, lot.uom)}${queued ? `<br><small>Original: ${fmtQtyUom(lot.qty, lot.uom)}</small>` : ''}</td>
       <td class="wrap">${releaseStatus}</td>
@@ -2547,7 +2562,7 @@ function renderTransferRackContents() {
     return;
   }
 
-  container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Stock unit</th><th>Physical qty</th><th>Release status</th><th>Queued</th></tr></thead><tbody>${rows.map((lot) => {
+  container.innerHTML = `<table><thead><tr><th>Item</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Condition</th><th>Stock unit</th><th>Physical qty</th><th>Release status</th><th>Queued</th></tr></thead><tbody>${rows.map((lot) => {
     const queued = state.transfer.cart.filter((x) => x.lot_id === lot.lot_id).reduce((sum, x) => sum + Number(x.qty), 0);
     const remaining = Math.max(Number(lot.qty) - queued, 0);
     const blocked = lot.is_releasable === false;
@@ -2559,6 +2574,7 @@ function renderTransferRackContents() {
       <td>${shipperBadge(lot)}</td>
       <td>${escapeHtml(lot.container_no)}</td>
       <td>${fmtDate(lot.expiry_date)} ${expiryPill(lot.expiry_status)}</td>
+      <td class="wrap">${escapeHtml(conditionText(lot.condition_note) || '—')}</td>
       <td><span class="pill">${escapeHtml(lot.uom)}</span></td>
       <td>${fmtQtyUom(remaining, lot.uom)}${queued ? `<br><small>Original: ${fmtQtyUom(lot.qty, lot.uom)}</small>` : ''}</td>
       <td class="wrap">${blocked ? `<span class="pill expired">ON HOLD</span>${holdDetail ? `<br><small>${holdDetail}</small>` : ''}` : '<span class="pill">Available</span>'}</td>
@@ -2603,9 +2619,21 @@ function renderNaSelectedLot(operation) {
       <tr><th>Brand</th><td>${escapeHtml(lot.brand)}</td><th>Description</th><td>${escapeHtml(lot.description)}</td></tr>
       <tr><th>Variant</th><td>${escapeHtml(lot.variant)}</td><th>Size</th><td>${escapeHtml(lot.size)}</td></tr>
       <tr><th>Container</th><td>${escapeHtml(lot.container_no)}</td><th>Expiry</th><td>${fmtDate(lot.expiry_date)}</td></tr>
+      <tr><th>Condition</th><td colspan="3">${escapeHtml(conditionText(lot.condition_note) || '—')}</td></tr>
       <tr><th>Shipper box</th><td colspan="3">${escapeHtml(shipperDescriptor(lot))}</td></tr>
       <tr><th>Source rack</th><td>${escapeHtml(opState.locationCode || '—')}</td><th>Available ${escapeHtml(lot.uom)}</th><td>${fmtQtyUom(remaining, lot.uom)}</td></tr>
     </tbody></table></div>`;
+}
+
+function syncTransferConditionFromSelectedLot() {
+  const input = $('tr-condition');
+  const select = $('tr-lot');
+  if (!input || !select || select.value === '') {
+    if (input) input.value = '';
+    return;
+  }
+  const lot = state.transfer.lots[Number(select.value)];
+  input.value = conditionText(lot?.condition_note);
 }
 
 function handleOperationLotChange(operation) {
@@ -2615,6 +2643,7 @@ function handleOperationLotChange(operation) {
     updatePickFefoNote();
     updatePickQtyNote();
   } else {
+    syncTransferConditionFromSelectedLot();
     updateTransferQtyNote();
   }
 }
@@ -2824,7 +2853,7 @@ async function loadOperationLots(operation) {
     });
 
     lotSelect.innerHTML = opState.lots.length
-      ? `<option value="">Select N/A item / expiry / container / unit</option>${opState.lots.map((lot, i) => `<option value="${i}" ${Number(lot.effectiveQty) <= 0 ? 'disabled' : ''}>${escapeHtml(lot.sku_name)} · ${escapeHtml(lot.uom)} · ${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)}${escapeHtml(shipperOptionSuffix(lot))} · Available ${fmtQtyUom(lot.effectiveQty, lot.uom)}</option>`).join('')}`
+      ? `<option value="">Select N/A item / expiry / container / unit</option>${opState.lots.map((lot, i) => `<option value="${i}" ${Number(lot.effectiveQty) <= 0 ? 'disabled' : ''}>${escapeHtml(lot.sku_name)} · ${escapeHtml(lot.uom)} · ${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)}${escapeHtml(shipperOptionSuffix(lot))} · Available ${fmtQtyUom(lot.effectiveQty, lot.uom)}${conditionSuffix(lot)}</option>`).join('')}`
       : '<option value="">No stock in this rack uses N/A for its active stock unit</option>';
 
     $(pick ? 'pick-unit-label' : 'tr-unit-label').textContent = 'selected unit';
@@ -2845,7 +2874,7 @@ async function loadOperationLots(operation) {
         : `No selectable N/A-barcode stock is available in ${opState.locationCode}.`, 'error');
     }
     if (pick) { updatePickFefoNote(); updatePickQtyNote(); }
-    if (transfer) updateTransferQtyNote();
+    if (transfer) { syncTransferConditionFromSelectedLot(); updateTransferQtyNote(); }
     return;
   }
 
@@ -2934,7 +2963,7 @@ async function loadOperationLots(operation) {
   }
 
   lotSelect.innerHTML = opState.lots.length
-    ? `<option value="">${opState.multiBarcodeMode ? 'Select exact item / unit / expiry / container' : 'Select expiry / container'}</option>${opState.lots.map((lot, i) => `<option value="${i}" ${(pick || transfer) && Number(lot.effectiveQty ?? lot.qty) <= 0 ? 'disabled' : ''}>${opState.multiBarcodeMode ? `${escapeHtml(lot.sku_name)} · ${escapeHtml(lot.uom)} · ` : ''}${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)}${escapeHtml(shipperOptionSuffix(lot))} · Available ${fmtQtyUom(pick ? lot.effectiveQty : lot.qty, lot.uom)}</option>`).join('')}`
+    ? `<option value="">${opState.multiBarcodeMode ? 'Select exact item / unit / expiry / container' : 'Select expiry / container'}</option>${opState.lots.map((lot, i) => `<option value="${i}" ${(pick || transfer) && Number(lot.effectiveQty ?? lot.qty) <= 0 ? 'disabled' : ''}>${opState.multiBarcodeMode ? `${escapeHtml(lot.sku_name)} · ${escapeHtml(lot.uom)} · ` : ''}${fmtDate(lot.expiry_date)} · ${escapeHtml(lot.container_no)}${escapeHtml(shipperOptionSuffix(lot))} · Available ${fmtQtyUom(pick ? lot.effectiveQty : lot.qty, lot.uom)}${conditionSuffix(lot)}</option>`).join('')}`
     : '<option value="">No matching stock for this barcode in the locked location</option>';
 
   if (opState.lots.length === 1 && Number(opState.lots[0].effectiveQty ?? opState.lots[0].qty) > 0) {
@@ -2959,7 +2988,7 @@ async function loadOperationLots(operation) {
   }
 
   if (pick) { updatePickFefoNote(); updatePickQtyNote(); }
-  if (transfer) updateTransferQtyNote();
+  if (transfer) { syncTransferConditionFromSelectedLot(); updateTransferQtyNote(); }
 }
 
 async function addSupervisorBarcodeBypass(lotId) {
@@ -3052,6 +3081,7 @@ async function addSupervisorBarcodeBypass(lotId) {
     fefo_override_confirmed: fefoOverrideConfirmed,
     available: Number(lot.qty),
     uom: lot.uom,
+    condition_note: conditionText(lot.condition_note) || null,
     shipper_box_id: lot.shipper_box_id || null,
     shipper_box_no: lot.shipper_box_no || null,
     shipper_status: lot.shipper_status || null,
@@ -3110,6 +3140,9 @@ async function addOperationItem(operation) {
   const already = opState.cart.filter((x) => x.lot_id === lot.lot_id).reduce((a, x) => a + Number(x.qty), 0);
   if (qty + already > Number(lot.qty)) return toast(`Cannot exceed available stock of ${fmtQtyUom(lot.qty, lot.uom)}.`, 'error');
 
+  const transferCondition = pick ? conditionText(lot.condition_note) : conditionText($('tr-condition').value);
+  if (!pick && transferCondition.length > 500) return toast('Condition is limited to 500 characters.', 'error');
+
   const fefoOverrideConfirmed = Boolean(pick && lot.earliestExpiry && lot.expiry_date > lot.earliestExpiry);
   if (fefoOverrideConfirmed && !window.confirm('Are you sure you want to disregard the FEFO warning?')) {
     return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
@@ -3132,6 +3165,7 @@ async function addOperationItem(operation) {
     fefo_override_confirmed: fefoOverrideConfirmed,
     available: Number(lot.qty),
     uom: lot.uom,
+    condition_note: transferCondition || null,
     shipper_box_id: lot.shipper_box_id || null,
     shipper_box_no: lot.shipper_box_no || null,
     shipper_status: lot.shipper_status || null,
@@ -3167,9 +3201,9 @@ function renderOperationCart(operation) {
   }, { PIECE: 0, PACK: 0, CASE: 0 });
   const transferHeader = pick ? '' : `<div class="info-box"><strong>Transfer summary:</strong> ${rows.length.toLocaleString()} line(s) queued from ${escapeHtml(state.transfer.locationCode || '—')} · ${formatBalances(totals)}. Review these items before clicking Complete transfer.</div>`;
 
-  container.innerHTML = `${transferHeader}<table><thead><tr>${pick ? '' : '<th>Item details</th>'}<th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Quantity</th><th>Barcode control</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
+  container.innerHTML = `${transferHeader}<table><thead><tr>${pick ? '' : '<th>Item details</th>'}<th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Condition</th><th>Quantity</th><th>Barcode control</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
     ${pick ? '' : `<td class="wrap"><strong>${escapeHtml([r.brand, r.description, r.variant, r.size].filter(Boolean).join(' '))}</strong><br><small>Source: ${escapeHtml(state.transfer.locationCode || '—')}</small></td>`}
-    <td class="wrap">${escapeHtml(r.sku_name)}</td><td>${r.shipper_box_id ? `<span class="pill near">${escapeHtml(r.shipper_box_no || 'Shipper')} · ${escapeHtml(r.shipper_lot_role === 'HEADER' ? 'Complete' : 'Content')}</span>` : '<span class="pill">Loose</span>'}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td>
+    <td class="wrap">${escapeHtml(r.sku_name)}</td><td>${r.shipper_box_id ? `<span class="pill near">${escapeHtml(r.shipper_box_no || 'Shipper')} · ${escapeHtml(r.shipper_lot_role === 'HEADER' ? 'Complete' : 'Content')}</span>` : '<span class="pill">Loose</span>'}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${escapeHtml(conditionText(r.condition_note) || '—')}</td><td>${fmtQtyUom(r.qty, r.uom)}</td>
     <td class="wrap">${pick
       ? (r.supervisor_bypass
         ? `<span class="pill override">Approved barcode bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>${r.bypass_approved_by ? `<br><small>Approved by ${escapeHtml(r.bypass_approved_by)} (${escapeHtml(String(r.bypass_approved_role || '').toUpperCase())})</small>` : ''}`
@@ -3247,6 +3281,7 @@ function resetOperation(operation) {
     $('tr-barcode').value = '';
     $('tr-lot').innerHTML = '<option value="">Scan a barcode first</option>';
     $('tr-qty').value = '';
+    $('tr-condition').value = '';
     $('tr-unit-label').textContent = 'matched unit';
     $('tr-destination').value = '';
     $('tr-note').value = '';
@@ -3822,7 +3857,7 @@ async function completeTransfer() {
     p_source_code: state.transfer.locationCode,
     p_destination_code: destination,
     p_lock_token: state.transfer.lockToken,
-    p_items: state.transfer.cart.map(({ lot_id, qty, barcode }) => ({ lot_id, qty, barcode })),
+    p_items: state.transfer.cart.map(({ lot_id, qty, barcode, condition_note }) => ({ lot_id, qty, barcode, condition_note: conditionText(condition_note) || null })),
     p_note: $('tr-note').value.trim() || null
   });
   setBusy(button, false);
@@ -3878,7 +3913,7 @@ function renderInventory() {
     r.sku_name, r.brand, r.description, r.variant, r.size,
     r.case_barcode, r.pack_barcode, r.piece_barcode,
     r.container_no, r.location_code, isNoExpiryDate(r.expiry_date) ? 'N/A no expiry' : r.expiry_date,
-    r.uom, r.putaway_remarks, r.transfer_remarks,
+    r.uom, r.condition_note, r.putaway_remarks, r.transfer_remarks,
     r.shipper_box_no, r.shipper_status, r.shipper_lot_role,
     r.is_pending ? 'PENDING pending location awaiting rack vacancy' : '',
     r.is_on_hold ? 'on hold frozen freeze' : '', r.hold_reason
@@ -3896,14 +3931,14 @@ function renderInventory() {
   const summaryRows = [...grouped.values()].sort((a, b) => a.sku_name.localeCompare(b.sku_name));
   $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Held lots</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${r.heldLots ? `<span class="pill expired">${r.heldLots} ON HOLD</span>` : '—'}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
   const actionHeader = isSupervisor() ? '<th>Actions</th>' : '';
-  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => {
+  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Condition</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => {
     const expiry = isNoExpiryDate(r.expiry_date) ? '<span class="pill">N/A</span>' : expiryPill(r.expiry_status);
     const hold = inventoryHoldStatus(r);
     const locationDisplay = r.is_pending
       ? `<strong>${escapeHtml(r.location_code || 'PENDING')}</strong><br><span class="pill near">PENDING</span>`
       : escapeHtml(r.location_code);
     return `<tr>
-      <td>${locationDisplay}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${expiry}${hold ? `<br>${hold}` : ''}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
+      <td>${locationDisplay}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${expiry}${hold ? `<br>${hold}` : ''}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(conditionText(r.condition_note) || '—')}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}</td>
       ${inventoryLotActions(r)}
     </tr>`;
   }).join('')}</tbody></table>` : emptyState('No matching inventory.');
@@ -3941,7 +3976,7 @@ async function openInventoryLotEdit(lotId) {
   if (!isSupervisor()) return toast('Supervisor, Admin, or Owner access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
-  if (row.is_releasable === false) return toast('This lot is ON HOLD or blocked by a Shipper hold. Admin/Owner must unfreeze the held lot before it can be corrected.', 'error');
+  const conditionOnlyMode = row.is_releasable === false;
 
   const isShipperLot = Boolean(row.shipper_box_id);
   const shipperRole = String(row.shipper_lot_role || '').toUpperCase();
@@ -3956,7 +3991,7 @@ async function openInventoryLotEdit(lotId) {
 
   $('inventory-adjust-lot-id').value = lotId;
   $('inventory-adjust-shipper-box-id').value = row.shipper_box_id || '';
-  $('inventory-adjust-current').innerHTML = `<strong>Current lot:</strong> ${escapeHtml(row.sku_name)} · ${escapeHtml(row.location_code)} · ${escapeHtml(row.container_no)} · ${fmtDate(row.expiry_date)} · ${fmtQtyUom(row.qty, row.uom)}`;
+  $('inventory-adjust-current').innerHTML = `<strong>Current lot:</strong> ${escapeHtml(row.sku_name)} · ${escapeHtml(row.location_code)} · ${escapeHtml(row.container_no)} · ${fmtDate(row.expiry_date)} · ${fmtQtyUom(row.qty, row.uom)}<br><strong>Condition:</strong> ${escapeHtml(conditionText(row.condition_note) || '—')}`;
 
   $('inventory-adjust-sku').innerHTML = (skuRes.data || []).map((sku) => {
     const label = [sku.brand, sku.description, sku.variant, sku.size].filter(Boolean).join(' ');
@@ -3972,6 +4007,7 @@ async function openInventoryLotEdit(lotId) {
   $('inventory-adjust-expiry').value = row.expiry_date || '';
   $('inventory-adjust-uom').value = row.uom || 'PIECE';
   $('inventory-adjust-qty').value = Number(row.qty);
+  $('inventory-adjust-condition').value = conditionText(row.condition_note);
   $('inventory-adjust-reason').value = '';
 
   const shipperContext = $('inventory-adjust-shipper-context');
@@ -3986,11 +4022,19 @@ async function openInventoryLotEdit(lotId) {
   $('inventory-adjust-expiry').disabled = false;
   $('inventory-adjust-uom').disabled = false;
   $('inventory-adjust-qty').disabled = false;
+  $('inventory-adjust-condition').disabled = false;
   $('inventory-adjust-qty').min = '1';
   shipperContext.classList.add('hidden');
   noteWrap.classList.add('hidden');
   help.classList.add('hidden');
   noteInput.value = '';
+  noteInput.disabled = false;
+
+  if (conditionOnlyMode) {
+    ['inventory-adjust-sku','inventory-adjust-location','inventory-adjust-container','inventory-adjust-expiry','inventory-adjust-uom','inventory-adjust-qty'].forEach((id) => { $(id).disabled = true; });
+    help.innerHTML = '<strong>ON HOLD condition update only:</strong> the lot is protected from quantity/location/SKU/expiry/unit changes, but Supervisor/Admin/Owner may update its Condition remark. Unfreeze the held inventory before making any other correction.';
+    help.classList.remove('hidden');
+  }
 
   if (isShipperLot) {
     const { data: box, error: boxError } = await supabase.from('shipper_boxes').select('id,box_no,status,shipper_sku_id,location_id,container_no,putaway_transaction_id').eq('id', row.shipper_box_id).single();
@@ -4014,8 +4058,10 @@ async function openInventoryLotEdit(lotId) {
       Original transaction: ${escapeHtml(txRes.data?.tx_no || '—')} · ${txRes.data?.created_at ? escapeHtml(fmtDateTime(txRes.data.created_at)) : '—'}`;
     shipperContext.classList.remove('hidden');
     noteWrap.classList.remove('hidden');
-    help.classList.remove('hidden');
+    if (!conditionOnlyMode) help.classList.remove('hidden');
     noteInput.value = txRes.data?.note || '';
+    if (conditionOnlyMode) noteInput.disabled = true;
+    else noteInput.disabled = false;
 
     // Physical Shipper identities have fixed stock units. HEADER CASE qty/expiry are
     // derived from the box contents; CONTENT rows are PACK-level only.
@@ -4052,6 +4098,8 @@ async function submitInventoryLotEdit(event) {
       ? 'Shipper PACK quantity must be a whole number of 0 or greater.'
       : 'Adjusted CASE, PACK, and PIECE quantities must be positive whole numbers.', 'error');
   }
+  const condition = conditionText($('inventory-adjust-condition').value);
+  if (condition.length > 500) return toast('Condition is limited to 500 characters.', 'error');
   const reason = $('inventory-adjust-reason').value.trim();
   if (!reason) return toast('Enter the reason for this inventory adjustment.', 'error');
 
@@ -4067,6 +4115,7 @@ async function submitInventoryLotEdit(event) {
       p_container_no: $('inventory-adjust-container').value.trim(),
       p_expiry_date: $('inventory-adjust-expiry').value || row.expiry_date,
       p_qty: qty,
+      p_condition_note: condition || null,
       p_putaway_note: $('inventory-adjust-putaway-note').value.trim() || null,
       p_reason: reason
     }));
@@ -4079,6 +4128,7 @@ async function submitInventoryLotEdit(event) {
       p_expiry_date: $('inventory-adjust-expiry').value,
       p_uom: $('inventory-adjust-uom').value,
       p_qty: qty,
+      p_condition_note: condition || null,
       p_reason: reason
     }));
   }
