@@ -300,6 +300,7 @@ function setupStaticEvents() {
   $('inventory-search').addEventListener('change', renderInventory); // Scanner writes the barcode then dispatches change.
   $('inventory-filter').addEventListener('input', renderInventory);
   $('sku-master-search').addEventListener('input', renderSkuMaster);
+  $('sku-master-search').addEventListener('change', renderSkuMaster); // Scanner writes the barcode then dispatches change.
   $('sku-health-search').addEventListener('input', renderSkuHealth);
   $('sku-health-filter').addEventListener('change', renderSkuHealth);
   $('container-search').addEventListener('input', renderContainers);

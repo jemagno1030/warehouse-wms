@@ -318,7 +318,7 @@
             <div><h3>SKU Masterlist</h3><p>Permanent STANDARD and SHIPPER SKU details used by Put-away barcode lookup. Supervisors can view; Admin and Owner can edit.</p></div>
             <button class="secondary export-btn" data-export="skumaster">Export CSV</button>
           </div>
-          <div class="filters"><input id="sku-master-search" placeholder="Search brand, description, variant, size, barcode, or creator..." /></div>
+          <div class="filters"><div class="scan-field"><input id="sku-master-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search brand, description, variant, size, barcode, or creator..." /><button type="button" class="scan-btn" data-scan-target="sku-master-search" data-scan-kind="barcode" title="Scan CASE, PACK, or PIECE barcode">Scan</button></div></div>
           <div class="info-box"><strong>Access:</strong> Supervisor = view only · Admin / Owner = view, edit, and archive/delete. Every change requires a reason and is written to Audit History. Archived SKUs keep their historical identity; if an original archived barcode is encountered again in Put-away, the system warns the user and Admin/Owner can reactivate that same original SKU record.</div>
           <p id="sku-master-count" class="small-note">0 SKU record(s) shown</p>
           <div id="sku-master-table" class="table-wrap"></div>
@@ -718,6 +718,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260814-recovery-second-filter-editable-remarks-2"></script>
+  <script type="module" src="app.js?v=20260814-sku-master-scan-1"></script>
 </body>
 </html>
