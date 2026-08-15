@@ -299,12 +299,15 @@ function setupStaticEvents() {
   $('inventory-search').addEventListener('input', renderInventory);
   $('inventory-search').addEventListener('change', renderInventory); // Scanner writes the barcode then dispatches change.
   $('inventory-filter').addEventListener('input', renderInventory);
+  $('inventory-search-exact-rack').addEventListener('click', () => toggleExactRackSearch('inventory-search-exact-rack', renderInventory));
+  $('inventory-filter-exact-rack').addEventListener('click', () => toggleExactRackSearch('inventory-filter-exact-rack', renderInventory));
   $('sku-master-search').addEventListener('input', renderSkuMaster);
   $('sku-master-search').addEventListener('change', renderSkuMaster); // Scanner writes the barcode then dispatches change.
   $('sku-health-search').addEventListener('input', renderSkuHealth);
   $('sku-health-filter').addEventListener('change', renderSkuHealth);
   $('container-search').addEventListener('input', renderContainers);
   $('history-search').addEventListener('input', renderHistory);
+  $('history-exact-rack').addEventListener('click', () => toggleExactRackSearch('history-exact-rack', renderHistory));
   $('history-type').addEventListener('change', renderHistory);
   $('nonfefo-search').addEventListener('input', renderNonFefoCompliance);
   $('nonfefo-from').addEventListener('change', renderNonFefoCompliance);
@@ -3973,6 +3976,27 @@ function inventoryLotActions(row) {
   return `<td><button class="link-btn" data-inventory-edit="${lotId}">Edit</button> ${remarks}${isAdminOrOwner() ? ` <button class="link-btn" data-inventory-delete="${lotId}">Delete</button>${freeze}` : '<br><small>Delete / Freeze: Admin / Owner only</small>'}</td>`;
 }
 
+function exactRackSearchEnabled(buttonId) {
+  return $(buttonId)?.getAttribute('aria-pressed') === 'true';
+}
+
+function exactRackLocationMatches(locationCode, searchValue) {
+  const wanted = normalizeLocation(searchValue);
+  if (!wanted) return true;
+  return normalizeLocation(locationCode || '') === wanted;
+}
+
+function toggleExactRackSearch(buttonId, renderFn) {
+  const button = $(buttonId);
+  if (!button) return;
+  const active = !exactRackSearchEnabled(buttonId);
+  button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  button.textContent = active ? 'Exact rack ✓' : 'Exact rack';
+  button.classList.toggle('primary', active);
+  button.classList.toggle('secondary', !active);
+  renderFn();
+}
+
 function inventorySearchText(r) {
   // IMPORTANT: This is the exact field set used by the original Inventory search.
   // Filter 2 deliberately reuses the same text so it only narrows Search 1 results.
@@ -3990,11 +4014,22 @@ function inventorySearchText(r) {
 function renderInventory() {
   const term = $('inventory-search').value.trim().toLowerCase();
   const filterTerm = $('inventory-filter').value.trim().toLowerCase();
+  const search1ExactRack = exactRackSearchEnabled('inventory-search-exact-rack');
+  const filter2ExactRack = exactRackSearchEnabled('inventory-filter-exact-rack');
 
-  // Search 1 remains the primary Inventory search. Filter 2 only narrows its result.
-  const primaryRows = state.data.inventory.filter((r) => inventorySearchText(r).includes(term));
+  // Search 1 remains the primary Inventory search. Exact rack affects Search 1 only when its toggle is ON.
+  const primaryRows = state.data.inventory.filter((r) => {
+    if (!term) return true;
+    return search1ExactRack
+      ? exactRackLocationMatches(r.location_code, term)
+      : inventorySearchText(r).includes(term);
+  });
+
+  // Filter 2 still narrows Search 1. Its Exact rack toggle is independent from Search 1.
   const rows = filterTerm
-    ? primaryRows.filter((r) => inventorySearchText(r).includes(filterTerm))
+    ? primaryRows.filter((r) => filter2ExactRack
+      ? exactRackLocationMatches(r.location_code, filterTerm)
+      : inventorySearchText(r).includes(filterTerm))
     : primaryRows;
 
   const grouped = new Map();
@@ -5183,9 +5218,13 @@ async function loadHistory(force = false) {
 function renderHistory() {
   const term = $('history-search').value.trim().toLowerCase();
   const type = $('history-type').value;
+  const exactRack = exactRackSearchEnabled('history-exact-rack');
   const rows = state.data.history.filter((r) => {
     const haystack = [r.tx_no, r.created_by_username, r.sales_order, r.sku_name, r.container_no, r.location_code, r.transaction_note, r.override_reason, r.edit_reason, r.line_note, r.shipper_box_no, r.shipper_status, r.shipper_action].join(' ').toLowerCase();
-    return (!type || r.transaction_type === type) && haystack.includes(term);
+    const searchMatches = !term || (exactRack
+      ? exactRackLocationMatches(r.location_code, term)
+      : haystack.includes(term));
+    return (!type || r.transaction_type === type) && searchMatches;
   });
   const firstLineByTx = new Set();
   $('history-table').innerHTML = rows.length ? `<table><thead><tr><th>Transaction</th><th>Action</th><th>User / time</th><th>SO</th><th>Location</th><th>SKU / container</th><th>Qty</th><th>Remarks</th><th>Flags</th><th></th></tr></thead><tbody>${rows.map((r) => {
