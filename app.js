@@ -101,7 +101,9 @@ const state = {
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
   transfer: freshOperationState(),
-  data: { inventory: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], locations: [], rackMap: [] },
+  data: { inventory: [], stockCard: [], stockCardExport: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], locations: [], rackMap: [] },
+  stockCardMeta: null,
+  stockCardCandidates: [],
   selectedQrLocations: new Set(),
   accountAccessTimer: null,
   warehouseApproval: null
@@ -138,6 +140,7 @@ const screenMeta = {
   picking: ['Picking', 'FEFO-guided picking by source location'],
   transfer: ['Stock transfer', 'Move stock lots between rack locations'],
   inventory: ['Inventory', 'Stock by SKU, container, expiry, and location'],
+  stockcard: ['SKU Balance Stock Card', 'Read-only SKU movement ledger, rack movements, and running balances'],
   skumaster: ['SKU Masterlist', 'Permanent SKU details and registered CASE / PACK / PIECE barcodes'],
   skuhealth: ['SKU Master Data Health', 'Admin/Owner duplicate, split-barcode, incomplete, and archived SKU review'],
   containers: ['Containers', 'Container consumption and remaining contents'],
@@ -301,6 +304,14 @@ function setupStaticEvents() {
   $('inventory-filter').addEventListener('input', renderInventory);
   $('inventory-search-exact-rack').addEventListener('click', () => toggleExactRackSearch('inventory-search-exact-rack', renderInventory));
   $('inventory-filter-exact-rack').addEventListener('click', () => toggleExactRackSearch('inventory-filter-exact-rack', renderInventory));
+
+  $('stock-card-search-form').addEventListener('submit', findStockCardSkus);
+  $('stock-card-search').addEventListener('change', findStockCardSkus); // Scanner writes the barcode then dispatches change.
+  $('stock-card-load-btn').addEventListener('click', () => loadStockCard(true));
+  $('stock-card-clear-btn').addEventListener('click', clearStockCard);
+  $('stock-card-uom').addEventListener('change', renderStockCard);
+  $('stock-card-movement').addEventListener('change', renderStockCard);
+
   $('sku-master-search').addEventListener('input', renderSkuMaster);
   $('sku-master-search').addEventListener('change', renderSkuMaster); // Scanner writes the barcode then dispatches change.
   $('sku-health-search').addEventListener('input', renderSkuHealth);
@@ -693,6 +704,9 @@ async function refreshCurrentScreen() {
       case 'inventory':
         await loadInventory(true);
         break;
+      case 'stockcard':
+        if ($('stock-card-sku')?.value) await loadStockCard(true);
+        break;
       case 'skumaster':
         await loadSkuMaster(true);
         break;
@@ -746,6 +760,7 @@ async function loadScreen(name, force = false) {
     if (name === 'dashboard') await loadDashboard();
     if (name === 'picking') await refreshPickSalesOrderStatus();
     if (name === 'inventory') await loadInventory(force);
+    if (name === 'stockcard') await loadStockCard(force);
     if (name === 'skumaster') await loadSkuMaster(force);
     if (name === 'skuhealth') await loadSkuHealth(force);
     if (name === 'containers') await loadContainers(force);
@@ -949,6 +964,9 @@ function uniqueBy(rows, keyFn) {
 
 function invalidateReports() {
   state.data.inventory = [];
+  state.data.stockCard = [];
+  state.data.stockCardExport = [];
+  state.stockCardMeta = null;
   state.data.skuMaster = [];
   state.data.skuHealth = [];
   state.data.containers = [];
@@ -4401,6 +4419,249 @@ function buildSkuHealthGroups(rows) {
   });
 }
 
+
+function stockCardBalancesObject(value) {
+  const source = value || {};
+  return {
+    CASE: Number(source.CASE || source.case || 0),
+    PACK: Number(source.PACK || source.pack || 0),
+    PIECE: Number(source.PIECE || source.piece || 0)
+  };
+}
+
+function stockCardMovementGroup(eventType) {
+  const type = String(eventType || '').toUpperCase();
+  if (type.includes('PUT-AWAY')) return 'PUTAWAY';
+  if (type.includes('TRANSFER')) return 'TRANSFER';
+  if (type.includes('PICKING')) return 'PICK';
+  if (type.includes('SO 0')) return 'ADJUSTMENT';
+  if (type.includes('ADJUSTMENT') || type.includes('CORRECTION') || type.includes('DELETE')) return 'ADJUSTMENT';
+  return type;
+}
+
+function stockCardSkuLabel(row) {
+  const name = [row.brand, row.description, row.variant, row.size].filter(Boolean).join(' ');
+  const status = row.is_active === false ? 'ARCHIVED' : 'ACTIVE';
+  const balances = formatBalances({
+    CASE: row.current_case_qty,
+    PACK: row.current_pack_qty,
+    PIECE: row.current_piece_qty
+  });
+  return `${name} · ${row.sku_type || 'STANDARD'} · ${status} · ${balances}`;
+}
+
+async function findStockCardSkus(event) {
+  if (event?.preventDefault) event.preventDefault();
+
+  const term = $('stock-card-search').value.trim();
+  if (!term) {
+    state.stockCardCandidates = [];
+    $('stock-card-sku').innerHTML = '<option value="">Enter or scan a SKU / barcode first</option>';
+    return toast('Enter or scan a SKU / barcode first.', 'error');
+  }
+
+  const button = event?.submitter || $('stock-card-find-btn');
+  setBusy(button, true, 'Finding…');
+
+  const { data, error } = await supabase.rpc('stock_card_find_skus', { p_search: term });
+
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  state.stockCardCandidates = data || [];
+  state.data.stockCard = [];
+  state.data.stockCardExport = [];
+  state.stockCardMeta = null;
+  renderStockCard();
+  if (!state.stockCardCandidates.length) {
+    $('stock-card-sku').innerHTML = '<option value="">No matching SKU found</option>';
+    state.data.stockCard = [];
+    state.data.stockCardExport = [];
+    state.stockCardMeta = null;
+    renderStockCard();
+    return toast('No SKU matched that search or barcode.', 'warning');
+  }
+
+  $('stock-card-sku').innerHTML = '<option value="">Select the exact SKU</option>' +
+    state.stockCardCandidates.map((row) =>
+      `<option value="${escapeHtml(row.sku_id)}">${escapeHtml(stockCardSkuLabel(row))}</option>`
+    ).join('');
+
+  // Exact CASE/PACK/PIECE barcode matches are ranked first by the database.
+  // Auto-select only when the result is unambiguous.
+  if (state.stockCardCandidates.length === 1) {
+    $('stock-card-sku').value = state.stockCardCandidates[0].sku_id;
+  }
+
+  toast(`${state.stockCardCandidates.length.toLocaleString()} matching SKU record(s) found.`, 'success');
+}
+
+async function loadStockCard(force = false) {
+  const skuId = $('stock-card-sku')?.value || '';
+  if (!skuId) {
+    if (force) toast('Search/scan and select the exact SKU first.', 'error');
+    return renderStockCard();
+  }
+
+  if (!force && state.stockCardMeta?.sku?.sku_id === skuId) {
+    return renderStockCard();
+  }
+
+  const fromDate = $('stock-card-from').value || null;
+  const toDate = $('stock-card-to').value || null;
+  const rack = normalizeLocation($('stock-card-rack').value);
+
+  if (fromDate && toDate && toDate < fromDate) {
+    return toast('Stock Card end date cannot be earlier than the start date.', 'error');
+  }
+
+  const button = $('stock-card-load-btn');
+  setBusy(button, true, 'Loading…');
+
+  const { data, error } = await supabase.rpc('get_sku_balance_stock_card', {
+    p_sku_id: skuId,
+    p_from_date: fromDate,
+    p_to_date: toDate,
+    p_location_code: rack || null
+  });
+
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  state.stockCardMeta = data || null;
+  state.data.stockCard = Array.isArray(data?.events) ? data.events : [];
+  renderStockCard();
+}
+
+function clearStockCard() {
+  $('stock-card-search-form').reset();
+  $('stock-card-sku').innerHTML = '<option value="">Search or scan a SKU first</option>';
+  $('stock-card-uom').value = '';
+  $('stock-card-movement').value = '';
+  state.stockCardCandidates = [];
+  state.data.stockCard = [];
+  state.data.stockCardExport = [];
+  state.stockCardMeta = null;
+  renderStockCard();
+  $('stock-card-search').focus();
+}
+
+function renderStockCard() {
+  const meta = state.stockCardMeta;
+  const info = $('stock-card-selected-info');
+  const summary = $('stock-card-balance-summary');
+  const table = $('stock-card-table');
+  const count = $('stock-card-count');
+  const retention = $('stock-card-retention-note');
+
+  if (!meta?.sku) {
+    info.classList.add('hidden');
+    summary.classList.add('hidden');
+    retention.textContent = 'Search/scan a SKU and load its Stock Card.';
+    count.textContent = 'Select a SKU to load its stock card.';
+    table.innerHTML = emptyState('No Stock Card loaded.');
+    state.data.stockCardExport = [];
+    return;
+  }
+
+  const selectedUom = $('stock-card-uom').value;
+  const selectedMovement = $('stock-card-movement').value;
+  const allRows = state.data.stockCard || [];
+  const rows = allRows.filter((row) => {
+    const uomMatches = !selectedUom || row.uom === selectedUom;
+    const movementMatches = !selectedMovement || stockCardMovementGroup(row.event_type) === selectedMovement;
+    return uomMatches && movementMatches;
+  });
+
+  const sku = meta.sku;
+  const rackMode = meta.filters?.rack_code
+    ? `<strong>Exact rack mode:</strong> ${escapeHtml(meta.filters.rack_code)}`
+    : '<strong>Mode:</strong> Overall SKU balance across all rack locations';
+
+  info.innerHTML = `<strong>${escapeHtml(sku.sku_name)}</strong><br>
+    Type: ${escapeHtml(sku.sku_type || 'STANDARD')} ·
+    CASE: ${escapeHtml(sku.case_barcode || 'N/A')} ·
+    PACK: ${escapeHtml(sku.pack_barcode || 'N/A')} ·
+    PIECE: ${escapeHtml(sku.piece_barcode || 'N/A')}<br>${rackMode}`;
+  info.classList.remove('hidden');
+
+  const opening = stockCardBalancesObject(meta.opening_balances);
+  const closing = stockCardBalancesObject(meta.closing_balances);
+  const current = stockCardBalancesObject(meta.current_balances);
+
+  summary.innerHTML = `<strong>Balance reconciliation</strong><br>
+    Opening for selected period: <strong>${escapeHtml(formatBalances(opening))}</strong><br>
+    Closing for selected period: <strong>${escapeHtml(formatBalances(closing))}</strong><br>
+    Current live balance now: <strong>${escapeHtml(formatBalances(current))}</strong>`;
+  summary.classList.remove('hidden');
+
+  retention.textContent = meta.retention_note || '';
+
+  count.textContent = `${rows.length.toLocaleString()} of ${allRows.length.toLocaleString()} retained movement event(s) shown`;
+
+  state.data.stockCardExport = rows.map((row) => ({
+    event_at: row.event_at,
+    movement: row.event_type,
+    reference: row.reference_no,
+    sales_order: row.sales_order,
+    source_rack: row.source_location_code,
+    destination_rack: row.destination_location_code,
+    container: row.container_no,
+    expiry: row.expiry_date,
+    uom: row.uom,
+    movement_qty: row.movement_qty,
+    qty_in: row.qty_in,
+    qty_out: row.qty_out,
+    balance_after: row.running_balance,
+    user: row.username,
+    remarks: row.remarks,
+    flags: row.flags
+  }));
+
+  table.innerHTML = rows.length ? `<table>
+    <thead><tr>
+      <th>Date / time</th>
+      <th>Movement</th>
+      <th>Reference / SO</th>
+      <th>Rack movement</th>
+      <th>Container / expiry</th>
+      <th>UOM</th>
+      <th>Moved</th>
+      <th>IN</th>
+      <th>OUT</th>
+      <th>Balance</th>
+      <th>User</th>
+      <th>Remarks / flags</th>
+    </tr></thead>
+    <tbody>${rows.map((row) => {
+      const from = row.source_location_code || '';
+      const to = row.destination_location_code || '';
+      const rackText = from && to
+        ? (from === to ? escapeHtml(from) : `${escapeHtml(from)} → ${escapeHtml(to)}`)
+        : escapeHtml(from || to || '—');
+      const ref = [row.reference_no, row.sales_order ? `SO ${row.sales_order}` : ''].filter(Boolean).join(' · ') || '—';
+      const expiry = row.expiry_date ? fmtDate(row.expiry_date) : '—';
+      const notes = row.remarks
+        ? `${escapeHtml(row.remarks)}${row.flags ? `<br><small>${escapeHtml(row.flags)}</small>` : ''}`
+        : (row.flags ? `<small>${escapeHtml(row.flags)}</small>` : '');
+      return `<tr>
+        <td>${fmtDateTime(row.event_at)}</td>
+        <td><strong>${escapeHtml(row.event_type || 'Movement')}</strong></td>
+        <td>${escapeHtml(ref)}</td>
+        <td>${rackText}</td>
+        <td>${escapeHtml(row.container_no || '—')}<br><small>${expiry}</small></td>
+        <td><span class="pill">${escapeHtml(row.uom || '')}</span></td>
+        <td>${Number(row.movement_qty || 0) ? fmtQty(row.movement_qty) : '—'}</td>
+        <td>${Number(row.qty_in || 0) ? fmtQty(row.qty_in) : '—'}</td>
+        <td>${Number(row.qty_out || 0) ? fmtQty(row.qty_out) : '—'}</td>
+        <td><strong>${fmtQty(row.running_balance)}</strong></td>
+        <td>${escapeHtml(row.username || '—')}</td>
+        <td class="wrap">${notes || '—'}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>` : emptyState('No retained movements match the selected Stock Card filters.');
+}
+
 async function loadSkuHealth(force = false) {
   if (!isAdminOrOwner()) return;
   if (!force && state.data.skuHealth.length) return renderSkuHealth();
@@ -5690,6 +5951,10 @@ function exportDataset(name) {
   let rows = [];
   let filename = `${name}-${new Date().toISOString().slice(0, 10)}.csv`;
   if (name === 'inventory') rows = state.data.inventory;
+  if (name === 'stockcard') {
+    rows = state.data.stockCardExport;
+    filename = `sku-balance-stock-card-${new Date().toISOString().slice(0, 10)}.csv`;
+  }
   if (name === 'skumaster') rows = state.data.skuMaster;
   if (name === 'skuhealth') rows = state.data.skuHealth;
   if (name === 'containers') rows = state.data.containers;
@@ -5718,4 +5983,5 @@ renderOperationCart('pick');
 renderOperationCart('transfer');
 clearPickBarcodeMatch();
 renderPickSalesOrderSummary();
+renderStockCard();
 init();

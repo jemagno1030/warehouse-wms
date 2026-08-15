@@ -60,6 +60,7 @@
         <button data-screen="picking">Picking</button>
         <button data-screen="transfer">Stock transfer</button>
         <button data-screen="inventory">Inventory</button>
+        <button data-screen="stockcard">SKU Balance Stock Card</button>
         <button data-screen="skumaster" data-role-min="supervisor">SKU Masterlist</button>
         <button data-screen="skuhealth" data-role-min="admin">SKU Master Data Health</button>
         <button data-screen="containers">Containers</button>
@@ -309,6 +310,94 @@
           <h4>Detailed lots</h4>
           <div class="info-box"><strong>Detailed-Lot control:</strong> Supervisor / Admin / Owner may Edit eligible lots. Delete remains Admin / Owner only. <strong>Admin / Owner may also Freeze a lot (ON HOLD)</strong> so it cannot be released by Picking, Sales Order 0, barcode bypass, item-by-item Stock Transfer, or whole-rack transfer until it is explicitly Unfrozen. Hold and Unfreeze both require a reason and are recorded in Audit History.</div>
           <div id="inventory-table" class="table-wrap"></div>
+        </article>
+      </section>
+
+      <section id="screen-stockcard" class="screen">
+        <article class="card">
+          <div class="card-head">
+            <div>
+              <h3>SKU Balance Stock Card</h3>
+              <p>Read-only SKU movement ledger with current balance reconciliation and rack movement history.</p>
+            </div>
+            <button class="secondary export-btn" data-export="stockcard">Export CSV</button>
+          </div>
+
+          <div class="info-box">
+            <strong>Read-only reporting module.</strong>
+            Live Inventory remains the stock authority. This card combines retained warehouse transactions with stock-changing Detailed-Lot audit adjustments.
+            CASE, PACK, and PIECE balances remain separate. A Stock Transfer moves stock between racks but does not change the overall SKU balance.
+          </div>
+
+          <form id="stock-card-search-form" class="stack">
+            <div class="form-grid two">
+              <label>SKU / barcode search *
+                <div class="scan-field">
+                  <input id="stock-card-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Scan or type CASE / PACK / PIECE barcode, brand, description, variant, or size..." required />
+                  <button type="button" class="scan-btn" data-scan-target="stock-card-search" data-scan-kind="barcode" title="Scan CASE, PACK, or PIECE barcode">Scan</button>
+                  <button id="stock-card-find-btn" type="submit" class="secondary">Find SKU</button>
+                </div>
+              </label>
+
+              <label>Selected SKU *
+                <select id="stock-card-sku" required>
+                  <option value="">Search or scan a SKU first</option>
+                </select>
+              </label>
+
+              <label>Date from
+                <input id="stock-card-from" type="date" />
+              </label>
+
+              <label>Date to
+                <input id="stock-card-to" type="date" />
+              </label>
+
+              <label>Exact rack location (optional)
+                <div class="scan-field">
+                  <input id="stock-card-rack" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Example: F2" />
+                  <button type="button" class="scan-btn" data-scan-target="stock-card-rack" data-scan-kind="location" title="Scan exact rack QR">Scan</button>
+                </div>
+              </label>
+
+              <label>Display UOM
+                <select id="stock-card-uom">
+                  <option value="">All stock units</option>
+                  <option value="CASE">CASE</option>
+                  <option value="PACK">PACK</option>
+                  <option value="PIECE">PIECE</option>
+                </select>
+              </label>
+
+              <label>Movement filter
+                <select id="stock-card-movement">
+                  <option value="">All movements</option>
+                  <option value="PUTAWAY">Put-away</option>
+                  <option value="PICK">Picking</option>
+                  <option value="TRANSFER">Stock Transfer</option>
+                  <option value="ADJUSTMENT">Adjustments / corrections</option>
+                </select>
+              </label>
+            </div>
+
+            <p class="small-note"><strong>Display filters:</strong> UOM and Movement filter hide/show ledger rows only. Running balances still include all retained stock-changing movements inside the selected SKU / date / exact-rack scope.</p>
+            <div class="button-cluster">
+              <button id="stock-card-load-btn" type="button" class="primary">Load stock card</button>
+              <button id="stock-card-clear-btn" type="button" class="ghost">Clear</button>
+            </div>
+          </form>
+
+          <div id="stock-card-selected-info" class="info-box hidden"></div>
+          <div id="stock-card-balance-summary" class="info-box hidden"></div>
+          <p id="stock-card-retention-note" class="small-note"></p>
+
+          <div class="card-head compact">
+            <div>
+              <h3>Movement ledger</h3>
+              <p id="stock-card-count">Select a SKU to load its stock card.</p>
+            </div>
+          </div>
+          <div id="stock-card-table" class="table-wrap"></div>
         </article>
       </section>
 
@@ -719,6 +808,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260815-exact-rack-search-1"></script>
+  <script type="module" src="app.js?v=20260815-sku-balance-stock-card-1"></script>
 </body>
 </html>
