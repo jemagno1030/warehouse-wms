@@ -199,7 +199,7 @@ function setupStaticEvents() {
   $('signup-form').addEventListener('submit', signup);
   $('logout-btn').addEventListener('click', logout);
   $('menu-btn').addEventListener('click', () => $('sidebar').classList.toggle('open'));
-  $('refresh-btn').addEventListener('click', () => loadScreen(state.currentScreen, true));
+  $('refresh-btn').addEventListener('click', refreshCurrentScreen);
 
   qsa('#main-nav [data-screen]').forEach((btn) => btn.addEventListener('click', () => showScreen(btn.dataset.screen)));
   qsa('[data-jump]').forEach((btn) => btn.addEventListener('click', () => showScreen(btn.dataset.jump)));
@@ -642,6 +642,100 @@ function showScreen(name) {
   $('screen-subtitle').textContent = subtitle;
   $('sidebar').classList.remove('open');
   loadScreen(name);
+}
+
+async function refreshCurrentScreen() {
+  const button = $('refresh-btn');
+  const screen = state.currentScreen;
+
+  setBusy(button, true, 'Refreshing…');
+
+  try {
+    // Always refresh Administrative Pause / Operational state.
+    // Use a throwing refresh-specific query so the global button never reports
+    // success when this live-state refresh actually failed.
+    const { data: modeData, error: modeError } = await supabase
+      .from('app_settings')
+      .select('operational_mode')
+      .eq('id', 1)
+      .single();
+    if (modeError) throw modeError;
+    applyMode(modeData.operational_mode);
+
+    switch (screen) {
+      case 'dashboard':
+        await loadDashboard();
+        break;
+
+      case 'putaway':
+        // Put-away barcode lookups already query live data when used.
+        // Do not reset forms, pallet cart, Shipper contents, or remarks.
+        break;
+
+      case 'picking':
+        // Preserve SO, lock, queued cart, barcode/lot selection and remarks.
+        await refreshPickSalesOrderStatus();
+        if (state.pick.lockToken && state.pick.locationCode) {
+          await loadPickRackContents();
+        }
+        break;
+
+      case 'transfer':
+        // Preserve source lock, queued cart, destination, barcode/lot and remarks.
+        if (state.transfer.lockToken && state.transfer.locationCode) {
+          await loadTransferRackContents();
+        }
+        break;
+
+      case 'inventory':
+        await loadInventory(true);
+        break;
+      case 'skumaster':
+        await loadSkuMaster(true);
+        break;
+      case 'skuhealth':
+        await loadSkuHealth(true);
+        break;
+      case 'containers':
+        await loadContainers(true);
+        break;
+      case 'rackmap':
+        await loadRackMap(true);
+        break;
+      case 'expiry':
+        await loadExpiry(true);
+        break;
+      case 'nonfefo':
+        await loadNonFefoCompliance(true);
+        break;
+      case 'users':
+        await loadUsers(true);
+        break;
+      case 'systemmanager':
+        await loadSystemManager(true);
+        break;
+      case 'history':
+        await loadHistory(true);
+        break;
+      case 'locations':
+        await loadLocations(true);
+        break;
+
+      case 'control':
+        // loadSystemMode() above refreshes the live control state.
+        break;
+
+      default:
+        await loadScreen(screen, true);
+        break;
+    }
+
+    toast('Current page refreshed. Unsaved warehouse work was preserved.', 'success');
+  } catch (error) {
+    toast(`Refresh failed: ${friendlyError(error)}`, 'error');
+  } finally {
+    setBusy(button, false);
+  }
 }
 
 async function loadScreen(name, force = false) {
