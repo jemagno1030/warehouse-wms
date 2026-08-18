@@ -87,6 +87,9 @@ function freshPutawayState() {
   };
 }
 
+let stockCardSuggestionTimer = null;
+let stockCardSuggestionRequest = 0;
+
 const state = {
   session: null,
   profile: null,
@@ -154,6 +157,8 @@ const screenMeta = {
   control: ['System control', 'Discreet global operational control']
 };
 
+const VIEWER_SCREENS = new Set(['dashboard','inventory','stockcard','containers','rackmap','expiry']);
+
 function toast(message, type = '') {
   const node = document.createElement('div');
   node.className = `toast ${type}`;
@@ -177,6 +182,10 @@ function setBusy(button, busy, text = 'Working…') {
     button.textContent = button.dataset.originalText || button.textContent;
     button.disabled = false;
   }
+}
+
+function isViewer() {
+  return state.profile?.role === 'viewer';
 }
 
 function isSupervisor() {
@@ -306,7 +315,15 @@ function setupStaticEvents() {
   $('inventory-filter-exact-rack').addEventListener('click', () => toggleExactRackSearch('inventory-filter-exact-rack', renderInventory));
 
   $('stock-card-search-form').addEventListener('submit', findStockCardSkus);
+  $('stock-card-search').addEventListener('input', scheduleStockCardSuggestions);
   $('stock-card-search').addEventListener('change', findStockCardSkus); // Scanner writes the barcode then dispatches change.
+  $('stock-card-search').addEventListener('focus', () => {
+    if (state.stockCardCandidates.length && $('stock-card-search').value.trim().length >= 2) renderStockCardSuggestions();
+  });
+  $('stock-card-suggestions').addEventListener('click', handleStockCardSuggestionClick);
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest('#stock-card-search') && !event.target.closest('#stock-card-suggestions')) hideStockCardSuggestions();
+  });
   $('stock-card-load-btn').addEventListener('click', () => loadStockCard(true));
   $('stock-card-clear-btn').addEventListener('click', clearStockCard);
   $('stock-card-uom').addEventListener('change', renderStockCard);
@@ -511,16 +528,33 @@ async function handleSession(session) {
 function applyCurrentProfile(profile) {
   state.profile = profile;
   $('current-username').textContent = profile?.username || '—';
-  $('current-role').textContent = profile?.role || '—';
+  $('current-role').textContent = userRoleLabel(profile?.role || 'user');
+
   qsa('[data-role-min="supervisor"]').forEach((node) => node.classList.toggle('hidden', !isSupervisor()));
   qsa('[data-role-min="admin"]').forEach((node) => node.classList.toggle('hidden', !isAdminOrOwner()));
+
+  // Viewer navigation is deliberately limited to the six approved read-only modules.
+  qsa('#main-nav [data-screen]').forEach((node) => {
+    const target = node.dataset.screen;
+    let visible = true;
+    if (node.dataset.roleMin === 'supervisor') visible = isSupervisor();
+    if (node.dataset.roleMin === 'admin') visible = isAdminOrOwner();
+    if (target === 'control') visible = isOwner();
+    if (isViewer()) visible = VIEWER_SCREENS.has(target);
+    node.classList.toggle('hidden', !visible);
+  });
+
+  // Hide dashboard/report jump links that would lead Viewer into a disallowed module.
+  qsa('[data-jump]').forEach((node) => {
+    const target = node.dataset.jump;
+    node.classList.toggle('hidden', isViewer() && !VIEWER_SCREENS.has(target));
+  });
+
   const ownerFilterOption = $('users-role')?.querySelector('option[value="owner"]');
   if (ownerFilterOption) {
     ownerFilterOption.hidden = !isOwner();
     if (!isOwner() && $('users-role').value === 'owner') $('users-role').value = '';
   }
-  const controlNav = document.querySelector('#main-nav [data-screen="control"]');
-  if (controlNav) controlNav.classList.toggle('hidden', !isOwner());
 }
 
 async function refreshOwnAccountAccess() {
@@ -632,6 +666,7 @@ function saveCurrentScreen(name) {
 
 function canOpenScreen(name) {
   if (!name || !screenMeta[name] || !$(`screen-${name}`)) return false;
+  if (isViewer() && !VIEWER_SCREENS.has(name)) return false;
   if (name === 'locations' && !isSupervisor()) return false;
   if (name === 'skumaster' && !isSupervisor()) return false;
   if (name === 'nonfefo' && !isSupervisor()) return false;
@@ -642,9 +677,10 @@ function canOpenScreen(name) {
 
 function showScreen(name) {
   if (!canOpenScreen(name)) {
-    if ((name === 'locations' || name === 'skumaster' || name === 'nonfefo') && !isSupervisor()) toast('Supervisor access is required.', 'error');
-    if ((name === 'users' || name === 'systemmanager' || name === 'skuhealth') && !isAdminOrOwner()) toast('Admin or Owner access is required.', 'error');
-    if (name === 'control' && !isOwner()) toast('Owner access is required.', 'error');
+    if (isViewer() && !VIEWER_SCREENS.has(name)) toast('Viewer access is read-only and limited to Dashboard, Inventory, Containers, Rack Map, Expiry Alerts, and SKU Balance Stock Card.', 'error');
+    if ((name === 'locations' || name === 'skumaster' || name === 'nonfefo') && !isSupervisor() && !isViewer()) toast('Supervisor access is required.', 'error');
+    if ((name === 'users' || name === 'systemmanager' || name === 'skuhealth') && !isAdminOrOwner() && !isViewer()) toast('Admin or Owner access is required.', 'error');
+    if (name === 'control' && !isOwner() && !isViewer()) toast('Owner access is required.', 'error');
     name = 'dashboard';
   }
   state.currentScreen = name;
@@ -3465,6 +3501,14 @@ function updatePickSalesOrderControls() {
   const hasSo = Boolean($('pick-so').value.trim());
   const adjustmentMode = isStockAdjustmentSalesOrder($('pick-so').value);
 
+  const normalRemarksPanel = $('pick-normal-remarks-panel');
+  const normalRemarks = $('pick-remarks');
+  if (normalRemarksPanel && normalRemarks) {
+    normalRemarksPanel.classList.toggle('hidden', adjustmentMode);
+    normalRemarks.disabled = adjustmentMode || state.mode !== 'ACTIVE';
+    if (adjustmentMode) normalRemarks.value = '';
+  }
+
   const adjustmentRemarksPanel = $('pick-adjustment-remarks-panel');
   const adjustmentRemarks = $('pick-adjustment-remarks');
   if (adjustmentRemarksPanel && adjustmentRemarks) {
@@ -3653,6 +3697,7 @@ async function exitStockAdjustmentMode() {
     $('pick-lot').innerHTML = '<option value="">Scan a barcode first</option>';
     $('pick-qty').value = '';
     if ($('pick-adjustment-remarks')) $('pick-adjustment-remarks').value = '';
+    if ($('pick-remarks')) $('pick-remarks').value = '';
     $('pick-so-override').checked = false;
     $('pick-so-override-reason').value = '';
     $('pick-so-override-reason').disabled = true;
@@ -3702,6 +3747,7 @@ async function clearUnstartedPickingScreen(message) {
   $('pick-lot').innerHTML = '<option value="">Scan a barcode first</option>';
   $('pick-qty').value = '';
   if ($('pick-adjustment-remarks')) $('pick-adjustment-remarks').value = '';
+  if ($('pick-remarks')) $('pick-remarks').value = '';
   $('pick-so-override').checked = false;
   $('pick-so-override-reason').value = '';
   $('pick-so-override-reason').disabled = true;
@@ -3785,6 +3831,7 @@ async function cancelEntirePicking() {
   $('pick-lot').innerHTML = '<option value="">Scan a barcode first</option>';
   $('pick-qty').value = '';
   if ($('pick-adjustment-remarks')) $('pick-adjustment-remarks').value = '';
+  if ($('pick-remarks')) $('pick-remarks').value = '';
   $('pick-so-override').checked = false;
   $('pick-so-override-reason').value = '';
   $('pick-so-override-reason').disabled = true;
@@ -3825,6 +3872,7 @@ async function finishPickSalesOrder() {
   toast(`Sales order ${row?.result_sales_order || so} completed after ${Number(row?.pick_transaction_count || 0).toLocaleString()} rack pick(s).`, 'success');
   $('pick-so').value = '';
   $('pick-location').value = '';
+  if ($('pick-remarks')) $('pick-remarks').value = '';
   $('pick-so-override').checked = false;
   $('pick-so-override-reason').value = '';
   $('pick-so-override-reason').disabled = true;
@@ -3838,8 +3886,10 @@ async function completePicking() {
   if (!state.pick.cart.length) return toast('Add at least one item.', 'error');
   const so = $('pick-so').value.trim();
   const adjustmentMode = isStockAdjustmentSalesOrder(so);
+  const pickingRemarks = adjustmentMode ? '' : ($('pick-remarks')?.value || '').trim();
   const adjustmentRemarks = adjustmentMode ? ($('pick-adjustment-remarks')?.value || '').trim() : '';
 
+  if (pickingRemarks.length > 500) return toast('Picking remarks are limited to 500 characters.', 'error');
   if (adjustmentMode && !adjustmentRemarks) {
     return toast('Enter the Stock Adjustment reason / remarks before completing this rack.', 'error');
   }
@@ -3882,7 +3932,7 @@ async function completePicking() {
         p_items: items,
         p_allow_fefo_override: requiresOverride,
         p_override_reason: reason,
-        p_note: null
+        p_note: pickingRemarks || null
       };
 
   const { data, error } = await supabase.rpc(rpcName, rpcArgs);
@@ -3899,6 +3949,7 @@ async function completePicking() {
   resetOperation('pick');
   $('pick-so').value = so;
   if (adjustmentMode && $('pick-adjustment-remarks')) $('pick-adjustment-remarks').value = '';
+  if (!adjustmentMode && $('pick-remarks')) $('pick-remarks').value = '';
   await refreshPickSalesOrderStatus();
 }
 
@@ -4450,51 +4501,108 @@ function stockCardSkuLabel(row) {
   return `${name} · ${row.sku_type || 'STANDARD'} · ${status} · ${balances}`;
 }
 
+function scheduleStockCardSuggestions() {
+  clearTimeout(stockCardSuggestionTimer);
+  const term = $('stock-card-search').value.trim();
+  if (term.length < 2) {
+    stockCardSuggestionRequest += 1;
+    state.stockCardCandidates = [];
+    $('stock-card-sku').innerHTML = '<option value="">Search or scan a SKU first</option>';
+    hideStockCardSuggestions();
+    return;
+  }
+  stockCardSuggestionTimer = setTimeout(() => fetchStockCardCandidates(term, { live: true }), 250);
+}
+
+function hideStockCardSuggestions() {
+  const box = $('stock-card-suggestions');
+  if (!box) return;
+  box.classList.add('hidden');
+  $('stock-card-search')?.setAttribute('aria-expanded', 'false');
+}
+
+function stockCardSuggestionDetails(row) {
+  const balances = formatBalances({ CASE: row.current_case_qty, PACK: row.current_pack_qty, PIECE: row.current_piece_qty });
+  return [
+    `${row.sku_type || 'STANDARD'} · ${row.is_active === false ? 'ARCHIVED' : 'ACTIVE'}`,
+    `CASE ${row.case_barcode || 'N/A'}`, `PACK ${row.pack_barcode || 'N/A'}`, `PIECE ${row.piece_barcode || 'N/A'}`,
+    `Current: ${balances}`
+  ].join(' · ');
+}
+
+function renderStockCardSuggestions() {
+  const box = $('stock-card-suggestions');
+  if (!box) return;
+  const candidates = state.stockCardCandidates || [];
+  if (!candidates.length) {
+    box.innerHTML = '<div class="stock-card-suggestion-empty">No matching SKU found.</div>';
+    box.classList.remove('hidden');
+    $('stock-card-search').setAttribute('aria-expanded', 'true');
+    return;
+  }
+  const visible = candidates.slice(0, 15);
+  box.innerHTML = visible.map((row) => `
+    <button type="button" class="stock-card-suggestion" role="option" data-stock-card-sku-id="${escapeHtml(row.sku_id)}">
+      <strong>${escapeHtml([row.brand,row.description,row.variant,row.size].filter(Boolean).join(' '))}</strong>
+      <span class="stock-card-suggestion-meta">${escapeHtml(stockCardSuggestionDetails(row))}</span>
+    </button>`).join('') + (candidates.length > visible.length
+      ? `<div class="stock-card-suggestion-empty">${(candidates.length-visible.length).toLocaleString()} more match(es). Continue typing to narrow the list.</div>` : '');
+  box.classList.remove('hidden');
+  $('stock-card-search').setAttribute('aria-expanded','true');
+}
+
+async function fetchStockCardCandidates(term, options = {}) {
+  const cleanTerm = String(term || '').trim();
+  if (!cleanTerm) return [];
+  const requestId = ++stockCardSuggestionRequest;
+  const { data, error } = await supabase.rpc('stock_card_find_skus', { p_search: cleanTerm });
+  if (requestId !== stockCardSuggestionRequest) return null;
+  if (error) {
+    if (!options.live) toast(friendlyError(error), 'error');
+    hideStockCardSuggestions();
+    return null;
+  }
+  state.stockCardCandidates = data || [];
+  $('stock-card-sku').innerHTML = state.stockCardCandidates.length
+    ? '<option value="">Select the exact SKU</option>' + state.stockCardCandidates.map((row) =>
+      `<option value="${escapeHtml(row.sku_id)}">${escapeHtml(stockCardSkuLabel(row))}</option>`).join('')
+    : '<option value="">No matching SKU found</option>';
+  if (options.live) renderStockCardSuggestions();
+  return state.stockCardCandidates;
+}
+
 async function findStockCardSkus(event) {
   if (event?.preventDefault) event.preventDefault();
-
+  clearTimeout(stockCardSuggestionTimer);
   const term = $('stock-card-search').value.trim();
   if (!term) {
     state.stockCardCandidates = [];
     $('stock-card-sku').innerHTML = '<option value="">Enter or scan a SKU / barcode first</option>';
+    hideStockCardSuggestions();
     return toast('Enter or scan a SKU / barcode first.', 'error');
   }
-
   const button = event?.submitter || $('stock-card-find-btn');
   setBusy(button, true, 'Finding…');
-
-  const { data, error } = await supabase.rpc('stock_card_find_skus', { p_search: term });
-
+  const candidates = await fetchStockCardCandidates(term, { live: true });
   setBusy(button, false);
-  if (error) return toast(friendlyError(error), 'error');
-
-  state.stockCardCandidates = data || [];
-  state.data.stockCard = [];
-  state.data.stockCardExport = [];
-  state.stockCardMeta = null;
-  renderStockCard();
-  if (!state.stockCardCandidates.length) {
-    $('stock-card-sku').innerHTML = '<option value="">No matching SKU found</option>';
-    state.data.stockCard = [];
-    state.data.stockCardExport = [];
-    state.stockCardMeta = null;
-    renderStockCard();
-    return toast('No SKU matched that search or barcode.', 'warning');
-  }
-
-  $('stock-card-sku').innerHTML = '<option value="">Select the exact SKU</option>' +
-    state.stockCardCandidates.map((row) =>
-      `<option value="${escapeHtml(row.sku_id)}">${escapeHtml(stockCardSkuLabel(row))}</option>`
-    ).join('');
-
-  // Exact CASE/PACK/PIECE barcode matches are ranked first by the database.
-  // Auto-select only when the result is unambiguous.
-  if (state.stockCardCandidates.length === 1) {
-    $('stock-card-sku').value = state.stockCardCandidates[0].sku_id;
-  }
-
-  toast(`${state.stockCardCandidates.length.toLocaleString()} matching SKU record(s) found.`, 'success');
+  if (candidates === null) return;
+  if (!candidates.length) return toast('No SKU matched that search or barcode.', 'warning');
+  if (candidates.length === 1) $('stock-card-sku').value = candidates[0].sku_id;
+  toast(`${candidates.length.toLocaleString()} matching SKU record(s) found. Select the exact SKU from the suggestions.`, 'success');
 }
+
+async function handleStockCardSuggestionClick(event) {
+  const button = event.target.closest('[data-stock-card-sku-id]');
+  if (!button) return;
+  const skuId = button.dataset.stockCardSkuId;
+  const row = state.stockCardCandidates.find((candidate) => candidate.sku_id === skuId);
+  if (!row) return;
+  $('stock-card-sku').value = skuId;
+  $('stock-card-search').value = [row.brand,row.description,row.variant,row.size].filter(Boolean).join(' ');
+  hideStockCardSuggestions();
+  await loadStockCard(true);
+}
+
 
 async function loadStockCard(force = false) {
   const skuId = $('stock-card-sku')?.value || '';
@@ -4538,7 +4646,10 @@ function clearStockCard() {
   $('stock-card-sku').innerHTML = '<option value="">Search or scan a SKU first</option>';
   $('stock-card-uom').value = '';
   $('stock-card-movement').value = '';
+  clearTimeout(stockCardSuggestionTimer);
+  stockCardSuggestionRequest += 1;
   state.stockCardCandidates = [];
+  hideStockCardSuggestions();
   state.data.stockCard = [];
   state.data.stockCardExport = [];
   state.stockCardMeta = null;
@@ -5128,7 +5239,7 @@ async function loadUsers(force = false) {
 }
 
 function userRoleRank(role) {
-  return ({ owner: 4, admin: 3, supervisor: 2, user: 1 })[String(role || '').toLowerCase()] || 0;
+  return ({ owner: 5, admin: 4, supervisor: 3, user: 2, viewer: 1 })[String(role || '').toLowerCase()] || 0;
 }
 
 function userRoleLabel(role) {
@@ -5154,7 +5265,7 @@ function renderUsers() {
   const all = state.data.users;
   const active = all.filter((row) => row.is_active).length;
   const inactive = all.length - active;
-  const roleCounts = ['owner','admin','supervisor','user']
+  const roleCounts = ['owner','admin','supervisor','user','viewer']
     .map((role) => [role, all.filter((row) => row.role === role).length])
     .filter(([, count]) => count > 0)
     .map(([role, count]) => `${userRoleLabel(role)} ${count}`)
@@ -5202,8 +5313,8 @@ function openUserRoleDialog(userId) {
   $('user-role-target-info').innerHTML = `<strong>${escapeHtml(row.username)}</strong> · ${escapeHtml(row.email || '—')}<br>Current role: <strong>${escapeHtml(userRoleLabel(row.role))}</strong> · Status: <strong>${row.is_active ? 'Active' : 'Kicked out'}</strong>`;
 
   const allowedRoles = isOwner()
-    ? ['user','supervisor','admin','owner']
-    : ['user','supervisor','admin'];
+    ? ['viewer','user','supervisor','admin','owner']
+    : ['viewer','user','supervisor','admin'];
   const currentAllowed = allowedRoles.includes(row.role);
   $('user-role-select').innerHTML = `${currentAllowed ? '' : '<option value="" selected disabled>Choose demotion role</option>'}${allowedRoles.map((role) =>
     `<option value="${role}" ${row.role === role ? 'selected' : ''}>${escapeHtml(userRoleLabel(role))}</option>`
@@ -5242,7 +5353,10 @@ async function submitUserRoleChange(event) {
     return toast('Enter the Owner-promotion password.', 'error');
   }
 
-  if (!window.confirm(`Change ${row.username} from ${userRoleLabel(row.role)} to ${userRoleLabel(newRole)}?`)) return;
+  const viewerWarning = newRole === 'viewer'
+    ? '\n\nVIEWER is read-only. Before continuing, make sure this employee has finished/cancelled any unsaved Put-away/Picking/Transfer work on their device. The database will refuse the change if they still own an active rack lock or OPEN Sales Order.'
+    : '';
+  if (!window.confirm(`Change ${row.username} from ${userRoleLabel(row.role)} to ${userRoleLabel(newRole)}?${viewerWarning}`)) return;
 
   const button = event.submitter;
   setBusy(button, true, 'Saving…');

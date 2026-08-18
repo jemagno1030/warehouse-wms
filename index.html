@@ -13,6 +13,35 @@
     .dot.low-volume { background: #0b84a5; }
     .rack-cell.low-volume { border-left-color: #0b84a5; background: #eef9fc; }
   </style>
+
+  <style>
+    .stock-card-suggestions {
+      margin-top: 0.45rem; max-height: 320px; overflow-y: auto;
+      border: 1px solid #d7dee7; border-radius: 10px; background: #fff;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.08);
+    }
+    .stock-card-suggestion {
+      display:block; width:100%; padding:.7rem .8rem; border:0;
+      border-bottom:1px solid #edf0f4; border-radius:0; background:#fff;
+      color:inherit; text-align:left; cursor:pointer;
+    }
+    .stock-card-suggestion:last-child { border-bottom:0; }
+    .stock-card-suggestion:hover,.stock-card-suggestion:focus { background:#f3f7fb; outline:none; }
+    .stock-card-suggestion strong { display:block; margin-bottom:.2rem; }
+    .stock-card-suggestion-meta { display:block; font-size:.82rem; line-height:1.35; color:#5c6773; white-space:normal; }
+    .stock-card-suggestion-empty { padding:.75rem .8rem; color:#687480; font-size:.88rem; }
+
+    /* Legacy styles.css hides every top-bar .ghost button below 780px.
+       Restore only the global Refresh button on mobile. */
+    @media (max-width: 780px) {
+      #refresh-btn.ghost {
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+        white-space:nowrap;
+      }
+    }
+  </style>
 </head>
 <body>
   <div id="toast-root" aria-live="polite"></div>
@@ -234,6 +263,11 @@
           <div id="pick-qty-note" class="info-box hidden"></div>
           <div id="pick-so-status" class="info-box"><strong>Sales order status:</strong> enter a sales order number. A completed Sales Order requires Supervisor/Admin/Owner login-password approval before reuse.</div>
           <div class="info-box"><strong>Warehouse Stock Adjustment:</strong> use Sales Order <strong>0</strong> when stock must be converted/reclassified physically. Example: OUT 1 damaged/incomplete CASE under SO 0, then Put-away the remaining usable PIECES. SO 0 is reusable indefinitely; normal Sales Order rules are unchanged.</div>
+          <div id="pick-normal-remarks-panel" class="info-box">
+            <strong>Picking remarks</strong>
+            <p class="small-note">Optional, maximum 500 characters. Saved with this completed rack PICK transaction and searchable in Transaction History. A fresh remark is entered for each completed rack.</p>
+            <label>Remarks<textarea id="pick-remarks" maxlength="500" placeholder="Example: Customer requested partial release; load with route 3"></textarea></label>
+          </div>
           <div id="pick-adjustment-remarks-panel" class="warning-box hidden">
             <strong>Stock adjustment reason / remarks *</strong>
             <p class="small-note">Required for every completed Sales Order 0 rack adjustment. State why the stock adjustment is necessary. The remark is saved with the PICK transaction and is searchable in Transaction History.</p>
@@ -333,10 +367,12 @@
             <div class="form-grid two">
               <label>SKU / barcode search *
                 <div class="scan-field">
-                  <input id="stock-card-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Scan or type CASE / PACK / PIECE barcode, brand, description, variant, or size..." required />
+                  <input id="stock-card-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-autocomplete="list" aria-controls="stock-card-suggestions" aria-expanded="false" placeholder="Scan or type CASE / PACK / PIECE barcode, brand, description, variant, or size..." required />
                   <button type="button" class="scan-btn" data-scan-target="stock-card-search" data-scan-kind="barcode" title="Scan CASE, PACK, or PIECE barcode">Scan</button>
                   <button id="stock-card-find-btn" type="submit" class="secondary">Find SKU</button>
                 </div>
+                <div id="stock-card-suggestions" class="stock-card-suggestions hidden" role="listbox" aria-label="Matching SKUs"></div>
+                <small>Suggestions appear while typing. Click the exact SKU you want to load.</small>
               </label>
 
               <label>Selected SKU *
@@ -507,11 +543,11 @@
           <div class="card-head">
             <div><h3>Registered Users</h3><p>Manage WMS roles and account access. Admin sees non-owner accounts only; Owner sees every registered account.</p></div>
           </div>
-          <div class="info-box"><strong>Authority:</strong> Admin can assign User, Supervisor, or Admin roles and can demote/kick out any non-owner account. Owner can assign User, Supervisor, Admin, or Owner and can manage every other account. Only Owner can promote someone to Owner, and the Owner-promotion password is required.</div>
+          <div class="info-box"><strong>Authority:</strong> Admin can assign Viewer, User, Supervisor, or Admin roles and can demote/kick out any non-owner account. Owner can assign Viewer, User, Supervisor, Admin, or Owner and can manage every other account. <strong>Viewer is read-only</strong> and can access only Dashboard, Inventory, Containers, Rack Map, Expiry Alerts, and SKU Balance Stock Card. Only Owner can promote someone to Owner, and the Owner-promotion password is required.</div>
           <div id="users-kpis" class="kpi-grid" style="margin-top:16px"></div>
           <div class="filters grid">
             <input id="users-search" placeholder="Search username, email, role, or status..." />
-            <select id="users-role"><option value="">All visible roles</option><option value="owner">Owner</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option><option value="user">User</option></select>
+            <select id="users-role"><option value="">All visible roles</option><option value="owner">Owner</option><option value="admin">Admin</option><option value="supervisor">Supervisor</option><option value="user">User</option><option value="viewer">Viewer</option></select>
             <select id="users-status"><option value="">All statuses</option><option value="ACTIVE">Active</option><option value="INACTIVE">Kicked out</option></select>
           </div>
           <p id="users-count" class="small-note">0 registered users</p>
@@ -808,6 +844,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260815-sku-balance-stock-card-1"></script>
+  <script type="module" src="app.js?v=20260818-pick-remarks-mobile-refresh-viewer-1"></script>
 </body>
 </html>
