@@ -47,6 +47,9 @@
     .physical-count-preview th,
     .physical-count-preview td {
       vertical-align: top;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .physical-count-preview .physical-count-remarks-col,
     .physical-count-preview td.physical-count-remarks-cell {
@@ -164,7 +167,13 @@
         border: 1px solid #000;
         padding: 2.2mm 1.5mm;
         vertical-align: top;
-        overflow-wrap: anywhere;
+        box-sizing: border-box;
+        white-space: normal !important;
+        overflow: hidden;
+        overflow-wrap: anywhere !important;
+        word-break: break-word;
+        line-height: 1.18;
+        height: auto !important;
       }
 
       #print-area.physical-count-print th {
@@ -179,14 +188,26 @@
         min-height: 8mm;
       }
 
-      #print-area.physical-count-print .pc-rack { width: 7%; }
-      #print-area.physical-count-print .pc-sku { width: 25%; }
-      #print-area.physical-count-print .pc-size { width: 7%; }
+      #print-area.physical-count-print .pc-rack { width: 6%; }
+      #print-area.physical-count-print .pc-sku {
+        width: 30%;
+        white-space: normal !important;
+        overflow: hidden !important;
+        overflow-wrap: anywhere !important;
+        word-break: break-word !important;
+        hyphens: auto;
+      }
+      #print-area.physical-count-print .pc-size { width: 8%; }
       #print-area.physical-count-print .pc-uom { width: 6%; }
       #print-area.physical-count-print .pc-qty { width: 7%; text-align: right; }
       #print-area.physical-count-print .pc-expiry { width: 9%; }
-      #print-area.physical-count-print .pc-container { width: 12%; }
-      #print-area.physical-count-print .pc-remarks { width: 27%; min-height: 11mm; }
+      #print-area.physical-count-print .pc-container {
+        width: 8%;
+        white-space: nowrap !important;
+        overflow: hidden;
+        text-overflow: clip;
+      }
+      #print-area.physical-count-print .pc-remarks { width: 26%; min-height: 11mm; }
 
       #print-area.physical-count-print .physical-count-print-footer {
         margin-top: 4mm;
@@ -1120,6 +1141,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260820-physical-count-sort-toggle-1"></script>
+  <script type="module" src="app.js?v=20260820-physical-count-print-wrap-fix-1"></script>
 </body>
 </html>
