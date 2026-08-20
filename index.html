@@ -604,7 +604,43 @@
           <div class="filters grid"><div class="scan-field"><input id="history-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search transaction, user, SO, SKU, rack, remarks..." /><button type="button" id="history-exact-rack" class="secondary" aria-pressed="false" title="Exact rack location: when ON, Transaction Search matches only the exact rack code typed in the search field.">Exact rack</button></div><select id="history-type"><option value="">All actions</option><option>PUTAWAY</option><option>PICK</option><option>TRANSFER</option><option>PICK_CANCEL</option><option>TRANSFER_CANCEL</option><option>ADMIN_PAUSE</option><option>ADMIN_RESUME</option></select></div>
           <p class="small-note">For an exact rack transaction search, type the rack code (example: F2), then turn <strong>Exact rack</strong> ON. The normal transaction search remains unchanged while it is OFF.</p>
           <div id="history-table" class="table-wrap"></div>
-          <div class="card-head audit-head"><div><h3>System audit events</h3><p>Before/after records plus stored Put-away / Stock Transfer remarks when available</p></div><button class="secondary export-btn" data-export="audit">Export audit CSV</button></div>
+          <div class="card-head audit-head"><div><h3>System audit events</h3><p>Up to the last 90 calendar days of retained audit events, with detailed report filters</p></div><button class="secondary export-btn" data-export="audit">Export filtered audit CSV</button></div>
+
+          <div class="form-grid two">
+            <label>Action
+              <select id="audit-action-filter">
+                <option value="">All actions</option>
+              </select>
+            </label>
+            <label>User
+              <input id="audit-user-filter" autocomplete="off" placeholder="Username / actor..." />
+            </label>
+            <label>Remarks
+              <input id="audit-remarks-filter" autocomplete="off" placeholder="Stored remarks / notes..." />
+            </label>
+            <label>Reason
+              <input id="audit-reason-filter" autocomplete="off" placeholder="Approval / edit / audit reason..." />
+            </label>
+            <label>Sales Order number
+              <input id="audit-so-filter" autocomplete="off" placeholder="Example: 12345 or 0" />
+            </label>
+            <label>Container number
+              <input id="audit-container-filter" autocomplete="off" placeholder="Example: 2025-76" />
+            </label>
+            <label>Rack number (exact)
+              <input id="audit-rack-filter" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Example: F2" />
+            </label>
+            <label>Coverage date from
+              <input id="audit-date-from" type="date" />
+            </label>
+            <label>Coverage date to
+              <input id="audit-date-to" type="date" />
+            </label>
+          </div>
+          <div class="button-cluster">
+            <button id="audit-clear-filters" type="button" class="ghost">Clear audit filters</button>
+          </div>
+          <p id="audit-history-count" class="small-note">Audit events will load when History opens.</p>
           <div id="audit-history-table" class="table-wrap"></div>
         </article>
       </section>
@@ -844,6 +880,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260820-picking-container-priority-1"></script>
+  <script type="module" src="app.js?v=20260820-audit-history-90-day-filters-1"></script>
 </body>
 </html>

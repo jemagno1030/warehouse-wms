@@ -197,7 +197,7 @@ const state = {
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
   transfer: freshOperationState(),
-  data: { inventory: [], stockCard: [], stockCardExport: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], locations: [], rackMap: [] },
+  data: { inventory: [], stockCard: [], stockCardExport: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], auditFiltered: [], locations: [], rackMap: [] },
   stockCardMeta: null,
   stockCardCandidates: [],
   selectedQrLocations: new Set(),
@@ -430,6 +430,12 @@ function setupStaticEvents() {
   $('history-search').addEventListener('input', renderHistory);
   $('history-exact-rack').addEventListener('click', () => toggleExactRackSearch('history-exact-rack', renderHistory));
   $('history-type').addEventListener('change', renderHistory);
+
+  ['audit-user-filter','audit-remarks-filter','audit-reason-filter','audit-so-filter','audit-container-filter','audit-rack-filter']
+    .forEach((id) => $(id).addEventListener('input', renderAuditHistory));
+  ['audit-action-filter','audit-date-from','audit-date-to']
+    .forEach((id) => $(id).addEventListener('change', renderAuditHistory));
+  $('audit-clear-filters').addEventListener('click', clearAuditHistoryFilters);
   $('nonfefo-search').addEventListener('input', renderNonFefoCompliance);
   $('nonfefo-from').addEventListener('change', renderNonFefoCompliance);
   $('nonfefo-to').addEventListener('change', renderNonFefoCompliance);
@@ -1103,6 +1109,7 @@ function invalidateReports() {
   state.data.nonFefo = [];
   state.data.history = [];
   state.data.audit = [];
+  state.data.auditFiltered = [];
   state.data.rackMap = [];
 }
 
@@ -2548,6 +2555,7 @@ async function acquireStockAdjustmentPickLock(location) {
 
   state.data.rackMap = [];
   state.data.audit = [];
+  state.data.auditFiltered = [];
 
   startHeartbeat(opState);
   configureOperationUi('pick', true);
@@ -2590,6 +2598,7 @@ async function acquireOperationLock(operation, location, type, salesOrder, optio
   opState.lockToken = data[0].lock_token;
   state.data.rackMap = [];
   state.data.audit = [];
+  state.data.auditFiltered = [];
   opState.locationCode = data[0].location_code;
   startHeartbeat(opState);
   configureOperationUi(operation, true);
@@ -5495,6 +5504,7 @@ async function submitUserRoleChange(event) {
   $('user-owner-password').value = '';
   state.data.users = [];
   state.data.audit = [];
+  state.data.auditFiltered = [];
   await loadUsers(true);
   toast(`${row.username} is now ${userRoleLabel(newRole)}.`, 'success');
 }
@@ -5520,6 +5530,7 @@ async function toggleManagedUserActive(userId) {
 
   state.data.users = [];
   state.data.audit = [];
+  state.data.auditFiltered = [];
   await loadUsers(true);
 
   const result = data?.[0] || {};
@@ -5686,6 +5697,7 @@ async function deleteSystemHistoryRange(event) {
   const result = data?.[0] || {};
   state.data.history = [];
   state.data.audit = [];
+  state.data.auditFiltered = [];
   state.data.nonFefo = [];
   // Container received/consumed figures are partly derived from retained history.
   state.data.containers = [];
@@ -5701,15 +5713,273 @@ async function deleteSystemHistoryRange(event) {
 }
 
 async function loadHistory(force = false) {
-  if (!force && state.data.history.length && state.data.audit.length) { renderHistory(); return renderAuditHistory(); }
-  const [historyRes, auditRes] = await Promise.all([
+  ensureAuditCoverageDefaults();
+
+  if (!force && state.data.history.length && state.data.audit.length) {
+    populateAuditActionFilter();
+    renderHistory();
+    return renderAuditHistory();
+  }
+
+  // Transaction History remains on its existing path.
+  // System Audit is loaded independently and paged so the old 2,000-row cap
+  // no longer prevents a complete retained 90-day report.
+  const [historyRes, auditRows] = await Promise.all([
     supabase.from('v_history_details').select('*').order('created_at', { ascending: false }).order('line_no').limit(10000),
-    supabase.from('v_audit_history').select('*').order('created_at', { ascending: false }).limit(2000)
+    loadAuditHistory90Days()
   ]);
-  if (historyRes.error || auditRes.error) throw historyRes.error || auditRes.error;
+
+  if (historyRes.error) throw historyRes.error;
+
   state.data.history = historyRes.data || [];
-  state.data.audit = auditRes.data || [];
+  state.data.audit = auditRows || [];
+  populateAuditActionFilter();
   renderHistory();
+  renderAuditHistory();
+}
+
+function auditCoverageBounds() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const earliest = new Date(today);
+  earliest.setDate(earliest.getDate() - 89); // today + previous 89 dates = 90 calendar days
+
+  const endExclusive = new Date(today);
+  endExclusive.setDate(endExclusive.getDate() + 1);
+
+  return {
+    minDate: localDateKey(earliest),
+    maxDate: localDateKey(today),
+    fromIso: earliest.toISOString(),
+    toIsoExclusive: endExclusive.toISOString()
+  };
+}
+
+function ensureAuditCoverageDefaults() {
+  const bounds = auditCoverageBounds();
+  const from = $('audit-date-from');
+  const to = $('audit-date-to');
+  if (!from || !to) return bounds;
+
+  from.min = bounds.minDate;
+  from.max = bounds.maxDate;
+  to.min = bounds.minDate;
+  to.max = bounds.maxDate;
+
+  if (!from.value || from.value < bounds.minDate || from.value > bounds.maxDate) {
+    from.value = bounds.minDate;
+  }
+  if (!to.value || to.value < bounds.minDate || to.value > bounds.maxDate) {
+    to.value = bounds.maxDate;
+  }
+  if (from.value > to.value) {
+    from.value = bounds.minDate;
+    to.value = bounds.maxDate;
+  }
+  return bounds;
+}
+
+async function loadAuditHistory90Days() {
+  const bounds = auditCoverageBounds();
+  const pageSize = 1000;
+  const rows = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from('v_audit_history')
+      .select('*')
+      .gte('created_at', bounds.fromIso)
+      .lt('created_at', bounds.toIsoExclusive)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(offset, offset + pageSize - 1);
+
+    if (error) throw error;
+
+    const page = data || [];
+    rows.push(...page);
+
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return rows;
+}
+
+function populateAuditActionFilter() {
+  const select = $('audit-action-filter');
+  if (!select) return;
+
+  const current = select.value;
+  const actions = [...new Set(
+    (state.data.audit || [])
+      .map((row) => String(row.action || '').trim())
+      .filter(Boolean)
+  )].sort((a, b) => a.localeCompare(b));
+
+  select.innerHTML = '<option value="">All actions</option>' +
+    actions.map((action) => `<option value="${escapeHtml(action)}">${escapeHtml(action)}</option>`).join('');
+
+  if (actions.includes(current)) select.value = current;
+}
+
+function collectAuditJsonValues(value, keyMatcher, output = []) {
+  if (value == null) return output;
+
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectAuditJsonValues(item, keyMatcher, output));
+    return output;
+  }
+
+  if (typeof value !== 'object') return output;
+
+  Object.entries(value).forEach(([key, child]) => {
+    const normalizedKey = String(key || '').toLowerCase();
+
+    if (keyMatcher(normalizedKey)) {
+      if (child == null) {
+        // nothing
+      } else if (typeof child === 'object') {
+        try { output.push(JSON.stringify(child)); } catch {}
+      } else {
+        output.push(String(child));
+      }
+    }
+
+    if (typeof child === 'object' && child !== null) {
+      collectAuditJsonValues(child, keyMatcher, output);
+    }
+  });
+
+  return output;
+}
+
+function auditJsonSources(row) {
+  return [row?.before_data || null, row?.after_data || null];
+}
+
+function auditValuesByMatcher(row, matcher) {
+  const values = [];
+  auditJsonSources(row).forEach((source) => collectAuditJsonValues(source, matcher, values));
+  return values;
+}
+
+function auditRemarkSearchText(row) {
+  const values = auditValuesByMatcher(row, (key) =>
+    key.includes('remark') ||
+    key === 'note' ||
+    key.endsWith('_note')
+  );
+  values.unshift(auditEventRemarks(row) || '');
+  return values.join(' ').toLowerCase();
+}
+
+function auditUserSearchText(row) {
+  const values = auditValuesByMatcher(row, (key) =>
+    key === 'username' ||
+    key.endsWith('_username') ||
+    key.includes('approved_by') ||
+    key.includes('changed_by')
+  );
+  values.unshift(row?.username || '');
+  return values.join(' ').toLowerCase();
+}
+
+function auditSalesOrderValues(row) {
+  const values = auditValuesByMatcher(row, (key) =>
+    key === 'sales_order' ||
+    key === 'order_number' ||
+    key === 'order_key' ||
+    key === 'salesorder'
+  );
+
+  if (String(row?.entity_type || '').toLowerCase() === 'sales_order' && row?.entity_id) {
+    values.push(String(row.entity_id));
+  }
+  return values;
+}
+
+function auditContainerValues(row) {
+  return auditValuesByMatcher(row, (key) =>
+    key === 'container_no' ||
+    key === 'container_number' ||
+    key === 'container'
+  );
+}
+
+function auditRackValues(row) {
+  return auditValuesByMatcher(row, (key) =>
+    key === 'location_code' ||
+    key === 'source_location_code' ||
+    key === 'destination_location_code' ||
+    key === 'rack_code' ||
+    key === 'rack'
+  );
+}
+
+function auditDateKey(value) {
+  return localDateKey(value);
+}
+
+function filteredAuditHistoryRows() {
+  ensureAuditCoverageDefaults();
+
+  const action = $('audit-action-filter').value;
+  const user = $('audit-user-filter').value.trim().toLowerCase();
+  const remarks = $('audit-remarks-filter').value.trim().toLowerCase();
+  const reason = $('audit-reason-filter').value.trim().toLowerCase();
+  const so = $('audit-so-filter').value.trim().toLowerCase();
+  const container = $('audit-container-filter').value.trim().toLowerCase();
+  const rack = normalizeLocation($('audit-rack-filter').value);
+  const fromDate = $('audit-date-from').value;
+  const toDate = $('audit-date-to').value;
+
+  return (state.data.audit || []).filter((row) => {
+    const dateKey = auditDateKey(row.created_at);
+    if (fromDate && dateKey && dateKey < fromDate) return false;
+    if (toDate && dateKey && dateKey > toDate) return false;
+
+    if (action && row.action !== action) return false;
+    if (user && !auditUserSearchText(row).includes(user)) return false;
+    if (remarks && !auditRemarkSearchText(row).includes(remarks)) return false;
+    if (reason && !String(row.reason || '').toLowerCase().includes(reason)) return false;
+
+    if (so) {
+      const values = auditSalesOrderValues(row).map((value) => String(value).toLowerCase());
+      if (!values.some((value) => value.includes(so))) return false;
+    }
+
+    if (container) {
+      const values = auditContainerValues(row).map((value) => String(value).toLowerCase());
+      if (!values.some((value) => value.includes(container))) return false;
+    }
+
+    if (rack) {
+      const values = auditRackValues(row)
+        .map((value) => normalizeLocation(value))
+        .filter(Boolean);
+      if (!values.includes(rack)) return false;
+    }
+
+    return true;
+  });
+}
+
+function clearAuditHistoryFilters() {
+  const bounds = ensureAuditCoverageDefaults();
+
+  $('audit-action-filter').value = '';
+  $('audit-user-filter').value = '';
+  $('audit-remarks-filter').value = '';
+  $('audit-reason-filter').value = '';
+  $('audit-so-filter').value = '';
+  $('audit-container-filter').value = '';
+  $('audit-rack-filter').value = '';
+  $('audit-date-from').value = bounds.minDate;
+  $('audit-date-to').value = bounds.maxDate;
+
   renderAuditHistory();
 }
 
@@ -5755,10 +6025,20 @@ function auditEventRemarks(row) {
 }
 
 function renderAuditHistory() {
-  const rows = state.data.audit;
+  const rows = filteredAuditHistoryRows();
+  state.data.auditFiltered = rows;
+
+  const bounds = ensureAuditCoverageDefaults();
+  const loaded = state.data.audit.length;
+  const fromDate = $('audit-date-from').value || bounds.minDate;
+  const toDate = $('audit-date-to').value || bounds.maxDate;
+
+  $('audit-history-count').innerHTML =
+    `Showing <strong>${rows.length.toLocaleString()}</strong> of <strong>${loaded.toLocaleString()}</strong> retained audit event(s) loaded for the last 90 calendar days · Coverage filter: <strong>${escapeHtml(fromDate)}</strong> to <strong>${escapeHtml(toDate)}</strong>.`;
+
   $('audit-history-table').innerHTML = rows.length ? `<table><thead><tr><th>Time</th><th>Action</th><th>User</th><th>Entity</th><th>Remarks</th><th>Reason</th><th>Stored details</th></tr></thead><tbody>${rows.map((r) => `<tr>
     <td>${fmtDateTime(r.created_at)}</td><td>${escapeHtml(r.action)}</td><td>${escapeHtml(r.username || '—')}</td><td>${escapeHtml(r.entity_type)} ${escapeHtml(r.entity_id || '')}</td><td class="wrap">${escapeHtml(auditEventRemarks(r) || '—')}</td><td class="wrap">${escapeHtml(r.reason || '—')}</td>
-    <td class="wrap"><details><summary>View JSON</summary><pre>${escapeHtml(JSON.stringify({ before: r.before_data, after: r.after_data }, null, 2))}</pre></details></td></tr>`).join('')}</tbody></table>` : emptyState('No audit events yet.');
+    <td class="wrap"><details><summary>View JSON</summary><pre>${escapeHtml(JSON.stringify({ before: r.before_data, after: r.after_data }, null, 2))}</pre></details></td></tr>`).join('')}</tbody></table>` : emptyState('No System audit events match the selected filters.');
 }
 
 async function openSupervisorEdit(transactionId) {
@@ -5877,6 +6157,7 @@ async function addLocation(event) {
   state.data.locations = [];
   state.data.rackMap = [];
   state.data.audit = [];
+  state.data.auditFiltered = [];
   toast('Location added.', 'success');
   await loadLocations(true);
 }
@@ -5998,6 +6279,7 @@ async function applyAdministrativeCode() {
   applyMode(row.new_mode);
   state.data.history = [];
   state.data.audit = [];
+  state.data.auditFiltered = [];
   $('control-result').textContent = `${row.new_mode === 'ACTIVE' ? 'Operations resumed' : 'Administrative Pause activated'} · ${row.transaction_no}`;
   $('control-result').classList.remove('hidden');
   toast('Global system mode changed across connected devices.', 'success');
@@ -6198,7 +6480,10 @@ function exportDataset(name) {
   if (name === 'expiry') rows = state.data.expiry;
   if (name === 'nonfefo') rows = state.data.nonFefo;
   if (name === 'history') rows = state.data.history;
-  if (name === 'audit') rows = state.data.audit;
+  if (name === 'audit') {
+    rows = state.data.auditFiltered;
+    filename = `system-audit-filtered-${new Date().toISOString().slice(0, 10)}.csv`;
+  }
   if (!rows.length) return toast('Load the report first; there is no data to export.', 'error');
   const columns = Object.keys(rows[0]);
   const csv = [columns.join(','), ...rows.map((r) => columns.map((c) => csvCell(r[c])).join(','))].join('\n');
