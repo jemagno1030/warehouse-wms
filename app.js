@@ -202,7 +202,8 @@ const state = {
   stockCardCandidates: [],
   selectedQrLocations: new Set(),
   accountAccessTimer: null,
-  warehouseApproval: null
+  warehouseApproval: null,
+  containerReport: { containerNo: null, rows: [], mode: 'rack' }
 };
 
 function freshOperationState() {
@@ -504,6 +505,10 @@ function setupStaticEvents() {
     if (removeShipperContent) removeShipperContentLine(Number(removeShipperContent.dataset.removeShipperContent));
     const detail = event.target.closest('[data-container-detail]');
     if (detail) showContainerDetail(detail.dataset.containerDetail);
+    const containerReportMode = event.target.closest('[data-container-report-mode]');
+    if (containerReportMode) setContainerReportMode(containerReportMode.dataset.containerReportMode);
+    const containerReportPrint = event.target.closest('[data-container-report-print]');
+    if (containerReportPrint) printContainerDetailReport();
     const edit = event.target.closest('[data-edit-transaction]');
     if (edit) openSupervisorEdit(edit.dataset.editTransaction);
     const inventoryEdit = event.target.closest('[data-inventory-edit]');
@@ -5683,13 +5688,278 @@ async function deleteConsumedContainer(containerNo) {
   toast(`Container ${containerNo} removed from the Containers list. Historical references were preserved.`, 'success');
 }
 
+function containerReportSkuCompare(a, b) {
+  const fields = ['brand', 'description', 'variant', 'size'];
+  for (const field of fields) {
+    const result = String(a?.[field] || '').localeCompare(String(b?.[field] || ''), undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    });
+    if (result) return result;
+  }
+
+  const expiryCompare = String(a?.expiry_date || '').localeCompare(String(b?.expiry_date || ''));
+  if (expiryCompare) return expiryCompare;
+
+  return String(a?.uom || '').localeCompare(String(b?.uom || ''), undefined, {
+    sensitivity: 'base'
+  });
+}
+
+function containerReportRackRows() {
+  return [...(state.containerReport.rows || [])].sort((a, b) => {
+    const rackCompare = comparePhysicalCountRackCodes(a.location_code, b.location_code);
+    if (rackCompare) return rackCompare;
+
+    const skuCompare = containerReportSkuCompare(a, b);
+    if (skuCompare) return skuCompare;
+
+    const shipperCompare = String(a.shipper_box_no || '').localeCompare(String(b.shipper_box_no || ''), undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    });
+    if (shipperCompare) return shipperCompare;
+
+    return String(a.lot_id || '').localeCompare(String(b.lot_id || ''));
+  });
+}
+
+function containerReportSkuTotalRows() {
+  const grouped = new Map();
+
+  (state.containerReport.rows || []).forEach((row) => {
+    // User rule: rack detail is disregarded in SKU-total mode.
+    // UOM and expiry remain part of the identity so unlike stock is never mixed.
+    const key = [
+      row.sku_id || '',
+      String(row.uom || '').toUpperCase(),
+      row.expiry_date || ''
+    ].join('|');
+
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.qty += Number(row.qty || 0);
+      return;
+    }
+
+    grouped.set(key, {
+      sku_id: row.sku_id || '',
+      brand: row.brand || '',
+      description: row.description || '',
+      variant: row.variant || '',
+      size: row.size || '',
+      sku_name: row.sku_name || [row.brand, row.description, row.variant, row.size].filter(Boolean).join(' '),
+      uom: String(row.uom || '').toUpperCase(),
+      qty: Number(row.qty || 0),
+      expiry_date: row.expiry_date || null
+    });
+  });
+
+  return [...grouped.values()]
+    .filter((row) => Number(row.qty || 0) > 0)
+    .sort(containerReportSkuCompare);
+}
+
+function containerReportModeLabel(mode = state.containerReport.mode) {
+  return mode === 'sku' ? 'By SKU Total' : 'By Rack';
+}
+
+function containerReportShipperText(row) {
+  if (!row?.shipper_box_no) return '—';
+  const role = String(row.shipper_lot_role || '').trim();
+  return role ? `${row.shipper_box_no} (${role})` : row.shipper_box_no;
+}
+
+function renderContainerDetailReport() {
+  const panel = $('container-detail');
+  if (!panel) return;
+
+  const containerNo = state.containerReport.containerNo;
+  const mode = state.containerReport.mode === 'sku' ? 'sku' : 'rack';
+  const rows = mode === 'sku'
+    ? containerReportSkuTotalRows()
+    : containerReportRackRows();
+
+  const controls = `
+    <div class="container-report-toolbar">
+      <div class="container-report-mode-toggle" role="group" aria-label="Container report mode">
+        <button type="button"
+          class="secondary container-report-mode-btn ${mode === 'rack' ? 'active' : ''}"
+          data-container-report-mode="rack"
+          aria-pressed="${mode === 'rack' ? 'true' : 'false'}">By Rack</button>
+        <button type="button"
+          class="secondary container-report-mode-btn ${mode === 'sku' ? 'active' : ''}"
+          data-container-report-mode="sku"
+          aria-pressed="${mode === 'sku' ? 'true' : 'false'}">By SKU Total</button>
+      </div>
+      <button type="button" class="primary" data-container-report-print ${rows.length ? '' : 'disabled'}>
+        Print / Save PDF
+      </button>
+    </div>
+    <p class="small-note">
+      ${mode === 'rack'
+        ? 'Natural rack order: A1, A2, A3 … A9, A10, A11 …; then SKU.'
+        : 'Same SKU + expiry + UOM is totaled across racks. Rack and Shipper-box detail are intentionally disregarded.'}
+    </p>`;
+
+  let table = '';
+
+  if (!rows.length) {
+    table = emptyState('This container has no remaining stock. It has been fully consumed or never received.');
+  } else if (mode === 'sku') {
+    table = `<div class="table-wrap"><table class="container-report-preview"><thead><tr>
+      <th>SKU — Brand / Description / Variant</th><th>Size</th><th>UOM</th><th>Expiry</th><th>Total Qty</th>
+    </tr></thead><tbody>${rows.map((r) => `<tr>
+      <td class="wrap">${escapeHtml(physicalCountSkuDisplay(r) || r.sku_name || '—')}</td>
+      <td>${escapeHtml(r.size || '—')}</td>
+      <td>${escapeHtml(r.uom || '—')}</td>
+      <td>${isNoExpiryDate(r.expiry_date) ? 'N/A' : fmtDate(r.expiry_date)}</td>
+      <td><strong>${fmtQty(r.qty)}</strong></td>
+    </tr>`).join('')}</tbody></table></div>`;
+  } else {
+    table = `<div class="table-wrap"><table class="container-report-preview"><thead><tr>
+      <th>Rack #</th><th>SKU — Brand / Description / Variant</th><th>Size</th><th>UOM</th><th>Qty</th><th>Expiry</th><th>Shipper Box</th>
+    </tr></thead><tbody>${rows.map((r) => `<tr>
+      <td><strong>${escapeHtml(r.location_code || '—')}</strong></td>
+      <td class="wrap">${escapeHtml(physicalCountSkuDisplay(r) || r.sku_name || '—')}</td>
+      <td>${escapeHtml(r.size || '—')}</td>
+      <td>${escapeHtml(String(r.uom || '').toUpperCase() || '—')}</td>
+      <td>${fmtQty(r.qty)}</td>
+      <td>${isNoExpiryDate(r.expiry_date) ? 'N/A' : fmtDate(r.expiry_date)}</td>
+      <td>${escapeHtml(containerReportShipperText(r))}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+  }
+
+  panel.innerHTML = `
+    <div class="card-head container-detail-head">
+      <div>
+        <h3>Container ${escapeHtml(containerNo || '—')}</h3>
+        <p>Current remaining contents · ${escapeHtml(containerReportModeLabel(mode))}</p>
+      </div>
+    </div>
+    ${controls}
+    ${table}`;
+}
+
+function setContainerReportMode(mode) {
+  if (!state.containerReport.containerNo) return;
+  if (!['rack', 'sku'].includes(mode)) return;
+
+  state.containerReport.mode = mode;
+  renderContainerDetailReport();
+}
+
+function printContainerDetailReport() {
+  const containerNo = state.containerReport.containerNo;
+  if (!containerNo) return toast('Open a container Details report first.', 'error');
+
+  const mode = state.containerReport.mode === 'sku' ? 'sku' : 'rack';
+  const rows = mode === 'sku'
+    ? containerReportSkuTotalRows()
+    : containerReportRackRows();
+
+  if (!rows.length) {
+    return toast('This container has no remaining stock to print.', 'error');
+  }
+
+  const printArea = document.createElement('section');
+  printArea.id = 'print-area';
+  printArea.className = 'container-detail-print';
+
+  const generatedAt = new Date().toLocaleString();
+
+  const table = mode === 'sku'
+    ? `<table>
+        <thead><tr>
+          <th class="cr-sku">SKU — Brand / Description / Variant</th>
+          <th class="cr-size">Size</th>
+          <th class="cr-uom">UOM</th>
+          <th class="cr-expiry">Expiry</th>
+          <th class="cr-qty">Total Qty</th>
+        </tr></thead>
+        <tbody>${rows.map((r) => `<tr>
+          <td class="cr-sku">${escapeHtml(physicalCountSkuDisplay(r) || r.sku_name || '—')}</td>
+          <td class="cr-size">${escapeHtml(r.size || '—')}</td>
+          <td class="cr-uom">${escapeHtml(r.uom || '—')}</td>
+          <td class="cr-expiry">${isNoExpiryDate(r.expiry_date) ? 'N/A' : fmtDate(r.expiry_date)}</td>
+          <td class="cr-qty">${fmtQty(r.qty)}</td>
+        </tr>`).join('')}</tbody>
+      </table>`
+    : `<table>
+        <thead><tr>
+          <th class="cr-rack">Rack #</th>
+          <th class="cr-sku">SKU — Brand / Description / Variant</th>
+          <th class="cr-size">Size</th>
+          <th class="cr-uom">UOM</th>
+          <th class="cr-qty">Qty</th>
+          <th class="cr-expiry">Expiry</th>
+          <th class="cr-shipper">Shipper Box</th>
+        </tr></thead>
+        <tbody>${rows.map((r) => `<tr>
+          <td class="cr-rack"><strong>${escapeHtml(r.location_code || '—')}</strong></td>
+          <td class="cr-sku">${escapeHtml(physicalCountSkuDisplay(r) || r.sku_name || '—')}</td>
+          <td class="cr-size">${escapeHtml(r.size || '—')}</td>
+          <td class="cr-uom">${escapeHtml(String(r.uom || '').toUpperCase() || '—')}</td>
+          <td class="cr-qty">${fmtQty(r.qty)}</td>
+          <td class="cr-expiry">${isNoExpiryDate(r.expiry_date) ? 'N/A' : fmtDate(r.expiry_date)}</td>
+          <td class="cr-shipper">${escapeHtml(containerReportShipperText(r))}</td>
+        </tr>`).join('')}</tbody>
+      </table>`;
+
+  printArea.innerHTML = `
+    <div class="container-report-print-header">
+      <h1>IFTC WAREHOUSE LOCATOR SYSTEM (JPM)</h1>
+      <p class="container-report-print-subtitle">CONTAINER CONTENT REPORT</p>
+      <div class="container-report-print-meta">
+        <div><strong>Container #:</strong> ${escapeHtml(containerNo)}</div>
+        <div><strong>Report mode:</strong> ${escapeHtml(containerReportModeLabel(mode))}</div>
+        <div><strong>Generated:</strong> ${escapeHtml(generatedAt)}</div>
+        <div><strong>Report lines:</strong> ${rows.length.toLocaleString()}</div>
+      </div>
+    </div>
+    ${table}
+    <div class="container-report-print-footer">
+      <strong>Read-only current-stock report.</strong>
+      ${mode === 'sku'
+        ? 'Quantities are totaled by SKU + expiry + UOM across all racks in this container.'
+        : 'Rows are arranged in natural rack order, then by SKU.'}
+    </div>`;
+
+  document.body.appendChild(printArea);
+
+  try {
+    window.print();
+  } finally {
+    setTimeout(() => printArea.remove(), 1000);
+  }
+}
+
 async function showContainerDetail(containerNo) {
   const panel = $('container-detail');
   panel.classList.remove('hidden');
   panel.innerHTML = '<div class="empty-state">Loading container details…</div>';
-  const { data, error } = await supabase.from('v_inventory_details').select('*').eq('container_no', containerNo).order('location_sort_order', { ascending: true, nullsFirst: false }).order('location_code').order('expiry_date');
-  if (error) return panel.innerHTML = `<div class="warning-box">${escapeHtml(friendlyError(error))}</div>`;
-  panel.innerHTML = `<div class="card-head"><div><h3>Container ${escapeHtml(containerNo)}</h3><p>All remaining contents and locations</p></div></div>${data?.length ? `<table><thead><tr><th>SKU</th><th>Shipper box</th><th>Location</th><th>Expiry</th><th>Quantity</th></tr></thead><tbody>${data.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.location_code)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td></tr>`).join('')}</tbody></table>` : emptyState('This container has no remaining stock. It has been fully consumed or never received.')}`;
+
+  const { data, error } = await supabase
+    .from('v_inventory_details')
+    .select('*')
+    .eq('container_no', containerNo)
+    .order('location_sort_order', { ascending: true, nullsFirst: false })
+    .order('location_code')
+    .order('expiry_date');
+
+  if (error) {
+    state.containerReport = { containerNo: null, rows: [], mode: 'rack' };
+    panel.innerHTML = `<div class="warning-box">${escapeHtml(friendlyError(error))}</div>`;
+    return;
+  }
+
+  state.containerReport = {
+    containerNo,
+    rows: data || [],
+    mode: 'rack'
+  };
+
+  renderContainerDetailReport();
 }
 
 async function loadRackMap(force = false) {
