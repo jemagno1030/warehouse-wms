@@ -57,6 +57,40 @@
       height: 46px;
     }
 
+    .physical-count-sort-panel {
+      margin-top: 14px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .physical-count-sort-toggle {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .physical-count-sort-btn {
+      min-width: 104px;
+    }
+
+    .physical-count-sort-btn.active,
+    .physical-count-sort-btn[aria-pressed="true"] {
+      font-weight: 800;
+      box-shadow: inset 0 0 0 2px currentColor;
+    }
+
+    @media (max-width: 780px) {
+      .physical-count-sort-toggle {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .physical-count-sort-btn {
+        width: 100%;
+        min-width: 0;
+      }
+    }
+
     @media print {
       @page {
         size: A4 landscape;
@@ -508,6 +542,21 @@
               </div>
               <small>Blank = all racks. Supports exact racks, comma-separated racks, and ranges such as A1-A10.</small>
             </label>
+          </div>
+
+          <div class="physical-count-sort-panel">
+            <strong>Sort order</strong>
+            <div id="physical-count-sort-toggle" class="physical-count-sort-toggle" role="group" aria-label="Physical Count sort order">
+              <button type="button" class="secondary physical-count-sort-btn active" data-physical-count-sort="auto" aria-pressed="true">Auto</button>
+              <button type="button" class="secondary physical-count-sort-btn" data-physical-count-sort="alpha" aria-pressed="false">Alphabetical</button>
+              <button type="button" class="secondary physical-count-sort-btn" data-physical-count-sort="container" aria-pressed="false">Container</button>
+              <button type="button" class="secondary physical-count-sort-btn" data-physical-count-sort="rack" aria-pressed="false">Rack</button>
+              <button type="button" class="secondary physical-count-sort-btn" data-physical-count-sort="rack-container" aria-pressed="false">Rack + Container</button>
+            </div>
+            <small>
+              Auto preserves the current rule: Rack filter = rack order; otherwise alphabetical.
+              Rack + Container sorts by rack first, then container within each rack.
+            </small>
           </div>
 
           <div class="button-cluster">
@@ -1071,6 +1120,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260820-physical-count-1"></script>
+  <script type="module" src="app.js?v=20260820-physical-count-sort-toggle-1"></script>
 </body>
 </html>

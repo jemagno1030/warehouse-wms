@@ -413,6 +413,7 @@ function setupStaticEvents() {
       $(id).addEventListener('input', renderPhysicalCount);
       $(id).addEventListener('change', renderPhysicalCount);
     });
+  $('physical-count-sort-toggle').addEventListener('click', handlePhysicalCountSortToggle);
   $('physical-count-clear-btn').addEventListener('click', clearPhysicalCountFilters);
   $('physical-count-print-btn').addEventListener('click', printPhysicalCount);
 
@@ -4190,6 +4191,78 @@ function comparePhysicalCountRackCodes(a, b) {
   return aCode.localeCompare(bCode, undefined, { numeric: true });
 }
 
+function parsePhysicalCountContainer(value) {
+  const text = String(value || '').trim();
+  const match = text.match(/^(\d{4})-(\d{2,3})$/);
+
+  if (!match) {
+    return {
+      text,
+      structured: false,
+      year: null,
+      batch: null
+    };
+  }
+
+  return {
+    text,
+    structured: true,
+    year: Number(match[1]),
+    batch: Number(match[2])
+  };
+}
+
+function comparePhysicalCountContainers(a, b) {
+  const ap = parsePhysicalCountContainer(a);
+  const bp = parsePhysicalCountContainer(b);
+
+  // Recognized shipment container numbers sort chronologically/numerically.
+  if (ap.structured && bp.structured) {
+    if (ap.year !== bp.year) return ap.year - bp.year;
+    if (ap.batch !== bp.batch) return ap.batch - bp.batch;
+    return ap.text.localeCompare(bp.text, undefined, { numeric: true, sensitivity: 'base' });
+  }
+
+  // Keep valid shipment containers together and predictable, then naturally
+  // sort any legacy/nonstandard container labels rather than discarding them.
+  if (ap.structured && !bp.structured) return -1;
+  if (!ap.structured && bp.structured) return 1;
+
+  return ap.text.localeCompare(bp.text, undefined, {
+    numeric: true,
+    sensitivity: 'base'
+  });
+}
+
+function getPhysicalCountSortMode() {
+  const active = document.querySelector('[data-physical-count-sort][aria-pressed="true"]');
+  return active?.dataset.physicalCountSort || 'auto';
+}
+
+function physicalCountSortLabel(mode = getPhysicalCountSortMode()) {
+  const labels = {
+    auto: 'Auto',
+    alpha: 'Alphabetical SKU',
+    container: 'Container number',
+    rack: 'Rack order',
+    'rack-container': 'Rack + Container'
+  };
+  return labels[mode] || labels.auto;
+}
+
+function handlePhysicalCountSortToggle(event) {
+  const button = event.target.closest('[data-physical-count-sort]');
+  if (!button) return;
+
+  document.querySelectorAll('[data-physical-count-sort]').forEach((node) => {
+    const active = node === button;
+    node.setAttribute('aria-pressed', active ? 'true' : 'false');
+    node.classList.toggle('active', active);
+  });
+
+  renderPhysicalCount();
+}
+
 function physicalCountRackMatches(code, rawFilter) {
   const rack = normalizeLocation(code);
   const raw = String(rawFilter || '').trim();
@@ -4335,10 +4408,7 @@ function filteredPhysicalCountRows() {
       if (result) return result;
     }
 
-    const containerCompare = String(a.container_no || '').localeCompare(String(b.container_no || ''), undefined, {
-      numeric: true,
-      sensitivity: 'base'
-    });
+    const containerCompare = comparePhysicalCountContainers(a.container_no, b.container_no);
     if (containerCompare) return containerCompare;
 
     const rackCompare = comparePhysicalCountRackCodes(a.location_code, b.location_code);
@@ -4350,17 +4420,44 @@ function filteredPhysicalCountRows() {
     return String(a.uom || '').localeCompare(String(b.uom || ''));
   };
 
+  const containerCompare = (a, b) => {
+    const result = comparePhysicalCountContainers(a.container_no, b.container_no);
+    if (result) return result;
+
+    const alphaResult = alphaCompare(a, b);
+    if (alphaResult) return alphaResult;
+
+    return comparePhysicalCountRackCodes(a.location_code, b.location_code);
+  };
+
   const rackCompare = (a, b) => {
     const rackResult = comparePhysicalCountRackCodes(a.location_code, b.location_code);
     if (rackResult) return rackResult;
     return alphaCompare(a, b);
   };
 
-  // User rule:
-  // - When Rack(s) is used, warehouse walking order is the primary sort.
-  // - SKU/container filtered reports are alphabetical.
-  // - With no rack filter, alphabetical is the safer default.
-  rows.sort(rackRaw ? rackCompare : alphaCompare);
+  const rackContainerCompare = (a, b) => {
+    const rackResult = comparePhysicalCountRackCodes(a.location_code, b.location_code);
+    if (rackResult) return rackResult;
+
+    const containerResult = comparePhysicalCountContainers(a.container_no, b.container_no);
+    if (containerResult) return containerResult;
+
+    return alphaCompare(a, b);
+  };
+
+  let mode = getPhysicalCountSortMode();
+
+  // "Auto" preserves the exact behavior of the already-working Physical Count:
+  // Rack filter -> rack order; otherwise alphabetical.
+  if (mode === 'auto') {
+    mode = rackRaw ? 'rack' : 'alpha';
+  }
+
+  if (mode === 'container') rows.sort(containerCompare);
+  else if (mode === 'rack') rows.sort(rackCompare);
+  else if (mode === 'rack-container') rows.sort(rackContainerCompare);
+  else rows.sort(alphaCompare);
 
   return rows;
 }
@@ -4373,10 +4470,14 @@ function renderPhysicalCount() {
   const rows = filteredPhysicalCountRows();
   state.data.physicalCountFiltered = rows;
 
+  const selectedMode = getPhysicalCountSortMode();
   const rackFiltered = Boolean($('physical-count-racks').value.trim());
-  const sortLabel = rackFiltered
-    ? 'rack order (A1, A2, A3 … A9, A10, A11 …), then SKU'
-    : 'alphabetical SKU order';
+  const resolvedMode = selectedMode === 'auto'
+    ? (rackFiltered ? 'rack' : 'alpha')
+    : selectedMode;
+  const sortLabel = selectedMode === 'auto'
+    ? `Auto → ${physicalCountSortLabel(resolvedMode)}`
+    : physicalCountSortLabel(resolvedMode);
 
   $('physical-count-count').innerHTML =
     `Showing <strong>${rows.length.toLocaleString()}</strong> printable line(s) · Sorted by <strong>${escapeHtml(sortLabel)}</strong>.`;
@@ -4431,9 +4532,13 @@ function printPhysicalCount() {
   printArea.className = 'physical-count-print';
 
   const generatedAt = new Date().toLocaleString();
-  const sortLabel = $('physical-count-racks').value.trim()
-    ? 'Rack order'
-    : 'Alphabetical SKU order';
+  const selectedMode = getPhysicalCountSortMode();
+  const resolvedMode = selectedMode === 'auto'
+    ? ($('physical-count-racks').value.trim() ? 'rack' : 'alpha')
+    : selectedMode;
+  const sortLabel = selectedMode === 'auto'
+    ? `Auto → ${physicalCountSortLabel(resolvedMode)}`
+    : physicalCountSortLabel(resolvedMode);
 
   printArea.innerHTML = `
     <div class="physical-count-print-header">
