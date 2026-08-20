@@ -29,6 +29,99 @@ const localDateKey = (value) => {
 };
 const normalizeLocation = (value) => String(value || '').trim().replace(/^LOC:/i, '').toUpperCase();
 const normalizeBarcode = (value) => String(value || '').trim().toUpperCase() === 'N/A' ? 'N/A' : String(value || '').trim();
+const PICK_CONTAINER_SEQUENCE_RE = /^(\d{4})-(\d{2,3})$/;
+
+function parsePickContainerSequence(value) {
+  const text = String(value || '').trim();
+  const match = text.match(PICK_CONTAINER_SEQUENCE_RE);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const batch = Number(match[2]);
+  if (!Number.isInteger(year) || !Number.isInteger(batch)) return null;
+  return {
+    text,
+    year,
+    batch,
+    // 1000 leaves room for a three-digit batch while preserving year priority.
+    key: (year * 1000) + batch
+  };
+}
+
+function pickExpiryKey(value) {
+  return String(value || '').slice(0, 10);
+}
+
+function pickPriorityRecommendation(lot, rows, queuedByLot = new Map()) {
+  if (!lot) return {
+    earliestExpiry: null,
+    earliestLocation: null,
+    earliestContainer: null,
+    containerSuggested: false,
+    suggestedContainer: null,
+    suggestedLocation: null
+  };
+
+  const selectedSku = lot.sku_id || null;
+  const selectedUom = String(lot.uom || '').toUpperCase();
+
+  const effectiveRows = (rows || []).filter((row) => {
+    if (selectedSku && row.sku_id && row.sku_id !== selectedSku) return false;
+    if (selectedUom && row.uom && String(row.uom).toUpperCase() !== selectedUom) return false;
+    return Number(row.qty || 0) - Number(queuedByLot.get(row.lot_id) || 0) > 0;
+  });
+
+  if (!effectiveRows.length) {
+    return {
+      earliestExpiry: lot.expiry_date || null,
+      earliestLocation: lot.location_code || null,
+      earliestContainer: lot.container_no || null,
+      containerSuggested: false,
+      suggestedContainer: null,
+      suggestedLocation: null
+    };
+  }
+
+  // Priority 1: FEFO. We never let a container number outrank an earlier expiry.
+  const earliestExpiry = effectiveRows
+    .map((row) => pickExpiryKey(row.expiry_date))
+    .filter(Boolean)
+    .sort()[0] || pickExpiryKey(lot.expiry_date);
+
+  const earliestExpiryRows = effectiveRows.filter(
+    (row) => pickExpiryKey(row.expiry_date) === earliestExpiry
+  );
+
+  // Priority 2: only among rows tied on the best expiry, compare valid
+  // YYYY-BB / YYYY-BBB containers numerically by year then batch.
+  const sequencedRows = earliestExpiryRows
+    .map((row) => ({ row, parsed: parsePickContainerSequence(row.container_no) }))
+    .filter((entry) => entry.parsed)
+    .sort((a, b) => a.parsed.key - b.parsed.key || String(a.row.location_code || '').localeCompare(String(b.row.location_code || '')));
+
+  const suggestedEntry = sequencedRows[0] || null;
+  const representativeRow = suggestedEntry?.row || earliestExpiryRows[0] || effectiveRows[0] || null;
+
+  const selectedExpiry = pickExpiryKey(lot.expiry_date);
+  const selectedContainer = parsePickContainerSequence(lot.container_no);
+  const containerSuggested = Boolean(
+    selectedExpiry &&
+    earliestExpiry &&
+    selectedExpiry === earliestExpiry &&
+    selectedContainer &&
+    suggestedEntry &&
+    selectedContainer.key > suggestedEntry.parsed.key
+  );
+
+  return {
+    earliestExpiry: earliestExpiry || lot.expiry_date || null,
+    earliestLocation: representativeRow?.location_code || lot.location_code || null,
+    earliestContainer: representativeRow?.container_no || lot.container_no || null,
+    containerSuggested,
+    suggestedContainer: containerSuggested ? suggestedEntry.parsed.text : null,
+    suggestedLocation: containerSuggested ? (suggestedEntry.row.location_code || null) : null
+  };
+}
+
 const uomLabel = (uom) => ({ PIECE: 'piece', PACK: 'pack', CASE: 'case' }[String(uom || '').toUpperCase()] || String(uom || 'unit').toLowerCase());
 const fmtQtyUom = (qty, uom) => `${fmtQty(qty)} ${uomLabel(uom)}${Number(qty) === 1 ? '' : 's'}`;
 const sumByUom = (rows, qtyKey = 'qty') => rows.reduce((totals, row) => {
@@ -2966,15 +3059,16 @@ async function loadOperationLots(operation) {
 
     opState.lots = candidates.map((lot) => {
       const effectiveQty = Math.max(Number(lot.qty || 0) - (queuedByLot.get(lot.lot_id) || 0), 0);
-      const earliest = pick
-        ? fefoRows.find((row) => row.sku_id === lot.sku_id && row.uom === lot.uom && Number(row.qty || 0) - (queuedByLot.get(row.lot_id) || 0) > 0)
-        : null;
+      const priority = pick ? pickPriorityRecommendation(lot, fefoRows, queuedByLot) : null;
       return {
         ...lot,
         effectiveQty,
-        earliestExpiry: earliest?.expiry_date || lot.expiry_date,
-        earliestLocation: earliest?.location_code || opState.locationCode,
-        earliestContainer: earliest?.container_no || lot.container_no,
+        earliestExpiry: priority?.earliestExpiry || lot.expiry_date,
+        earliestLocation: priority?.earliestLocation || opState.locationCode,
+        earliestContainer: priority?.earliestContainer || lot.container_no,
+        containerPrioritySuggested: Boolean(priority?.containerSuggested),
+        suggestedContainer: priority?.suggestedContainer || null,
+        suggestedContainerLocation: priority?.suggestedLocation || null,
         scannedBarcode: 'N/A',
         scannedBarcodeType: lot.uom
       };
@@ -3046,15 +3140,16 @@ async function loadOperationLots(operation) {
 
   opState.lots = candidates.map((lot) => {
     const effectiveQty = Math.max(Number(lot.qty || 0) - (queuedByLot.get(lot.lot_id) || 0), 0);
-    const earliest = pick
-      ? (fefoResult.data || []).find((row) => row.sku_id === lot.sku_id && row.uom === lot.uom && Number(row.qty || 0) - (queuedByLot.get(row.lot_id) || 0) > 0)
-      : null;
+    const priority = pick ? pickPriorityRecommendation(lot, fefoResult.data || [], queuedByLot) : null;
     return {
       ...lot,
       effectiveQty,
-      earliestExpiry: earliest?.expiry_date || lot.expiry_date,
-      earliestLocation: earliest?.location_code || opState.locationCode,
-      earliestContainer: earliest?.container_no || lot.container_no,
+      earliestExpiry: priority?.earliestExpiry || lot.expiry_date,
+      earliestLocation: priority?.earliestLocation || opState.locationCode,
+      earliestContainer: priority?.earliestContainer || lot.container_no,
+      containerPrioritySuggested: Boolean(priority?.containerSuggested),
+      suggestedContainer: priority?.suggestedContainer || null,
+      suggestedContainerLocation: priority?.suggestedLocation || null,
       scannedBarcode: barcode,
       scannedBarcodeType: lot.uom
     };
@@ -3072,6 +3167,9 @@ async function loadOperationLots(operation) {
           line.earliest_expiry = lot.earliestExpiry || line.expiry_date;
           line.earliest_location = lot.earliestLocation || opState.locationCode;
           line.earliest_container = lot.earliestContainer || line.container_no;
+          line.container_priority_suggested = Boolean(lot.containerPrioritySuggested);
+          line.suggested_container = lot.suggestedContainer || null;
+          line.suggested_container_location = lot.suggestedContainerLocation || null;
         }
       });
     });
@@ -3163,10 +3261,9 @@ async function addSupervisorBarcodeBypass(lotId) {
   state.pick.cart.forEach((line) => {
     queuedByLot.set(line.lot_id, (queuedByLot.get(line.lot_id) || 0) + Number(line.qty || 0));
   });
-  const effectiveRows = (fefoRows || []).filter((row) => Number(row.qty || 0) - (queuedByLot.get(row.lot_id) || 0) > 0);
-  const earliestRow = effectiveRows?.[0] || null;
-  const earliestSameUnit = earliestRow?.expiry_date || lot.expiry_date;
-  const fefoOverrideConfirmed = Boolean(earliestRow?.expiry_date && lot.expiry_date > earliestRow.expiry_date);
+  const priority = pickPriorityRecommendation(lot, fefoRows || [], queuedByLot);
+  const earliestSameUnit = priority.earliestExpiry || lot.expiry_date;
+  const fefoOverrideConfirmed = Boolean(earliestSameUnit && lot.expiry_date > earliestSameUnit);
   if (fefoOverrideConfirmed && !window.confirm('Are you sure you want to disregard the FEFO warning?')) {
     return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
   }
@@ -3204,8 +3301,11 @@ async function addSupervisorBarcodeBypass(lotId) {
     container_no: lot.container_no,
     expiry_date: lot.expiry_date,
     earliest_expiry: earliestSameUnit,
-    earliest_location: earliestRow?.location_code || state.pick.locationCode,
-    earliest_container: earliestRow?.container_no || lot.container_no,
+    earliest_location: priority.earliestLocation || state.pick.locationCode,
+    earliest_container: priority.earliestContainer || lot.container_no,
+    container_priority_suggested: Boolean(priority.containerSuggested),
+    suggested_container: priority.suggestedContainer || null,
+    suggested_container_location: priority.suggestedLocation || null,
     fefo_override_confirmed: fefoOverrideConfirmed,
     available: Number(lot.qty),
     uom: lot.uom,
@@ -3223,14 +3323,34 @@ function updatePickFefoNote() {
   const value = $('pick-lot').value;
   const note = $('pick-fefo-note');
   if (value === '') return note.classList.add('hidden');
+
   const index = Number(value);
   const lot = state.pick.lots[index];
-  if (!lot || lot.expiry_date <= lot.earliestExpiry) return note.classList.add('hidden');
-  const where = lot.earliestLocation
-    ? ` at <strong>${escapeHtml(lot.earliestLocation)}</strong>${lot.earliestContainer ? ` / container <strong>${escapeHtml(lot.earliestContainer)}</strong>` : ''}`
-    : '';
-  note.innerHTML = `FEFO warning: selected expiry <strong>${fmtDate(lot.expiry_date)}</strong>, but the earliest CURRENT non-expired positive stock expires <strong>${fmtDate(lot.earliestExpiry)}</strong>${where}. Completing this line will be recorded as an override.`;
-  note.classList.remove('hidden');
+  if (!lot) return note.classList.add('hidden');
+
+  // Priority 1: existing FEFO rule. If a genuinely earlier expiry exists,
+  // show FEFO only and do not distract the picker with container sequencing.
+  if (lot.earliestExpiry && lot.expiry_date > lot.earliestExpiry) {
+    const where = lot.earliestLocation
+      ? ` at <strong>${escapeHtml(lot.earliestLocation)}</strong>${lot.earliestContainer ? ` / container <strong>${escapeHtml(lot.earliestContainer)}</strong>` : ''}`
+      : '';
+    note.innerHTML = `FEFO warning: selected expiry <strong>${fmtDate(lot.expiry_date)}</strong>, but the earliest CURRENT non-expired positive stock expires <strong>${fmtDate(lot.earliestExpiry)}</strong>${where}. Completing this line will be recorded as an override.`;
+    note.classList.remove('hidden');
+    return;
+  }
+
+  // Priority 2: only after expiry is tied, suggest the earliest valid
+  // YYYY-BB / YYYY-BBB shipment container. This is advisory, not an override.
+  if (lot.containerPrioritySuggested && lot.suggestedContainer) {
+    const where = lot.suggestedContainerLocation
+      ? ` at <strong>${escapeHtml(lot.suggestedContainerLocation)}</strong>`
+      : '';
+    note.innerHTML = `<strong>Earlier shipment suggestion:</strong> selected container <strong>${escapeHtml(lot.container_no)}</strong>, but earlier container <strong>${escapeHtml(lot.suggestedContainer)}</strong>${where} has the same priority expiry <strong>${fmtDate(lot.expiry_date)}</strong>. Expiry / FEFO remains first priority; container sequencing is used only when expiry is tied.`;
+    note.classList.remove('hidden');
+    return;
+  }
+
+  note.classList.add('hidden');
 }
 
 async function addOperationItem(operation) {
@@ -3286,6 +3406,9 @@ async function addOperationItem(operation) {
     earliest_expiry: lot.earliestExpiry,
     earliest_location: lot.earliestLocation || null,
     earliest_container: lot.earliestContainer || null,
+    container_priority_suggested: Boolean(lot.containerPrioritySuggested),
+    suggested_container: lot.suggestedContainer || null,
+    suggested_container_location: lot.suggestedContainerLocation || null,
     fefo_override_confirmed: fefoOverrideConfirmed,
     available: Number(lot.qty),
     uom: lot.uom,
@@ -3329,10 +3452,10 @@ function renderOperationCart(operation) {
     <td class="wrap">${escapeHtml(r.sku_name)}</td><td>${r.shipper_box_id ? `<span class="pill near">${escapeHtml(r.shipper_box_no || 'Shipper')} · ${escapeHtml(r.shipper_lot_role === 'HEADER' ? 'Complete' : 'Content')}</span>` : '<span class="pill">Loose</span>'}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td>
     <td class="wrap">${pick
       ? (r.supervisor_bypass
-        ? `<span class="pill override">Approved barcode bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>${r.bypass_approved_by ? `<br><small>Approved by ${escapeHtml(r.bypass_approved_by)} (${escapeHtml(String(r.bypass_approved_role || '').toUpperCase())})</small>` : ''}`
+        ? `<span class="pill override">Approved barcode bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>${r.bypass_approved_by ? `<br><small>Approved by ${escapeHtml(r.bypass_approved_by)} (${escapeHtml(String(r.bypass_approved_role || '').toUpperCase())})</small>` : ''}${!r.fefo_override_confirmed && r.container_priority_suggested && r.suggested_container ? `<br><span class="pill near">Earlier container ${escapeHtml(r.suggested_container)} available</span>` : ''}`
         : `${normalizeBarcode(r.barcode) === 'N/A'
           ? `<span class="pill near">N/A ${escapeHtml((r.uom || '').toUpperCase())} selected</span>`
-          : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span>`}${r.fefo_override_confirmed ? '<br><span class="pill override">FEFO override confirmed</span>' : ''}`)
+          : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span>`}${r.fefo_override_confirmed ? '<br><span class="pill override">FEFO override confirmed</span>' : ''}${!r.fefo_override_confirmed && r.container_priority_suggested && r.suggested_container ? `<br><span class="pill near">Earlier container ${escapeHtml(r.suggested_container)} available</span>` : ''}`)
       : (normalizeBarcode(r.barcode) === 'N/A'
         ? `<span class="pill near">N/A ${escapeHtml((r.uom || '').toUpperCase())} selected</span>`
         : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span><br><small>${escapeHtml(r.barcode || '')}</small>`)}</td>
