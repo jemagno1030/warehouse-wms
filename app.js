@@ -408,6 +408,10 @@ function setupStaticEvents() {
   $('inventory-filter').addEventListener('input', renderInventory);
   $('inventory-search-exact-rack').addEventListener('click', () => toggleExactRackSearch('inventory-search-exact-rack', renderInventory));
   $('inventory-filter-exact-rack').addEventListener('click', () => toggleExactRackSearch('inventory-filter-exact-rack', renderInventory));
+  $('inventory-summary-print-btn').addEventListener('click', printInventorySkuSummary);
+  $('inventory-summary-export-btn').addEventListener('click', exportFilteredInventorySkuSummaryCsv);
+  $('inventory-lots-print-btn').addEventListener('click', printInventoryDetailedLots);
+  $('inventory-lots-export-btn').addEventListener('click', exportFilteredInventoryDetailedLotsCsv);
 
   ['physical-count-sku','physical-count-container','physical-count-racks']
     .forEach((id) => {
@@ -4683,13 +4687,13 @@ function inventorySearchText(r) {
   ].join(' ').toLowerCase();
 }
 
-function renderInventory() {
+function filteredInventoryRows() {
   const term = $('inventory-search').value.trim().toLowerCase();
   const filterTerm = $('inventory-filter').value.trim().toLowerCase();
   const search1ExactRack = exactRackSearchEnabled('inventory-search-exact-rack');
   const filter2ExactRack = exactRackSearchEnabled('inventory-filter-exact-rack');
 
-  // Search 1 remains the primary Inventory search. Exact rack affects Search 1 only when its toggle is ON.
+  // This is intentionally the same filtering rule used by the existing Inventory screen.
   const primaryRows = state.data.inventory.filter((r) => {
     if (!term) return true;
     return search1ExactRack
@@ -4697,24 +4701,238 @@ function renderInventory() {
       : inventorySearchText(r).includes(term);
   });
 
-  // Filter 2 still narrows Search 1. Its Exact rack toggle is independent from Search 1.
-  const rows = filterTerm
+  return filterTerm
     ? primaryRows.filter((r) => filter2ExactRack
       ? exactRackLocationMatches(r.location_code, filterTerm)
       : inventorySearchText(r).includes(filterTerm))
     : primaryRows;
+}
 
+function buildInventorySummaryRows(rows) {
   const grouped = new Map();
-  rows.forEach((r) => {
-    const item = grouped.get(r.sku_id) || { sku_name: r.sku_name, balances: { PIECE: 0, PACK: 0, CASE: 0 }, containers: new Set(), locations: new Set(), earliest: r.expiry_date, heldLots: 0 };
+
+  (rows || []).forEach((r) => {
+    const item = grouped.get(r.sku_id) || {
+      sku_id: r.sku_id,
+      sku_name: r.sku_name,
+      balances: { PIECE: 0, PACK: 0, CASE: 0 },
+      containers: new Set(),
+      locations: new Set(),
+      earliest: r.expiry_date,
+      heldLots: 0
+    };
+
     item.balances[r.uom] = (item.balances[r.uom] || 0) + Number(r.qty);
     item.containers.add(r.container_no);
     item.locations.add(r.location_code);
+
     if (r.expiry_date < item.earliest) item.earliest = r.expiry_date;
     if (r.is_on_hold) item.heldLots += 1;
+
     grouped.set(r.sku_id, item);
   });
-  const summaryRows = [...grouped.values()].sort((a, b) => a.sku_name.localeCompare(b.sku_name));
+
+  return [...grouped.values()].sort((a, b) =>
+    String(a.sku_name || '').localeCompare(String(b.sku_name || ''), undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    })
+  );
+}
+
+function inventoryFilterReportText() {
+  const parts = [];
+  const search1 = $('inventory-search').value.trim();
+  const filter2 = $('inventory-filter').value.trim();
+
+  if (search1) {
+    parts.push(`Search 1: ${search1}${exactRackSearchEnabled('inventory-search-exact-rack') ? ' [Exact rack]' : ''}`);
+  }
+  if (filter2) {
+    parts.push(`Filter 2: ${filter2}${exactRackSearchEnabled('inventory-filter-exact-rack') ? ' [Exact rack]' : ''}`);
+  }
+
+  return parts.length ? parts.join(' · ') : 'No filters — all currently loaded positive inventory';
+}
+
+function inventoryDetailedStatusText(row) {
+  const parts = [];
+
+  if (isNoExpiryDate(row.expiry_date)) parts.push('Expiry N/A');
+  else if (row.expiry_status) parts.push(String(row.expiry_status).replaceAll('_', ' '));
+
+  if (row.is_on_hold) {
+    parts.push(`ON HOLD${row.hold_reason ? `: ${row.hold_reason}` : ''}`);
+  }
+
+  if (row.is_pending) parts.push('PENDING');
+
+  return parts.join(' · ') || 'Active';
+}
+
+function inventoryDetailedShipperText(row) {
+  if (!row.shipper_box_no) return '';
+  const bits = [row.shipper_box_no, row.shipper_status, row.shipper_lot_role].filter(Boolean);
+  return bits.join(' · ');
+}
+
+function downloadCsvRows(filename, columns, rows) {
+  if (!rows.length) {
+    return toast('There is no filtered data to export.', 'error');
+  }
+
+  const csv = [
+    columns.map((column) => csvCell(column.label)).join(','),
+    ...rows.map((row) => columns.map((column) => csvCell(column.value(row))).join(','))
+  ].join('\n');
+
+  const blob = new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportFilteredInventorySkuSummaryCsv() {
+  const rows = buildInventorySummaryRows(filteredInventoryRows());
+  const date = new Date().toISOString().slice(0, 10);
+
+  downloadCsvRows(
+    `inventory-sku-summary-filtered-${date}.csv`,
+    [
+      { label: 'SKU', value: (r) => r.sku_name || '' },
+      { label: 'CASE Qty', value: (r) => Number(r.balances?.CASE || 0) },
+      { label: 'PACK Qty', value: (r) => Number(r.balances?.PACK || 0) },
+      { label: 'PIECE Qty', value: (r) => Number(r.balances?.PIECE || 0) },
+      { label: 'Container Count', value: (r) => r.containers.size },
+      { label: 'Location Count', value: (r) => r.locations.size },
+      { label: 'Held Lot Count', value: (r) => r.heldLots || 0 },
+      { label: 'Earliest Expiry', value: (r) => isNoExpiryDate(r.earliest) ? 'N/A' : (r.earliest || '') }
+    ],
+    rows
+  );
+}
+
+function exportFilteredInventoryDetailedLotsCsv() {
+  const rows = filteredInventoryRows();
+  const date = new Date().toISOString().slice(0, 10);
+
+  downloadCsvRows(
+    `inventory-detailed-lots-filtered-${date}.csv`,
+    [
+      { label: 'Location', value: (r) => r.location_code || '' },
+      { label: 'SKU', value: (r) => r.sku_name || '' },
+      { label: 'Shipper Box', value: inventoryDetailedShipperText },
+      { label: 'Container', value: (r) => r.container_no || '' },
+      { label: 'Expiry', value: (r) => isNoExpiryDate(r.expiry_date) ? 'N/A' : (r.expiry_date || '') },
+      { label: 'Status', value: inventoryDetailedStatusText },
+      { label: 'UOM', value: (r) => String(r.uom || '').toUpperCase() },
+      { label: 'Quantity', value: (r) => Number(r.qty || 0) },
+      { label: 'Put-away Remarks', value: (r) => r.putaway_remarks || '' },
+      { label: 'Stock Transfer Remarks', value: (r) => r.transfer_remarks || '' }
+    ],
+    rows
+  );
+}
+
+function printInventorySection(kind) {
+  const filteredRows = filteredInventoryRows();
+  const isSummary = kind === 'summary';
+  const rows = isSummary ? buildInventorySummaryRows(filteredRows) : filteredRows;
+
+  if (!rows.length) {
+    return toast('There is no filtered Inventory data to print.', 'error');
+  }
+
+  const printArea = document.createElement('section');
+  printArea.id = 'print-area';
+  printArea.className = 'inventory-section-print';
+
+  const generatedAt = new Date().toLocaleString();
+  const subtitle = isSummary ? 'INVENTORY — SKU SUMMARY' : 'INVENTORY — DETAILED LOTS';
+
+  const table = isSummary
+    ? `<table>
+        <thead><tr>
+          <th class="invp-sku">SKU</th>
+          <th class="invp-balances">Balances</th>
+          <th class="invp-count">Containers</th>
+          <th class="invp-count">Locations</th>
+          <th class="invp-held">Held Lots</th>
+          <th class="invp-expiry">Earliest Expiry</th>
+        </tr></thead>
+        <tbody>${rows.map((r) => `<tr>
+          <td class="invp-sku">${escapeHtml(r.sku_name || '—')}</td>
+          <td class="invp-balances">${escapeHtml(formatBalances(r.balances))}</td>
+          <td class="invp-count">${r.containers.size.toLocaleString()}</td>
+          <td class="invp-count">${r.locations.size.toLocaleString()}</td>
+          <td class="invp-held">${r.heldLots ? `${r.heldLots.toLocaleString()} ON HOLD` : '—'}</td>
+          <td class="invp-expiry">${isNoExpiryDate(r.earliest) ? 'N/A' : fmtDate(r.earliest)}</td>
+        </tr>`).join('')}</tbody>
+      </table>`
+    : `<table>
+        <thead><tr>
+          <th class="invl-location">Location</th>
+          <th class="invl-sku">SKU</th>
+          <th class="invl-shipper">Shipper Box</th>
+          <th class="invl-container">Container</th>
+          <th class="invl-expiry">Expiry</th>
+          <th class="invl-status">Status</th>
+          <th class="invl-qty">Quantity</th>
+          <th class="invl-remarks">Put-away Remarks</th>
+          <th class="invl-remarks">Transfer Remarks</th>
+        </tr></thead>
+        <tbody>${rows.map((r) => `<tr>
+          <td class="invl-location"><strong>${escapeHtml(r.location_code || '—')}</strong></td>
+          <td class="invl-sku">${escapeHtml(r.sku_name || '—')}</td>
+          <td class="invl-shipper">${escapeHtml(inventoryDetailedShipperText(r) || '—')}</td>
+          <td class="invl-container">${escapeHtml(r.container_no || '—')}</td>
+          <td class="invl-expiry">${isNoExpiryDate(r.expiry_date) ? 'N/A' : fmtDate(r.expiry_date)}</td>
+          <td class="invl-status">${escapeHtml(inventoryDetailedStatusText(r))}</td>
+          <td class="invl-qty">${escapeHtml(fmtQtyUom(r.qty, r.uom))}</td>
+          <td class="invl-remarks">${escapeHtml(r.putaway_remarks || '—')}</td>
+          <td class="invl-remarks">${escapeHtml(r.transfer_remarks || '—')}</td>
+        </tr>`).join('')}</tbody>
+      </table>`;
+
+  printArea.innerHTML = `
+    <div class="inventory-print-header">
+      <h1>IFTC WAREHOUSE LOCATOR SYSTEM (JPM)</h1>
+      <p class="inventory-print-subtitle">${escapeHtml(subtitle)}</p>
+      <div class="inventory-print-meta">
+        <div><strong>Generated:</strong> ${escapeHtml(generatedAt)}</div>
+        <div><strong>Report lines:</strong> ${rows.length.toLocaleString()}</div>
+        <div><strong>Filters:</strong> ${escapeHtml(inventoryFilterReportText())}</div>
+        <div><strong>Source:</strong> Current positive Inventory</div>
+      </div>
+    </div>
+    ${table}
+    <div class="inventory-print-footer">
+      <strong>Read-only report.</strong> This printout reflects the current filtered Inventory view and does not modify warehouse stock.
+    </div>`;
+
+  document.body.appendChild(printArea);
+
+  try {
+    window.print();
+  } finally {
+    setTimeout(() => printArea.remove(), 1000);
+  }
+}
+
+function printInventorySkuSummary() {
+  printInventorySection('summary');
+}
+
+function printInventoryDetailedLots() {
+  printInventorySection('lots');
+}
+
+function renderInventory() {
+  const rows = filteredInventoryRows();
+  const summaryRows = buildInventorySummaryRows(rows);
   $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Held lots</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${r.heldLots ? `<span class="pill expired">${r.heldLots} ON HOLD</span>` : '—'}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
   const actionHeader = isSupervisor() ? '<th>Actions</th>' : '';
   $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => {

@@ -354,6 +354,131 @@
       }
     }
   </style>
+
+  <style>
+    .inventory-report-head {
+      margin-top: 18px;
+      align-items: center;
+    }
+
+    .inventory-report-head h4 {
+      margin: 0;
+    }
+
+    .inventory-report-head p {
+      margin: 4px 0 0;
+    }
+
+    .inventory-section-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    @media (max-width: 780px) {
+      .inventory-section-actions {
+        display: grid;
+        grid-template-columns: 1fr;
+        width: 100%;
+      }
+
+      .inventory-section-actions button {
+        width: 100%;
+      }
+    }
+
+    @media print {
+      #print-area.inventory-section-print {
+        display: block !important;
+        font-family: Arial, Helvetica, sans-serif;
+        color: #000;
+        background: #fff;
+        font-size: 8.5pt;
+      }
+
+      #print-area.inventory-section-print .inventory-print-header {
+        margin-bottom: 6mm;
+      }
+
+      #print-area.inventory-section-print h1 {
+        margin: 0 0 2mm;
+        text-align: center;
+        font-size: 16pt;
+      }
+
+      #print-area.inventory-section-print .inventory-print-subtitle {
+        margin: 0 0 4mm;
+        text-align: center;
+        font-size: 10pt;
+        font-weight: 700;
+      }
+
+      #print-area.inventory-section-print .inventory-print-meta {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1.5mm 8mm;
+        margin-bottom: 4mm;
+        font-size: 8.5pt;
+      }
+
+      #print-area.inventory-section-print table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      #print-area.inventory-section-print thead {
+        display: table-header-group;
+      }
+
+      #print-area.inventory-section-print tr {
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+
+      #print-area.inventory-section-print th,
+      #print-area.inventory-section-print td {
+        border: 1px solid #000;
+        padding: 2mm 1.3mm;
+        vertical-align: top;
+        box-sizing: border-box;
+        white-space: normal !important;
+        overflow: hidden;
+        overflow-wrap: anywhere !important;
+        word-break: break-word;
+        line-height: 1.2;
+        height: auto !important;
+      }
+
+      #print-area.inventory-section-print th {
+        background: #eee !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+        font-size: 8pt;
+        text-align: left;
+      }
+
+      #print-area.inventory-section-print .invp-sku { width: 29%; }
+      #print-area.inventory-section-print .invp-balances { width: 17%; }
+      #print-area.inventory-section-print .invp-count { width: 10%; text-align: right; }
+      #print-area.inventory-section-print .invp-held { width: 13%; }
+      #print-area.inventory-section-print .invp-expiry { width: 14%; }
+
+      #print-area.inventory-section-print .invl-location { width: 7%; }
+      #print-area.inventory-section-print .invl-sku { width: 21%; }
+      #print-area.inventory-section-print .invl-shipper { width: 9%; }
+      #print-area.inventory-section-print .invl-container { width: 9%; }
+      #print-area.inventory-section-print .invl-expiry { width: 8%; }
+      #print-area.inventory-section-print .invl-status { width: 10%; }
+      #print-area.inventory-section-print .invl-qty { width: 8%; }
+      #print-area.inventory-section-print .invl-remarks { width: 14%; }
+
+      #print-area.inventory-section-print .inventory-print-footer {
+        margin-top: 4mm;
+        font-size: 7.5pt;
+      }
+    }
+  </style>
 </head>
 <body>
   <div id="toast-root" aria-live="polite"></div>
@@ -652,9 +777,22 @@
             <label><strong>Filter 2</strong><div class="scan-field"><input id="inventory-filter" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Narrow the current Search 1 results further..." /><button type="button" id="inventory-filter-exact-rack" class="secondary" aria-pressed="false" title="Exact rack location: when ON, Filter 2 matches only the exact rack code typed in Filter 2.">Exact rack</button></div></label>
           </div>
           <p class="small-note"><strong>Normal search stays unchanged while Exact rack is OFF.</strong> Turn <strong>Exact rack</strong> ON for a field when you want that field to match only the rack code itself: F2 returns F2 only, never F25 or F26. Search 1 and Filter 2 can use Exact rack independently.</p>
-          <h4>SKU summary</h4>
+          <div class="card-head compact inventory-report-head">
+            <div><h4>SKU summary</h4><p>Aggregated from the current filtered Inventory result</p></div>
+            <div class="inventory-section-actions">
+              <button id="inventory-summary-print-btn" type="button" class="secondary">Print / Save PDF</button>
+              <button id="inventory-summary-export-btn" type="button" class="secondary">Export Filtered CSV</button>
+            </div>
+          </div>
           <div id="inventory-summary-table" class="table-wrap"></div>
-          <h4>Detailed lots</h4>
+
+          <div class="card-head compact inventory-report-head">
+            <div><h4>Detailed lots</h4><p>Current filtered lot/location rows</p></div>
+            <div class="inventory-section-actions">
+              <button id="inventory-lots-print-btn" type="button" class="secondary">Print / Save PDF</button>
+              <button id="inventory-lots-export-btn" type="button" class="secondary">Export Filtered CSV</button>
+            </div>
+          </div>
           <div class="info-box"><strong>Detailed-Lot control:</strong> Supervisor / Admin / Owner may Edit eligible lots. Delete remains Admin / Owner only. <strong>Admin / Owner may also Freeze a lot (ON HOLD)</strong> so it cannot be released by Picking, Sales Order 0, barcode bypass, item-by-item Stock Transfer, or whole-rack transfer until it is explicitly Unfrozen. Hold and Unfreeze both require a reason and are recorded in Audit History.</div>
           <div id="inventory-table" class="table-wrap"></div>
         </article>
@@ -1280,6 +1418,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260820-container-detail-print-report-1"></script>
+  <script type="module" src="app.js?v=20260820-inventory-section-print-filtered-csv-1"></script>
 </body>
 </html>
