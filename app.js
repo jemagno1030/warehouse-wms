@@ -197,7 +197,7 @@ const state = {
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
   transfer: freshOperationState(),
-  data: { inventory: [], stockCard: [], stockCardExport: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], auditFiltered: [], locations: [], rackMap: [] },
+  data: { inventory: [], physicalCount: [], physicalCountFiltered: [], stockCard: [], stockCardExport: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], auditFiltered: [], locations: [], rackMap: [] },
   stockCardMeta: null,
   stockCardCandidates: [],
   selectedQrLocations: new Set(),
@@ -236,6 +236,7 @@ const screenMeta = {
   picking: ['Picking', 'FEFO-guided picking by source location'],
   transfer: ['Stock transfer', 'Move stock lots between rack locations'],
   inventory: ['Inventory', 'Stock by SKU, container, expiry, and location'],
+  physicalcount: ['Physical Count', 'Printable read-only system stock sheet for manual warehouse verification'],
   stockcard: ['SKU Balance Stock Card', 'Read-only SKU movement ledger, rack movements, and running balances'],
   skumaster: ['SKU Masterlist', 'Permanent SKU details and registered CASE / PACK / PIECE barcodes'],
   skuhealth: ['SKU Master Data Health', 'Admin/Owner duplicate, split-barcode, incomplete, and archived SKU review'],
@@ -250,7 +251,7 @@ const screenMeta = {
   control: ['System control', 'Discreet global operational control']
 };
 
-const VIEWER_SCREENS = new Set(['dashboard','inventory','stockcard','containers','rackmap','expiry']);
+const VIEWER_SCREENS = new Set(['dashboard','inventory','physicalcount','stockcard','containers','rackmap','expiry']);
 
 function toast(message, type = '') {
   const node = document.createElement('div');
@@ -406,6 +407,14 @@ function setupStaticEvents() {
   $('inventory-filter').addEventListener('input', renderInventory);
   $('inventory-search-exact-rack').addEventListener('click', () => toggleExactRackSearch('inventory-search-exact-rack', renderInventory));
   $('inventory-filter-exact-rack').addEventListener('click', () => toggleExactRackSearch('inventory-filter-exact-rack', renderInventory));
+
+  ['physical-count-sku','physical-count-container','physical-count-racks']
+    .forEach((id) => {
+      $(id).addEventListener('input', renderPhysicalCount);
+      $(id).addEventListener('change', renderPhysicalCount);
+    });
+  $('physical-count-clear-btn').addEventListener('click', clearPhysicalCountFilters);
+  $('physical-count-print-btn').addEventListener('click', printPhysicalCount);
 
   $('stock-card-search-form').addEventListener('submit', findStockCardSkus);
   $('stock-card-search').addEventListener('input', scheduleStockCardSuggestions);
@@ -776,7 +785,7 @@ function canOpenScreen(name) {
 
 function showScreen(name) {
   if (!canOpenScreen(name)) {
-    if (isViewer() && !VIEWER_SCREENS.has(name)) toast('Viewer access is read-only and limited to Dashboard, Inventory, Containers, Rack Map, Expiry Alerts, and SKU Balance Stock Card.', 'error');
+    if (isViewer() && !VIEWER_SCREENS.has(name)) toast('Viewer access is read-only and limited to Dashboard, Inventory, Physical Count, Containers, Rack Map, Expiry Alerts, and SKU Balance Stock Card.', 'error');
     if ((name === 'locations' || name === 'skumaster' || name === 'nonfefo') && !isSupervisor() && !isViewer()) toast('Supervisor access is required.', 'error');
     if ((name === 'users' || name === 'systemmanager' || name === 'skuhealth') && !isAdminOrOwner() && !isViewer()) toast('Admin or Owner access is required.', 'error');
     if (name === 'control' && !isOwner() && !isViewer()) toast('Owner access is required.', 'error');
@@ -839,6 +848,9 @@ async function refreshCurrentScreen() {
       case 'inventory':
         await loadInventory(true);
         break;
+      case 'physicalcount':
+        await loadPhysicalCount(true);
+        break;
       case 'stockcard':
         if ($('stock-card-sku')?.value) await loadStockCard(true);
         break;
@@ -895,6 +907,7 @@ async function loadScreen(name, force = false) {
     if (name === 'dashboard') await loadDashboard();
     if (name === 'picking') await refreshPickSalesOrderStatus();
     if (name === 'inventory') await loadInventory(force);
+    if (name === 'physicalcount') await loadPhysicalCount(force);
     if (name === 'stockcard') await loadStockCard(force);
     if (name === 'skumaster') await loadSkuMaster(force);
     if (name === 'skuhealth') await loadSkuHealth(force);
@@ -1099,6 +1112,8 @@ function uniqueBy(rows, keyFn) {
 
 function invalidateReports() {
   state.data.inventory = [];
+  state.data.physicalCount = [];
+  state.data.physicalCountFiltered = [];
   state.data.stockCard = [];
   state.data.stockCardExport = [];
   state.stockCardMeta = null;
@@ -4134,6 +4149,352 @@ async function completeTransfer() {
   toast(`Transfer saved: ${data?.[0]?.transaction_no || 'completed'}`, 'success');
   invalidateReports();
   resetOperation('transfer');
+}
+
+
+function physicalCountRackParts(value) {
+  const code = normalizeLocation(value);
+  const match = code.match(/^([A-Z]+)(\d+)$/);
+  if (!match) return null;
+
+  let rowOrdinal = 0;
+  for (const char of match[1]) {
+    rowOrdinal = (rowOrdinal * 26) + (char.charCodeAt(0) - 64);
+  }
+
+  return {
+    code,
+    row: match[1],
+    number: Number(match[2]),
+    ordinal: (rowOrdinal * 100000) + Number(match[2])
+  };
+}
+
+function comparePhysicalCountRackCodes(a, b) {
+  const aCode = normalizeLocation(a);
+  const bCode = normalizeLocation(b);
+
+  if (aCode === bCode) return 0;
+  if (aCode === 'PENDING') return 1;
+  if (bCode === 'PENDING') return -1;
+
+  const ap = physicalCountRackParts(aCode);
+  const bp = physicalCountRackParts(bCode);
+
+  if (ap && bp) {
+    if (ap.ordinal !== bp.ordinal) return ap.ordinal - bp.ordinal;
+    return ap.code.localeCompare(bp.code, undefined, { numeric: true });
+  }
+  if (ap) return -1;
+  if (bp) return 1;
+  return aCode.localeCompare(bCode, undefined, { numeric: true });
+}
+
+function physicalCountRackMatches(code, rawFilter) {
+  const rack = normalizeLocation(code);
+  const raw = String(rawFilter || '').trim();
+  if (!raw) return true;
+
+  const tokens = raw.split(',').map((part) => part.trim()).filter(Boolean);
+  if (!tokens.length) return true;
+
+  return tokens.some((token) => {
+    const normalized = normalizeLocation(token);
+
+    // Exact rack, including PENDING.
+    if (normalized === rack) return true;
+
+    // Inclusive range such as A1-A10 or A70-B10.
+    const range = normalized.match(/^([A-Z]+\d+)\s*-\s*([A-Z]+\d+)$/);
+    if (!range) return false;
+
+    const start = physicalCountRackParts(range[1]);
+    const end = physicalCountRackParts(range[2]);
+    const current = physicalCountRackParts(rack);
+    if (!start || !end || !current) return false;
+
+    const low = Math.min(start.ordinal, end.ordinal);
+    const high = Math.max(start.ordinal, end.ordinal);
+    return current.ordinal >= low && current.ordinal <= high;
+  });
+}
+
+function physicalCountSkuSearchText(row) {
+  return [
+    row.brand,
+    row.description,
+    row.variant,
+    row.size,
+    row.sku_name,
+    row.case_barcode,
+    row.pack_barcode,
+    row.piece_barcode
+  ].join(' ').toLowerCase();
+}
+
+function aggregatePhysicalCountRows(rows) {
+  const grouped = new Map();
+
+  (rows || []).forEach((row) => {
+    const key = [
+      row.location_code || '',
+      row.sku_id || '',
+      row.uom || '',
+      row.expiry_date || '',
+      row.container_no || ''
+    ].join('|');
+
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.qty += Number(row.qty || 0);
+      return;
+    }
+
+    grouped.set(key, {
+      location_code: row.location_code || '',
+      location_sort_order: row.location_sort_order ?? null,
+      sku_id: row.sku_id || '',
+      brand: row.brand || '',
+      description: row.description || '',
+      variant: row.variant || '',
+      size: row.size || '',
+      sku_name: row.sku_name || [row.brand, row.description, row.variant, row.size].filter(Boolean).join(' '),
+      case_barcode: row.case_barcode || '',
+      pack_barcode: row.pack_barcode || '',
+      piece_barcode: row.piece_barcode || '',
+      uom: String(row.uom || '').toUpperCase(),
+      qty: Number(row.qty || 0),
+      expiry_date: row.expiry_date || null,
+      container_no: row.container_no || ''
+    });
+  });
+
+  return [...grouped.values()].filter((row) => Number(row.qty || 0) > 0);
+}
+
+async function loadPhysicalCount(force = false) {
+  if (!force && state.data.physicalCount.length) {
+    return renderPhysicalCount();
+  }
+
+  const pageSize = 1000;
+  const rows = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from('v_inventory_search')
+      .select('*')
+      .order('location_sort_order', { ascending: true, nullsFirst: false })
+      .order('location_code')
+      .order('sku_name')
+      .range(offset, offset + pageSize - 1);
+
+    if (error) throw error;
+
+    const page = data || [];
+    rows.push(...page);
+
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  state.data.physicalCount = aggregatePhysicalCountRows(rows);
+  renderPhysicalCount();
+}
+
+function filteredPhysicalCountRows() {
+  const sku = $('physical-count-sku').value.trim().toLowerCase();
+  const containerRaw = $('physical-count-container').value.trim();
+  const rackRaw = $('physical-count-racks').value.trim();
+
+  const exactContainers = containerRaw
+    ? containerRaw.split(',').map((value) => value.trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  const rows = (state.data.physicalCount || []).filter((row) => {
+    if (sku && !physicalCountSkuSearchText(row).includes(sku)) return false;
+
+    if (exactContainers.length) {
+      const current = String(row.container_no || '').trim().toLowerCase();
+      if (!exactContainers.includes(current)) return false;
+    }
+
+    if (!physicalCountRackMatches(row.location_code, rackRaw)) return false;
+
+    return true;
+  });
+
+  const alphaCompare = (a, b) => {
+    const fields = ['brand', 'description', 'variant', 'size'];
+    for (const field of fields) {
+      const result = String(a[field] || '').localeCompare(String(b[field] || ''), undefined, {
+        numeric: true,
+        sensitivity: 'base'
+      });
+      if (result) return result;
+    }
+
+    const containerCompare = String(a.container_no || '').localeCompare(String(b.container_no || ''), undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    });
+    if (containerCompare) return containerCompare;
+
+    const rackCompare = comparePhysicalCountRackCodes(a.location_code, b.location_code);
+    if (rackCompare) return rackCompare;
+
+    const expiryCompare = String(a.expiry_date || '').localeCompare(String(b.expiry_date || ''));
+    if (expiryCompare) return expiryCompare;
+
+    return String(a.uom || '').localeCompare(String(b.uom || ''));
+  };
+
+  const rackCompare = (a, b) => {
+    const rackResult = comparePhysicalCountRackCodes(a.location_code, b.location_code);
+    if (rackResult) return rackResult;
+    return alphaCompare(a, b);
+  };
+
+  // User rule:
+  // - When Rack(s) is used, warehouse walking order is the primary sort.
+  // - SKU/container filtered reports are alphabetical.
+  // - With no rack filter, alphabetical is the safer default.
+  rows.sort(rackRaw ? rackCompare : alphaCompare);
+
+  return rows;
+}
+
+function physicalCountSkuDisplay(row) {
+  return [row.brand, row.description, row.variant].filter(Boolean).join(' ');
+}
+
+function renderPhysicalCount() {
+  const rows = filteredPhysicalCountRows();
+  state.data.physicalCountFiltered = rows;
+
+  const rackFiltered = Boolean($('physical-count-racks').value.trim());
+  const sortLabel = rackFiltered
+    ? 'rack order (A1, A2, A3 … A9, A10, A11 …), then SKU'
+    : 'alphabetical SKU order';
+
+  $('physical-count-count').innerHTML =
+    `Showing <strong>${rows.length.toLocaleString()}</strong> printable line(s) · Sorted by <strong>${escapeHtml(sortLabel)}</strong>.`;
+
+  $('physical-count-table-body').innerHTML = rows.length ? rows.map((row) => `
+    <tr>
+      <td><strong>${escapeHtml(row.location_code || '—')}</strong></td>
+      <td class="wrap">${escapeHtml(physicalCountSkuDisplay(row) || row.sku_name || '—')}</td>
+      <td>${escapeHtml(row.size || '—')}</td>
+      <td>${escapeHtml(row.uom || '—')}</td>
+      <td>${fmtQty(row.qty)}</td>
+      <td>${isNoExpiryDate(row.expiry_date) ? 'N/A' : fmtDate(row.expiry_date)}</td>
+      <td>${escapeHtml(row.container_no || '—')}</td>
+      <td class="physical-count-remarks-cell">&nbsp;</td>
+    </tr>
+  `).join('') : `<tr><td colspan="8">${emptyState('No current inventory matches the Physical Count filters.')}</td></tr>`;
+}
+
+function clearPhysicalCountFilters() {
+  $('physical-count-sku').value = '';
+  $('physical-count-container').value = '';
+  $('physical-count-racks').value = '';
+  renderPhysicalCount();
+  $('physical-count-sku').focus();
+}
+
+function physicalCountFilterSummary() {
+  const filters = [];
+  const sku = $('physical-count-sku').value.trim();
+  const container = $('physical-count-container').value.trim();
+  const racks = $('physical-count-racks').value.trim();
+
+  if (sku) filters.push(`SKU: ${sku}`);
+  if (container) filters.push(`Container: ${container}`);
+  if (racks) filters.push(`Rack(s): ${racks}`);
+
+  return filters.length ? filters.join(' · ') : 'All current positive inventory';
+}
+
+function printPhysicalCount() {
+  const rows = state.data.physicalCountFiltered || [];
+
+  if (!state.data.physicalCount.length) {
+    return toast('Physical Count data is not loaded yet. Refresh the module and try again.', 'error');
+  }
+  if (!rows.length) {
+    return toast('No Physical Count rows match the current filters.', 'error');
+  }
+
+  const printArea = document.createElement('section');
+  printArea.id = 'print-area';
+  printArea.className = 'physical-count-print';
+
+  const generatedAt = new Date().toLocaleString();
+  const sortLabel = $('physical-count-racks').value.trim()
+    ? 'Rack order'
+    : 'Alphabetical SKU order';
+
+  printArea.innerHTML = `
+    <div class="physical-count-print-header">
+      <h1>IFTC WAREHOUSE LOCATOR SYSTEM (JPM)</h1>
+      <p class="physical-count-print-subtitle">PHYSICAL COUNT SHEET</p>
+
+      <div class="physical-count-print-meta">
+        <div><strong>Generated:</strong> ${escapeHtml(generatedAt)}</div>
+        <div><strong>System lines:</strong> ${rows.length.toLocaleString()}</div>
+        <div><strong>Filters:</strong> ${escapeHtml(physicalCountFilterSummary())}</div>
+        <div><strong>Sort:</strong> ${escapeHtml(sortLabel)}</div>
+      </div>
+
+      <div class="physical-count-check-lines">
+        <div class="physical-count-check-line"><strong>Checker:</strong></div>
+        <div class="physical-count-check-line"><strong>Date / Time Checked:</strong></div>
+        <div class="physical-count-check-line"><strong>Verified By:</strong></div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th class="pc-rack">Rack #</th>
+          <th class="pc-sku">SKU — Brand / Description / Variant</th>
+          <th class="pc-size">Size</th>
+          <th class="pc-uom">UOM</th>
+          <th class="pc-qty">System Qty</th>
+          <th class="pc-expiry">Expiry</th>
+          <th class="pc-container">Container #</th>
+          <th class="pc-remarks">Checker’s Remarks</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => `
+          <tr>
+            <td class="pc-rack"><strong>${escapeHtml(row.location_code || '—')}</strong></td>
+            <td class="pc-sku">${escapeHtml(physicalCountSkuDisplay(row) || row.sku_name || '—')}</td>
+            <td class="pc-size">${escapeHtml(row.size || '—')}</td>
+            <td class="pc-uom">${escapeHtml(row.uom || '—')}</td>
+            <td class="pc-qty">${fmtQty(row.qty)}</td>
+            <td class="pc-expiry">${isNoExpiryDate(row.expiry_date) ? 'N/A' : fmtDate(row.expiry_date)}</td>
+            <td class="pc-container">${escapeHtml(row.container_no || '—')}</td>
+            <td class="pc-remarks">&nbsp;</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+
+    <div class="physical-count-print-footer">
+      <strong>System reference only.</strong> Differences found during physical checking must be processed through the authorized WMS adjustment/correction workflow; this printed sheet does not modify inventory.
+    </div>
+  `;
+
+  document.body.appendChild(printArea);
+
+  try {
+    window.print();
+  } finally {
+    setTimeout(() => printArea.remove(), 1000);
+  }
 }
 
 async function loadInventory(force = false) {

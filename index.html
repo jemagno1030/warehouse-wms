@@ -42,6 +42,124 @@
       }
     }
   </style>
+
+  <style>
+    .physical-count-preview th,
+    .physical-count-preview td {
+      vertical-align: top;
+    }
+    .physical-count-preview .physical-count-remarks-col,
+    .physical-count-preview td.physical-count-remarks-cell {
+      min-width: 240px;
+      width: 28%;
+    }
+    .physical-count-preview td.physical-count-remarks-cell {
+      height: 46px;
+    }
+
+    @media print {
+      @page {
+        size: A4 landscape;
+        margin: 8mm;
+      }
+
+      #print-area.physical-count-print {
+        display: block !important;
+        font-family: Arial, Helvetica, sans-serif;
+        color: #000;
+        background: #fff;
+        font-size: 8.5pt;
+      }
+
+      #print-area.physical-count-print .physical-count-print-header {
+        margin-bottom: 7mm;
+      }
+
+      #print-area.physical-count-print h1 {
+        margin: 0 0 2mm;
+        font-size: 16pt;
+        text-align: center;
+      }
+
+      #print-area.physical-count-print .physical-count-print-subtitle {
+        margin: 0 0 4mm;
+        text-align: center;
+        font-size: 10pt;
+        font-weight: 700;
+      }
+
+      #print-area.physical-count-print .physical-count-print-meta {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1.5mm 7mm;
+        margin-bottom: 4mm;
+        font-size: 8.5pt;
+      }
+
+      #print-area.physical-count-print .physical-count-check-lines {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 8mm;
+        margin-top: 4mm;
+        margin-bottom: 4mm;
+      }
+
+      #print-area.physical-count-print .physical-count-check-line {
+        border-bottom: 1px solid #000;
+        min-height: 5mm;
+        padding-bottom: 1mm;
+      }
+
+      #print-area.physical-count-print table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      #print-area.physical-count-print thead {
+        display: table-header-group;
+      }
+
+      #print-area.physical-count-print tr {
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+
+      #print-area.physical-count-print th,
+      #print-area.physical-count-print td {
+        border: 1px solid #000;
+        padding: 2.2mm 1.5mm;
+        vertical-align: top;
+        overflow-wrap: anywhere;
+      }
+
+      #print-area.physical-count-print th {
+        font-size: 8pt;
+        text-align: left;
+        background: #eee !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+
+      #print-area.physical-count-print td {
+        min-height: 8mm;
+      }
+
+      #print-area.physical-count-print .pc-rack { width: 7%; }
+      #print-area.physical-count-print .pc-sku { width: 25%; }
+      #print-area.physical-count-print .pc-size { width: 7%; }
+      #print-area.physical-count-print .pc-uom { width: 6%; }
+      #print-area.physical-count-print .pc-qty { width: 7%; text-align: right; }
+      #print-area.physical-count-print .pc-expiry { width: 9%; }
+      #print-area.physical-count-print .pc-container { width: 12%; }
+      #print-area.physical-count-print .pc-remarks { width: 27%; min-height: 11mm; }
+
+      #print-area.physical-count-print .physical-count-print-footer {
+        margin-top: 4mm;
+        font-size: 7.5pt;
+      }
+    }
+  </style>
 </head>
 <body>
   <div id="toast-root" aria-live="polite"></div>
@@ -89,6 +207,7 @@
         <button data-screen="picking">Picking</button>
         <button data-screen="transfer">Stock transfer</button>
         <button data-screen="inventory">Inventory</button>
+        <button data-screen="physicalcount">Physical Count</button>
         <button data-screen="stockcard">SKU Balance Stock Card</button>
         <button data-screen="skumaster" data-role-min="supervisor">SKU Masterlist</button>
         <button data-screen="skuhealth" data-role-min="admin">SKU Master Data Health</button>
@@ -344,6 +463,78 @@
           <h4>Detailed lots</h4>
           <div class="info-box"><strong>Detailed-Lot control:</strong> Supervisor / Admin / Owner may Edit eligible lots. Delete remains Admin / Owner only. <strong>Admin / Owner may also Freeze a lot (ON HOLD)</strong> so it cannot be released by Picking, Sales Order 0, barcode bypass, item-by-item Stock Transfer, or whole-rack transfer until it is explicitly Unfrozen. Hold and Unfreeze both require a reason and are recorded in Audit History.</div>
           <div id="inventory-table" class="table-wrap"></div>
+        </article>
+      </section>
+
+      <section id="screen-physicalcount" class="screen">
+        <article class="card">
+          <div class="card-head">
+            <div>
+              <h3>Physical Count</h3>
+              <p>Read-only printable count sheet for comparing current system stock against the actual warehouse.</p>
+            </div>
+            <button id="physical-count-print-btn" type="button" class="primary">Print / Save PDF</button>
+          </div>
+
+          <div class="info-box">
+            <strong>Read-only report.</strong>
+            This module does not change inventory. Each printed line represents one unique
+            <strong>rack + SKU + UOM + expiry + container</strong> combination. Exact duplicate
+            system lots with the same physical identity are combined into one quantity line.
+          </div>
+
+          <div class="form-grid two">
+            <label>SKU filter
+              <div class="scan-field">
+                <input id="physical-count-sku" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                  placeholder="Brand, description, variant, size, or barcode..." />
+                <button type="button" class="scan-btn" data-scan-target="physical-count-sku" data-scan-kind="barcode"
+                  title="Scan CASE, PACK, or PIECE barcode">Scan</button>
+              </div>
+            </label>
+
+            <label>Container number (exact)
+              <input id="physical-count-container" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                placeholder="Example: 2025-76" />
+              <small>Multiple exact containers may be separated by commas.</small>
+            </label>
+
+            <label>Rack(s)
+              <div class="scan-field">
+                <input id="physical-count-racks" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                  placeholder="A1 or A1-A10 or A1,A3,B2..." />
+                <button type="button" class="scan-btn" data-scan-target="physical-count-racks" data-scan-kind="location"
+                  title="Scan one exact rack QR">Scan</button>
+              </div>
+              <small>Blank = all racks. Supports exact racks, comma-separated racks, and ranges such as A1-A10.</small>
+            </label>
+          </div>
+
+          <div class="button-cluster">
+            <button id="physical-count-clear-btn" type="button" class="ghost">Clear filters</button>
+          </div>
+
+          <p id="physical-count-count" class="small-note">Physical Count data will load when this module opens.</p>
+
+          <div class="table-wrap physical-count-preview-wrap">
+            <table class="physical-count-preview">
+              <thead>
+                <tr>
+                  <th>Rack #</th>
+                  <th>SKU — Brand / Description / Variant</th>
+                  <th>Size</th>
+                  <th>UOM</th>
+                  <th>Qty</th>
+                  <th>Expiry</th>
+                  <th>Container #</th>
+                  <th class="physical-count-remarks-col">Checker’s Remarks</th>
+                </tr>
+              </thead>
+              <tbody id="physical-count-table-body">
+                <tr><td colspan="8"><div class="empty-state">Loading current inventory…</div></td></tr>
+              </tbody>
+            </table>
+          </div>
         </article>
       </section>
 
@@ -880,6 +1071,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260820-audit-history-90-day-filters-1"></script>
+  <script type="module" src="app.js?v=20260820-physical-count-1"></script>
 </body>
 </html>
