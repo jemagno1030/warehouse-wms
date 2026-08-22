@@ -332,6 +332,7 @@ function setupStaticEvents() {
   ['pa-brand', 'pa-description', 'pa-variant', 'pa-size'].forEach((id) => $(id).addEventListener('input', () => {
     clearTimeout(putawayDetailsTimer);
     putawayDetailsTimer = setTimeout(checkPutawayDuplicateDetails, 350);
+    if (id === 'pa-brand' || id === 'pa-description') syncPutawayCompleteGuard();
   }));
 
   $('pa-mode-select').addEventListener('change', switchPutawayMode);
@@ -384,7 +385,11 @@ function setupStaticEvents() {
   $('pick-so').addEventListener('change', refreshPickSalesOrderStatus);
   $('pick-so').addEventListener('blur', refreshPickSalesOrderStatus);
   $('pick-so-reopen-request-btn').addEventListener('click', requestReopenCompletedSalesOrder);
-  $('pick-barcode').addEventListener('change', () => loadOperationLots('pick'));
+  $('pick-barcode').addEventListener('input', () => syncOperationCompleteGuard('pick'));
+  $('pick-barcode').addEventListener('change', () => {
+    syncOperationCompleteGuard('pick');
+    loadOperationLots('pick');
+  });
   $('pick-lot').addEventListener('change', () => handleOperationLotChange('pick'));
   $('pick-qty').addEventListener('input', updatePickQtyNote);
   $('pick-add-btn').addEventListener('click', () => addOperationItem('pick'));
@@ -396,7 +401,11 @@ function setupStaticEvents() {
 
   $('tr-lock-btn').addEventListener('click', lockTransferLocation);
   $('tr-transfer-all').addEventListener('change', syncFullTransferMode);
-  $('tr-barcode').addEventListener('change', () => loadOperationLots('transfer'));
+  $('tr-barcode').addEventListener('input', () => syncOperationCompleteGuard('transfer'));
+  $('tr-barcode').addEventListener('change', () => {
+    syncOperationCompleteGuard('transfer');
+    loadOperationLots('transfer');
+  });
   $('tr-lot').addEventListener('change', () => handleOperationLotChange('transfer'));
   $('tr-qty').addEventListener('input', updateTransferQtyNote);
   $('tr-add-btn').addEventListener('click', () => addOperationItem('transfer'));
@@ -721,6 +730,45 @@ async function loadSystemMode() {
   applyMode(data.operational_mode);
 }
 
+function putawayHasPendingSkuEntry() {
+  return Boolean(
+    String($('pa-brand')?.value || '').trim() ||
+    String($('pa-description')?.value || '').trim()
+  );
+}
+
+function syncPutawayCompleteGuard() {
+  const button = $('pa-complete-btn');
+  if (!button) return;
+
+  const pending = putawayHasPendingSkuEntry();
+  button.disabled = !state.putaway.cart.length || state.mode !== 'ACTIVE' || pending;
+  button.title = pending
+    ? 'Add the current SKU entry to the pallet, or clear Brand / Description before completing Put-away.'
+    : '';
+}
+
+function operationHasPendingBarcode(operation) {
+  const id = operation === 'pick' ? 'pick-barcode' : 'tr-barcode';
+  return Boolean(String($(id)?.value || '').trim());
+}
+
+function syncOperationCompleteGuard(operation) {
+  const pick = operation === 'pick';
+  const button = $(pick ? 'pick-complete-btn' : 'tr-complete-btn');
+  if (!button) return;
+
+  const locked = Boolean(state[operation]?.lockToken);
+  const pending = operationHasPendingBarcode(operation);
+
+  button.disabled = !locked || state.mode !== 'ACTIVE' || pending;
+  button.title = pending
+    ? (pick
+        ? 'Add the current barcode entry to the Picking cart, or clear it before completing this rack.'
+        : 'Add the current barcode entry to the Transfer cart, or clear it before completing the transfer.')
+    : '';
+}
+
 function applyMode(mode) {
   state.mode = mode;
   const active = mode === 'ACTIVE';
@@ -737,6 +785,11 @@ function applyMode(mode) {
   if (state.pick.lockToken) $('pick-complete-btn').disabled = !active;
   updatePickSalesOrderControls();
   if (state.transfer.lockToken) $('tr-complete-btn').disabled = !active;
+
+  // Extra unfinished-entry guards only. Existing operational-mode rules stay intact.
+  syncPutawayCompleteGuard();
+  syncOperationCompleteGuard('pick');
+  syncOperationCompleteGuard('transfer');
 }
 
 function subscribeRealtime() {
@@ -1259,6 +1312,7 @@ function barcodeLessSkuLabel(sku) {
 
 function clearBarcodeLessDetailFields() {
   ['pa-brand', 'pa-description', 'pa-variant', 'pa-size'].forEach((id) => { $(id).value = ''; });
+  syncPutawayCompleteGuard();
 }
 
 function hideBarcodeLessPutawayPanel({ clearExistingDetails = false } = {}) {
@@ -1360,6 +1414,7 @@ function selectBarcodeLessPutawaySku() {
   $('pa-description').value = sku.description || '';
   $('pa-variant').value = sku.variant || '';
   $('pa-size').value = sku.size || '';
+  syncPutawayCompleteGuard();
   setPutawayDetailsReadonly(true);
   hidePutawayDuplicateWarning();
   $('pa-match-note').innerHTML =
@@ -1526,6 +1581,7 @@ async function resolvePutawaySku() {
     $('pa-description').value = sku.description;
     $('pa-variant').value = sku.variant;
     $('pa-size').value = sku.size;
+    syncPutawayCompleteGuard();
     state.putaway.matchedSkuId = sku.id;
     setPutawayDetailsReadonly(true);
     hidePutawayDuplicateWarning();
@@ -1795,6 +1851,7 @@ function clearPutawayLine() {
   $('pa-barcode-less-search').value = '';
   renderBarcodeLessSkuOptions();
   $('pa-barcode-less-selection-note').textContent = '';
+  syncPutawayCompleteGuard();
   $('pa-case').focus();
 }
 
@@ -1815,6 +1872,7 @@ function removePutawayItem(index) {
     $('pa-complete-btn').disabled = true;
   }
   renderPutawayCart();
+  syncPutawayCompleteGuard();
 }
 
 function resetPutawaySession() {
@@ -1834,9 +1892,13 @@ function resetPutawaySession() {
   $('pa-barcode-less-select').innerHTML = '<option value="">Select a previously recorded barcode-less SKU</option>';
   $('pa-barcode-less-selection-note').textContent = '';
   renderPutawayCart();
+  syncPutawayCompleteGuard();
 }
 
 async function completePutaway() {
+  if (putawayHasPendingSkuEntry()) {
+    return toast('A Put-away SKU entry is still pending. Add it to the pallet, or clear Brand / Description before completing Put-away.', 'error');
+  }
   if (!state.putaway.cart.length) return toast('Add at least one SKU line.', 'error');
   if (state.putaway.cart.some((item) => [item.case_qty, item.pack_qty, item.piece_qty].some((qty) => !Number.isInteger(Number(qty))))) {
     return toast('Put-away cannot continue: CASE, PACK, and PIECE quantities must be whole numbers.', 'error');
@@ -1849,6 +1911,7 @@ async function completePutaway() {
     p_note: $('pa-note').value.trim() || null
   });
   setBusy(button, false);
+  syncPutawayCompleteGuard();
   if (error) return toast(friendlyError(error), 'error');
   toast(`Put-away saved: ${data?.[0]?.transaction_no || 'completed'} · ${data?.[0]?.line_count || 0} stock balance line(s)`, 'success');
   invalidateReports();
@@ -2681,6 +2744,7 @@ function configureOperationUi(operation, locked) {
   const chip = $(pick ? 'pick-lock-chip' : 'transfer-lock-chip');
   chip.textContent = locked ? `${state[operation].locationCode} locked by you` : 'No location locked';
   chip.className = `status-chip ${locked ? 'active' : 'neutral'}`;
+  syncOperationCompleteGuard(operation);
 }
 
 function syncFullTransferMode() {
@@ -2720,6 +2784,8 @@ function syncFullTransferMode() {
     note.innerHTML = '';
     if (locked && $('tr-barcode').value.trim()) loadOperationLots('transfer');
   }
+
+  syncOperationCompleteGuard('transfer');
 }
 
 async function loadPickRackContents() {
@@ -3464,9 +3530,18 @@ async function addOperationItem(operation) {
     renderTransferRackContents();
   }
   $(pick ? 'pick-qty' : 'tr-qty').value = '';
-  if (pick && $('pick-barcode').value.trim()) loadOperationLots('pick');
-  else if (pick) updatePickQtyNote();
-  if (!pick) updateTransferQtyNote();
+
+  const barcodeInput = $(pick ? 'pick-barcode' : 'tr-barcode');
+  barcodeInput.value = '';
+  if (pick) {
+    clearPickBarcodeMatch('Item added. Scan or type the next barcode, or complete this rack.');
+    updatePickQtyNote();
+  } else {
+    clearTransferBarcodeMatch('Item added. Scan or type the next barcode, or complete the transfer.');
+    updateTransferQtyNote();
+  }
+  syncOperationCompleteGuard(operation);
+
   toast(`${fmtQtyUom(qty, lot.uom)} added to the ${pick ? 'picking' : 'transfer'} session.`, 'success');
 }
 function renderOperationCart(operation) {
@@ -4040,6 +4115,9 @@ async function finishPickSalesOrder() {
 }
 
 async function completePicking() {
+  if (operationHasPendingBarcode('pick')) {
+    return toast('A Picking barcode entry is still pending. Add that item, or clear the barcode field before completing this rack.', 'error');
+  }
   if (!state.pick.cart.length) return toast('Add at least one item.', 'error');
   const so = $('pick-so').value.trim();
   const adjustmentMode = isStockAdjustmentSalesOrder(so);
@@ -4094,6 +4172,7 @@ async function completePicking() {
 
   const { data, error } = await supabase.rpc(rpcName, rpcArgs);
   setBusy(button, false);
+  syncOperationCompleteGuard('pick');
   if (error) return toast(friendlyError(error), 'error');
 
   if (adjustmentMode) {
@@ -4111,6 +4190,10 @@ async function completePicking() {
 }
 
 async function completeTransfer() {
+  if (operationHasPendingBarcode('transfer')) {
+    return toast('A Stock Transfer barcode entry is still pending. Add that item, or clear the barcode field before completing the transfer.', 'error');
+  }
+
   const destination = normalizeLocation($('tr-destination').value);
   if (!destination) return toast('Scan the destination location.', 'error');
 
@@ -4135,6 +4218,7 @@ async function completeTransfer() {
       p_note: $('tr-note').value.trim() || null
     });
     setBusy(button, false);
+    syncOperationCompleteGuard('transfer');
     if (error) return toast(friendlyError(error), 'error');
     const row = data?.[0] || {};
     toast(`Whole-rack transfer saved: ${row.transaction_no || 'completed'} · ${Number(row.moved_stock_lot_count || 0).toLocaleString()} stock lines · ${Number(row.moved_shipper_box_count || 0).toLocaleString()} Shipper boxes.`, 'success');
@@ -4155,6 +4239,7 @@ async function completeTransfer() {
     p_note: $('tr-note').value.trim() || null
   });
   setBusy(button, false);
+  syncOperationCompleteGuard('transfer');
   if (error) return toast(friendlyError(error), 'error');
   toast(`Transfer saved: ${data?.[0]?.transaction_no || 'completed'}`, 'success');
   invalidateReports();
