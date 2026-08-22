@@ -587,6 +587,10 @@
           </article>
         </div>
         <article class="card" style="margin-top:18px">
+          <div class="card-head"><div><h3>Saved Pick correction queue</h3><p>Picker-reported SAVED Pick mistakes awaiting Supervisor review, plus approved physical returns still needing rack/barcode confirmation.</p></div><span id="dashboard-pending-pick-returns-count" class="pill">0 open</span></div>
+          <div id="dashboard-pending-pick-returns" class="table-wrap"></div>
+        </article>
+        <article class="card" style="margin-top:18px">
           <div class="card-head"><div><h3>SKU consolidation opportunities</h3><p>Same Brand + Description + Variant + Size + Container + Expiry currently spread across two or more physical racks</p></div><span id="dashboard-consolidation-count" class="pill">0 opportunities</span></div>
           <div id="dashboard-consolidation" class="table-wrap"></div>
         </article>
@@ -735,7 +739,7 @@
             </div>
           </div>
           <div id="pick-cart" class="table-wrap"></div>
-          <div class="card-head compact"><div><h3>Picking / Stock Adjustment summary</h3><p>Normal Sales Orders show multi-rack progress. SO 0 shows only the current adjustment rack because each completed adjustment is immediately final and reusable.</p></div><button id="pick-summary-refresh-btn" class="secondary" type="button">Refresh summary</button></div>
+          <div class="card-head compact"><div><h3>Picking / Stock Adjustment summary</h3><p>Normal Sales Orders show multi-rack progress. SAVED rows remain immutable; Supervisor/Admin/Owner may create a separate Saved Pick correction. SO 0 remains immediately final and reusable.</p></div><button id="pick-summary-refresh-btn" class="secondary" type="button">Refresh summary</button></div>
           <div id="pick-order-summary" class="table-wrap"><div class="empty-state">Enter a sales order number to see its picking summary.</div></div>
         </div>
       </section>
@@ -1271,6 +1275,78 @@
     </form>
   </dialog>
 
+  <dialog id="saved-pick-correction-dialog" class="edit-dialog">
+    <div class="scanner-head">
+      <div><h3>Report SAVED Pick Mistake</h3><p>Original picker may report their own SAVED line. Supervisor/Admin/Owner may also report an eligible line. Reporting does not change Inventory.</p></div>
+      <button id="saved-pick-correction-close" class="icon-button" type="button">✕</button>
+    </div>
+    <form id="saved-pick-correction-form" class="stack">
+      <input id="saved-pick-correction-line-id" type="hidden" />
+      <div id="saved-pick-correction-context" class="info-box"></div>
+      <label>Quantity mistakenly over-picked / incorrectly saved *
+        <input id="saved-pick-correction-qty" type="number" min="1" step="1" inputmode="numeric" required />
+      </label>
+      <label>Where is that excess stock now? *
+        <select id="saved-pick-correction-mode" required>
+          <option value="PHYSICAL_RETURN">Already removed from rack — physical return required</option>
+          <option value="STILL_IN_ORIGINAL_RACK">Never physically left the original rack</option>
+        </select>
+      </label>
+      <label>Picker mistake report / reason *
+        <textarea id="saved-pick-correction-reason" maxlength="500" rows="3" required placeholder="Example: I entered 10 CASE instead of 8 CASE. The extra 2 CASE were already removed from A12."></textarea>
+      </label>
+      <div class="warning-box"><strong>No stock changes at this step.</strong> This creates <strong>CORRECTION REQUESTED</strong> and blocks Finish Sales Order until Supervisor/Admin/Owner reviews or rejects it.</div>
+      <button class="primary" type="submit">Report mistake for Supervisor review</button>
+    </form>
+  </dialog>
+
+  <dialog id="saved-pick-review-dialog" class="edit-dialog">
+    <div class="scanner-head">
+      <div><h3>Review SAVED Pick Correction</h3><p>Supervisor / Admin / Owner only. Review the picker report before any stock is restored.</p></div>
+      <button id="saved-pick-review-close" class="icon-button" type="button">✕</button>
+    </div>
+    <form id="saved-pick-review-form" class="stack">
+      <input id="saved-pick-review-id" type="hidden" />
+      <div id="saved-pick-review-context" class="info-box"></div>
+      <label>Approved correction quantity *
+        <input id="saved-pick-review-qty" type="number" min="1" step="1" inputmode="numeric" required />
+      </label>
+      <label>Approved physical status *
+        <select id="saved-pick-review-mode" required>
+          <option value="PHYSICAL_RETURN">Physical return required — assign to original picker</option>
+          <option value="STILL_IN_ORIGINAL_RACK">Stock never left original rack — restore immediately</option>
+        </select>
+      </label>
+      <label>Supervisor review note
+        <textarea id="saved-pick-review-note" maxlength="500" rows="3" placeholder="Required when rejecting or changing the picker-reported quantity / physical status."></textarea>
+      </label>
+      <div class="warning-box"><strong>Approve carefully.</strong> “Still in original rack” restores stock immediately. “Physical return required” does not restore stock until the assigned picker/Supervisor scans the original rack and registered UOM barcode.</div>
+      <div class="dialog-actions">
+        <button id="saved-pick-review-reject" class="danger" type="button">Reject request</button>
+        <button class="primary" type="submit">Approve correction</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="saved-pick-return-dialog" class="edit-dialog">
+    <div class="scanner-head">
+      <div><h3>Complete Saved Pick Return</h3><p>Return the exact excess stock to its original rack.</p></div>
+      <button id="saved-pick-return-close" class="icon-button" type="button">✕</button>
+    </div>
+    <form id="saved-pick-return-form" class="stack">
+      <input id="saved-pick-return-id" type="hidden" />
+      <div id="saved-pick-return-context" class="warning-box"></div>
+      <label>Original return rack / QR *
+        <div class="scan-field"><input id="saved-pick-return-location" autocomplete="off" required /><button type="button" class="scan-btn" data-scan-target="saved-pick-return-location" data-scan-kind="location">Scan</button></div>
+      </label>
+      <label>CASE, PACK, or PIECE barcode *
+        <div class="scan-field with-na"><input id="saved-pick-return-barcode" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" required /><button type="button" class="scan-btn" data-scan-target="saved-pick-return-barcode" data-scan-kind="barcode">Scan</button><button type="button" class="na-btn" data-na-target="saved-pick-return-barcode">N/A</button></div>
+      </label>
+      <div class="info-box"><strong>Stock is restored only after this confirmation succeeds.</strong> The database requires the original rack and the registered barcode for the saved UOM. N/A is accepted only when that UOM is stored as N/A in the SKU Masterlist.</div>
+      <button class="primary" type="submit">Confirm physical return</button>
+    </form>
+  </dialog>
+
   <dialog id="warehouse-approval-dialog" class="edit-dialog">
     <div class="scanner-head">
       <div><h3 id="warehouse-approval-title">Approve controlled action</h3><p>Supervisor / Admin / Owner approval. The warehouse user remains signed in.</p></div>
@@ -1418,6 +1494,6 @@
   </dialog>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260822-unfinished-entry-safeguards-1"></script>
+  <script type="module" src="app.js?v=20260822-saved-pick-correction-v2-1"></script>
 </body>
 </html>

@@ -196,6 +196,11 @@ const state = {
   pickOrder: { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false },
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
+  pickOrderCorrections: [],
+  pickRequestedCorrectionCount: 0,
+  pickPendingReturnCount: 0,
+  pickBlockingPendingReturnCount: 0,
+  dashboardPendingPickReturns: [],
   transfer: freshOperationState(),
   data: { inventory: [], physicalCount: [], physicalCountFiltered: [], stockCard: [], stockCardExport: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], auditFiltered: [], locations: [], rackMap: [] },
   stockCardMeta: null,
@@ -398,6 +403,13 @@ function setupStaticEvents() {
   $('pick-complete-btn').addEventListener('click', completePicking);
   $('pick-finish-so-btn').addEventListener('click', finishPickSalesOrder);
   $('pick-summary-refresh-btn').addEventListener('click', loadPickSalesOrderSummary);
+  $('saved-pick-correction-close').addEventListener('click', () => $('saved-pick-correction-dialog').close());
+  $('saved-pick-correction-form').addEventListener('submit', submitSavedPickMistakeReport);
+  $('saved-pick-review-close').addEventListener('click', () => $('saved-pick-review-dialog').close());
+  $('saved-pick-review-form').addEventListener('submit', submitSavedPickReviewApproval);
+  $('saved-pick-review-reject').addEventListener('click', submitSavedPickReviewRejection);
+  $('saved-pick-return-close').addEventListener('click', () => $('saved-pick-return-dialog').close());
+  $('saved-pick-return-form').addEventListener('submit', submitSavedPickReturn);
 
   $('tr-lock-btn').addEventListener('click', lockTransferLocation);
   $('tr-transfer-all').addEventListener('change', syncFullTransferMode);
@@ -546,6 +558,14 @@ function setupStaticEvents() {
     if (userActive) toggleManagedUserActive(userActive.dataset.userActive);
     const bypassPick = event.target.closest('[data-pick-bypass-lot]');
     if (bypassPick) addSupervisorBarcodeBypass(bypassPick.dataset.pickBypassLot);
+    const savedPickReport = event.target.closest('[data-saved-pick-report]');
+    if (savedPickReport) openSavedPickMistakeReport(savedPickReport.dataset.savedPickReport);
+    const savedPickReview = event.target.closest('[data-saved-pick-review]');
+    if (savedPickReview) openSavedPickReview(savedPickReview.dataset.savedPickReview);
+    const savedPickReturn = event.target.closest('[data-saved-pick-return]');
+    if (savedPickReturn) openSavedPickReturn(savedPickReturn.dataset.savedPickReturn);
+    const emergencyFinish = event.target.closest('[data-emergency-finish-saved-pick]');
+    if (emergencyFinish) emergencyFinishSalesOrderWithPendingReturn();
     const pendingRename = event.target.closest('[data-pending-location-rename]');
     if (pendingRename) openPendingLocationRename(pendingRename.dataset.pendingLocationRename);
     const pendingDelete = event.target.closest('[data-pending-location-delete]');
@@ -988,14 +1008,15 @@ async function loadScreen(name, force = false) {
 }
 
 async function loadDashboard() {
-  const [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes] = await Promise.all([
+  const [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes, pendingReturnsRes] = await Promise.all([
     supabase.from('v_inventory_details').select('*').limit(10000),
     supabase.from('v_location_summary').select('*').limit(5000),
     supabase.from('v_history_details').select('*').order('created_at', { ascending: false }).limit(12),
     supabase.rpc('get_dashboard_pending_pick_sales_orders'),
-    supabase.rpc('get_dashboard_active_location_locks')
+    supabase.rpc('get_dashboard_active_location_locks'),
+    supabase.rpc('get_saved_pick_action_queue')
   ]);
-  [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes].forEach((r) => { if (r.error) throw r.error; });
+  [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes, pendingReturnsRes].forEach((r) => { if (r.error) throw r.error; });
   const inventory = inventoryRes.data || [];
   const locations = locationRes.data || [];
   const attention = inventory.filter((r) => r.expiry_status !== 'OK');
@@ -1027,6 +1048,8 @@ async function loadDashboard() {
   ]) : emptyState('No transactions yet.');
 
   renderDashboardPendingSalesOrders(pendingSoRes.data || []);
+  state.dashboardPendingPickReturns = pendingReturnsRes.data || [];
+  renderDashboardPendingPickReturns(state.dashboardPendingPickReturns);
   renderDashboardActiveLocks(activeLocksRes.data || []);
   renderDashboardConsolidation(inventory);
 
@@ -1055,6 +1078,64 @@ function renderDashboardPendingSalesOrders(rows) {
   </tr>`).join('')}</tbody></table></div>`;
 }
 
+function renderDashboardPendingPickReturns(rows) {
+  const container = $('dashboard-pending-pick-returns');
+  const count = $('dashboard-pending-pick-returns-count');
+  if (!container || !count) return;
+
+  const reviewCount = rows.filter((r) => r.correction_status === 'REQUESTED').length;
+  const returnCount = rows.filter((r) => r.correction_status === 'PENDING_RETURN').length;
+
+  count.textContent = `${rows.length} open`;
+  if (!rows.length) {
+    container.innerHTML = emptyState('No Saved Pick correction request or physical return needs action.');
+    return;
+  }
+
+  container.innerHTML = `<div class="info-box">
+      <strong>${reviewCount} awaiting review</strong> · <strong>${returnCount} physical return${returnCount===1?'':'s'} pending</strong>.
+      Reporting a mistake does not change Inventory. Stock changes only after Supervisor approval and, when required, rack/barcode return confirmation.
+    </div>
+    <div class="table-wrap"><table><thead><tr>
+      <th>Status</th><th>Sales Order</th><th>Item / Qty</th><th>Rack / Container</th><th>Reported / assigned</th><th>Reason</th><th>Action</th>
+    </tr></thead><tbody>${rows.map((r) => {
+      const isRequest = r.correction_status === 'REQUESTED';
+      const status = isRequest
+        ? '<span class="pill override">CORRECTION REQUESTED</span><br><small>Awaiting Supervisor review</small>'
+        : (r.finish_override_at
+            ? `<span class="pill near">RETURN PENDING</span><br><span class="pill override">SO FINISH OVERRIDDEN</span>`
+            : '<span class="pill near">RETURN PENDING</span>');
+
+      const qty = isRequest
+        ? `Reported: <strong>${fmtQtyUom(r.reported_qty,r.uom)}</strong>`
+        : `Approved return: <strong>${fmtQtyUom(r.correction_qty,r.uom)}</strong>`;
+
+      const actor = isRequest
+        ? `Reported by ${escapeHtml(r.reported_by_username || '—')}<br><small>${fmtDateTime(r.reported_at)}</small>`
+        : `Assigned to ${escapeHtml(r.assigned_to_username || 'Supervisor follow-up')}${r.reviewed_by_username ? `<br><small>Approved by ${escapeHtml(r.reviewed_by_username)} (${escapeHtml(String(r.reviewed_role || '').toUpperCase())})</small>` : ''}`;
+
+      let action = '<small>Awaiting action</small>';
+      if (isRequest && r.can_review) {
+        action = `<button type="button" class="secondary" data-saved-pick-review="${escapeHtml(r.correction_id)}">Review</button>`;
+      } else if (isRequest) {
+        action = '<small>Awaiting Supervisor review</small>';
+      } else if (r.can_complete_return) {
+        action = `<button type="button" class="secondary" data-saved-pick-return="${escapeHtml(r.correction_id)}">Complete return</button>`;
+      } else {
+        action = '<small>Assigned picker / Supervisor+</small>';
+      }
+
+      return `<tr>
+        <td>${status}</td>
+        <td><strong>${escapeHtml(r.sales_order)}</strong></td>
+        <td class="wrap"><strong>${escapeHtml(r.sku_name || '—')}</strong><br>${qty}<br><small>${escapeHtml((isRequest ? r.reported_physical_state : r.correction_mode) === 'STILL_IN_ORIGINAL_RACK' ? 'Reported/approved: still in original rack' : 'Physical return required')}</small></td>
+        <td><strong>${escapeHtml(r.expected_location_code || '—')}</strong><br><small>${escapeHtml(r.container_no || '—')} · ${fmtDate(r.expiry_date)}</small></td>
+        <td>${actor}</td>
+        <td class="wrap">${escapeHtml(r.report_reason || '—')}${r.finish_override_reason ? `<br><small>Emergency finish: ${escapeHtml(r.finish_override_reason)}</small>` : ''}</td>
+        <td>${action}</td>
+      </tr>`;
+    }).join('')}</tbody></table></div>`;
+}
 function renderDashboardActiveLocks(rows) {
   const container = $('dashboard-active-rack-locks');
   const count = $('dashboard-active-rack-locks-count');
@@ -3655,26 +3736,147 @@ function resetOperation(operation) {
 
 
 
+function resetPickCorrectionReporting() {
+  state.pickOrderSummary = [];
+  state.pickOrderCorrections = [];
+  state.pickRequestedCorrectionCount = 0;
+  state.pickPendingReturnCount = 0;
+  state.pickBlockingPendingReturnCount = 0;
+}
+
 async function loadPickSalesOrderSummary() {
   const so = $('pick-so').value.trim();
   if (isStockAdjustmentSalesOrder(so)) {
-    state.pickOrderSummary = [];
+    resetPickCorrectionReporting();
     renderPickSalesOrderSummary();
+    updatePickSalesOrderControls();
     return;
   }
   if (!so || state.pickOrder.status === 'NEW' || !state.pickOrder.status) {
-    state.pickOrderSummary = [];
+    resetPickCorrectionReporting();
     renderPickSalesOrderSummary();
+    updatePickSalesOrderControls();
     return;
   }
-  const { data, error } = await supabase.rpc('get_pick_sales_order_summary', { p_sales_order: so });
-  if (error) {
+
+  const [summaryRes, correctionRes] = await Promise.all([
+    supabase.rpc('get_pick_sales_order_summary_with_corrections', { p_sales_order: so }),
+    supabase.rpc('get_saved_pick_corrections', { p_sales_order: so })
+  ]);
+
+  if (summaryRes.error || correctionRes.error) {
     state.pickOrderSummary = [];
-    $('pick-order-summary').innerHTML = `<div class="warning-box">${escapeHtml(friendlyError(error))}</div>`;
+    state.pickOrderCorrections = [];
+    state.pickRequestedCorrectionCount = -1;
+    state.pickPendingReturnCount = -1;
+    state.pickBlockingPendingReturnCount = -1;
+    $('pick-order-summary').innerHTML = `<div class="warning-box">${escapeHtml(friendlyError(summaryRes.error || correctionRes.error))}</div>`;
+    updatePickSalesOrderControls();
     return;
   }
-  state.pickOrderSummary = data || [];
+
+  state.pickOrderSummary = summaryRes.data || [];
+  state.pickOrderCorrections = correctionRes.data || [];
+  state.pickRequestedCorrectionCount = state.pickOrderCorrections.filter((r) => r.correction_status === 'REQUESTED').length;
+  state.pickPendingReturnCount = state.pickOrderCorrections.filter((r) => r.correction_status === 'PENDING_RETURN').length;
+  state.pickBlockingPendingReturnCount = state.pickOrderCorrections.filter((r) =>
+    r.correction_status === 'PENDING_RETURN' && !r.finish_override_at
+  ).length;
+
   renderPickSalesOrderSummary();
+  updatePickSalesOrderControls();
+}
+
+function savedPickLineStatus(row) {
+  if (row.line_status === 'QUEUED') return '<span class="pill near">QUEUED</span>';
+  if (Number(row.requested_correction_qty || 0) > 0) return '<span class="pill override">CORRECTION REQUESTED</span>';
+  if (Number(row.pending_return_qty || 0) > 0) return '<span class="pill near">RETURN PENDING</span>';
+  if (Number(row.completed_correction_qty || 0) > 0) return '<span class="pill active">CORRECTED</span>';
+  return '<span class="pill">SAVED</span>';
+}
+
+function savedPickPhysicalStateLabel(value) {
+  return value === 'STILL_IN_ORIGINAL_RACK'
+    ? 'Stock reported still in original rack'
+    : 'Physical return required';
+}
+
+function renderSavedPickCorrections() {
+  const rows = state.pickOrderCorrections || [];
+  if (!rows.length) return '';
+
+  const requested = rows.filter((r) => r.correction_status === 'REQUESTED');
+  const pending = rows.filter((r) => r.correction_status === 'PENDING_RETURN');
+  const blockingPending = pending.filter((r) => !r.finish_override_at);
+
+  const canEmergencyFinish = state.mode === 'ACTIVE'
+    && state.pickOrder.status === 'OPEN'
+    && requested.length === 0
+    && blockingPending.length > 0
+    && !state.pick.lockToken;
+
+  let warning = '';
+  if (requested.length) {
+    warning = `<div class="warning-box">
+      <strong>${requested.length} Saved Pick mistake report${requested.length===1?' is':'s are'} awaiting Supervisor review.</strong>
+      Finish Sales Order is blocked. Emergency Finish is intentionally unavailable until the reported quantity/status has been reviewed.
+    </div>`;
+  } else if (blockingPending.length) {
+    warning = `<div class="warning-box">
+      <strong>${blockingPending.length} approved physical return${blockingPending.length===1?'':'s'} must still be completed.</strong>
+      Normal Finish Sales Order is blocked until rack/barcode return confirmation.
+      ${canEmergencyFinish ? `<button type="button" class="danger" data-emergency-finish-saved-pick="1">Emergency finish with approval</button>` : ''}
+    </div>`;
+  } else if (pending.length) {
+    warning = `<div class="warning-box">
+      <strong>${pending.length} physical return${pending.length===1?'':'s'} remain unresolved after an approved Emergency Finish.</strong>
+      The Sales Order may be closed, but these stock returns remain real warehouse obligations and stay on the Dashboard.
+    </div>`;
+  }
+
+  return `${warning}
+    <div class="card-head compact">
+      <div><h4>Saved Pick mistake reports / corrections</h4>
+      <p>Picker reports first. Supervisor/Admin/Owner reviews. Original SAVED rows remain immutable.</p></div>
+    </div>
+    <div class="table-wrap"><table><thead><tr>
+      <th>Status</th><th>Item</th><th>Picker report</th><th>Supervisor review</th><th>Rack / container</th><th>People / time</th><th>Action</th>
+    </tr></thead><tbody>${rows.map((r) => {
+      let status = '<span class="pill">UNKNOWN</span>';
+      if (r.correction_status === 'REQUESTED') status = '<span class="pill override">CORRECTION REQUESTED</span>';
+      if (r.correction_status === 'REJECTED') status = '<span class="pill">REJECTED</span>';
+      if (r.correction_status === 'PENDING_RETURN') status = `<span class="pill near">RETURN PENDING</span>${r.finish_override_at ? '<br><span class="pill override">SO FINISH OVERRIDDEN</span>' : ''}`;
+      if (r.correction_status === 'COMPLETED') status = `<span class="pill active">COMPLETED</span>${r.correction_mode === 'STILL_IN_ORIGINAL_RACK' ? '<br><small>Supervisor confirmed stock never left rack</small>' : '<br><small>Physical return confirmed</small>'}`;
+
+      const report = `${fmtQtyUom(r.reported_qty,r.uom)}<br><small>${escapeHtml(savedPickPhysicalStateLabel(r.reported_physical_state))}</small><br><span class="small-note">${escapeHtml(r.report_reason || '—')}</span>`;
+
+      const review = r.correction_status === 'REQUESTED'
+        ? '<small>Awaiting Supervisor review</small>'
+        : (r.correction_status === 'REJECTED'
+            ? `<strong>Rejected</strong>${r.review_note ? `<br><small>${escapeHtml(r.review_note)}</small>` : ''}`
+            : `<strong>${fmtQtyUom(r.correction_qty || 0,r.uom)}</strong><br><small>${escapeHtml(savedPickPhysicalStateLabel(r.correction_mode))}</small>${r.review_note ? `<br><small>${escapeHtml(r.review_note)}</small>` : ''}`);
+
+      const people = `Reported by ${escapeHtml(r.reported_by_username || '—')}<br><small>${fmtDateTime(r.reported_at)}</small>${r.reviewed_by_username ? `<br>Reviewed by ${escapeHtml(r.reviewed_by_username)} (${escapeHtml(String(r.reviewed_role || '').toUpperCase())})<br><small>${fmtDateTime(r.reviewed_at)}</small>` : ''}${r.returned_by_username ? `<br>Completed by ${escapeHtml(r.returned_by_username)}<br><small>${fmtDateTime(r.returned_at)}</small>` : ''}`;
+
+      let action = '—';
+      if (r.correction_status === 'REQUESTED' && r.can_review) {
+        action = `<button type="button" class="secondary" data-saved-pick-review="${escapeHtml(r.correction_id)}">Review</button>`;
+      } else if (r.correction_status === 'REQUESTED') {
+        action = '<small>Awaiting Supervisor</small>';
+      } else if (r.correction_status === 'PENDING_RETURN' && r.can_complete_return) {
+        action = `<button type="button" class="secondary" data-saved-pick-return="${escapeHtml(r.correction_id)}">Complete return</button>`;
+      }
+
+      return `<tr>
+        <td>${status}</td>
+        <td class="wrap"><strong>${escapeHtml(r.sku_name || '—')}</strong><br><small>Original ${escapeHtml(r.original_transaction_no || '—')} · ${fmtDateTime(r.original_picked_at)}</small></td>
+        <td>${report}</td>
+        <td>${review}</td>
+        <td><strong>${escapeHtml(r.expected_location_code || r.original_location_code || '—')}</strong><br><small>${escapeHtml(r.container_no || '—')} · ${fmtDate(r.expiry_date)}</small></td>
+        <td>${people}${r.finish_override_reason ? `<br><small>Emergency finish: ${escapeHtml(r.finish_override_reason)}</small>` : ''}</td>
+        <td>${action}</td>
+      </tr>`;
+    }).join('')}</tbody></table></div>`;
 }
 
 function renderPickSalesOrderSummary() {
@@ -3685,6 +3887,7 @@ function renderPickSalesOrderSummary() {
     container.innerHTML = emptyState('Enter a sales order number to see its picking summary.');
     return;
   }
+
   if (isStockAdjustmentSalesOrder(so)) {
     const queued = (state.pick.cart || []).map((row) => {
       const item = [row.brand, row.description, row.variant, row.size].filter(Boolean).join(' ') || row.sku_name || '—';
@@ -3701,24 +3904,391 @@ function renderPickSalesOrderSummary() {
       : emptyState('No stock-adjustment items are queued on the current rack.'));
     return;
   }
-  const saved = (state.pickOrderSummary || []).map((row) => ({ ...row, line_status: 'SAVED' }));
-  const queued = (state.pick.cart || []).map((row) => ({
-    transaction_no: 'Current rack', picked_at: null, location_code: state.pick.locationCode || '—',
-    brand: row.brand || '', description: row.description || row.sku_name || '', variant: row.variant || '', size: row.size || '',
-    container_no: row.container_no, expiry_date: row.expiry_date, uom: row.uom, picked_qty: row.qty, line_status: 'QUEUED'
+
+  const saved = (state.pickOrderSummary || []).map((row) => ({
+    ...row,
+    line_status:'SAVED',
+    summary_qty:Number(row.net_picked_qty ?? row.picked_qty)
   }));
-  const rows = [...saved, ...queued];
+
+  const queued = (state.pick.cart || []).map((row) => ({
+    transaction_no:'Current rack',
+    picked_at:null,
+    location_code:state.pick.locationCode || '—',
+    brand:row.brand || '',
+    description:row.description || row.sku_name || '',
+    variant:row.variant || '',
+    size:row.size || '',
+    container_no:row.container_no,
+    expiry_date:row.expiry_date,
+    uom:row.uom,
+    picked_qty:row.qty,
+    net_picked_qty:row.qty,
+    summary_qty:row.qty,
+    line_status:'QUEUED'
+  }));
+
+  const rows = [...saved,...queued];
+  const correctionHtml = renderSavedPickCorrections();
+
   if (!rows.length) {
-    container.innerHTML = emptyState(`No items have been picked yet for sales order ${so}.`);
+    container.innerHTML = emptyState(`No retained current-cycle pick lines are available for sales order ${so}.`) + correctionHtml;
     return;
   }
-  const totals = sumByUom(rows, 'picked_qty');
+
+  const totals = sumByUom(rows,'summary_qty');
   const racks = new Set(rows.map((r) => r.location_code).filter(Boolean));
-  container.innerHTML = `<div class="info-box"><strong>${escapeHtml(so)} progress:</strong> ${formatBalances(totals)} · ${racks.size.toLocaleString()} rack${racks.size === 1 ? '' : 's'} represented. Rows marked QUEUED are from the currently locked rack and are not saved until you click Complete this rack.</div>
-    <table><thead><tr><th>Status</th><th>Rack</th><th>Item</th><th>Container</th><th>Expiry</th><th>Picked</th><th>Transaction / time</th></tr></thead><tbody>${rows.map((r) => {
-      const item = [r.brand, r.description, r.variant, r.size].filter(Boolean).join(' ') || r.sku_name || '—';
-      return `<tr><td>${r.line_status === 'QUEUED' ? '<span class="pill near">QUEUED</span>' : '<span class="pill">SAVED</span>'}</td><td>${escapeHtml(r.location_code || '—')}</td><td class="wrap"><strong>${escapeHtml(item)}</strong></td><td>${escapeHtml(r.container_no || '—')}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.picked_qty, r.uom)}</td><td>${escapeHtml(r.transaction_no || '—')}${r.picked_at ? `<br><small>${fmtDateTime(r.picked_at)}</small>` : ''}</td></tr>`;
-    }).join('')}</tbody></table>`;
+  const openIssues = Math.max(Number(state.pickRequestedCorrectionCount || 0),0) + Math.max(Number(state.pickPendingReturnCount || 0),0);
+  const issueText = openIssues
+    ? ` · ${openIssues} correction item${openIssues===1?'':'s'} open`
+    : '';
+
+  container.innerHTML = `<div class="info-box">
+      <strong>${escapeHtml(so)} net progress:</strong> ${formatBalances(totals)} · ${racks.size.toLocaleString()} rack${racks.size===1?'':'s'} represented${issueText}.
+      SAVED lines remain immutable. A reported mistake does not reduce the net until the approved stock is actually restored.
+    </div>
+    <table><thead><tr><th>Status</th><th>Rack</th><th>Item</th><th>Container</th><th>Expiry</th><th>Picked / correction / net</th><th>Transaction / time</th><th>Action</th></tr></thead><tbody>${rows.map((r) => {
+      const item = [r.brand,r.description,r.variant,r.size].filter(Boolean).join(' ') || r.sku_name || '—';
+
+      if (r.line_status === 'QUEUED') {
+        return `<tr><td>${savedPickLineStatus(r)}</td><td>${escapeHtml(r.location_code || '—')}</td><td class="wrap"><strong>${escapeHtml(item)}</strong></td><td>${escapeHtml(r.container_no || '—')}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.picked_qty,r.uom)}</td><td>Current rack</td><td>—</td></tr>`;
+      }
+
+      const corrected = Number(r.completed_correction_qty || 0);
+      const requestedQty = Number(r.requested_correction_qty || 0);
+      const pending = Number(r.pending_return_qty || 0);
+      const remaining = Number(r.remaining_reportable_qty || 0);
+      const net = Number(r.net_picked_qty ?? r.picked_qty);
+
+      const qtyText = `Original: ${fmtQtyUom(r.picked_qty,r.uom)}
+        ${requestedQty ? `<br><span class="pill override">Reported ${fmtQtyUom(requestedQty,r.uom)} awaiting review</span>` : ''}
+        ${pending ? `<br><span class="pill near">Approved return ${fmtQtyUom(pending,r.uom)} pending</span>` : ''}
+        ${corrected ? `<br><strong>Completed correction: ${fmtQtyUom(corrected,r.uom)}</strong>` : ''}
+        <br>Net saved pick: <strong>${fmtQtyUom(net,r.uom)}</strong>`;
+
+      const actorMayReport = isSupervisor() || r.original_picker_id === state.session?.user?.id;
+      const unresolved = Number(r.unresolved_request_count || 0) > 0;
+      const canReport = state.mode === 'ACTIVE'
+        && state.pickOrder.status === 'OPEN'
+        && !state.pick.lockToken
+        && Boolean(r.correction_eligible)
+        && actorMayReport
+        && remaining > 0
+        && !unresolved;
+
+      let action = '—';
+      if (canReport) {
+        action = `<button type="button" class="secondary" data-saved-pick-report="${escapeHtml(r.transaction_line_id)}">Report mistake</button>`;
+      } else if (r.correction_eligible === false) {
+        action = `<small>${escapeHtml(r.correction_block_reason || 'Protected line')}</small>`;
+      } else if (unresolved) {
+        action = '<small>Correction already open</small>';
+      } else if (remaining <= 0) {
+        action = '<small>Fully corrected</small>';
+      } else if (!actorMayReport) {
+        action = '<small>Original picker / Supervisor+ only</small>';
+      } else if (state.pick.lockToken) {
+        action = '<small>Finish current rack first</small>';
+      }
+
+      return `<tr>
+        <td>${savedPickLineStatus(r)}</td>
+        <td>${escapeHtml(r.location_code || '—')}</td>
+        <td class="wrap"><strong>${escapeHtml(item)}</strong><br><small>Picked by ${escapeHtml(r.original_picker_username || '—')}</small></td>
+        <td>${escapeHtml(r.container_no || '—')}</td>
+        <td>${fmtDate(r.expiry_date)}</td>
+        <td>${qtyText}</td>
+        <td>${escapeHtml(r.transaction_no || '—')}${r.picked_at ? `<br><small>${fmtDateTime(r.picked_at)}</small>` : ''}</td>
+        <td>${action}</td>
+      </tr>`;
+    }).join('')}</tbody></table>${correctionHtml}`;
+}
+
+function findSavedPickCorrection(correctionId) {
+  return (state.pickOrderCorrections || []).find((r) => r.correction_id === correctionId)
+    || (state.dashboardPendingPickReturns || []).find((r) => r.correction_id === correctionId)
+    || null;
+}
+
+function openSavedPickMistakeReport(lineId) {
+  const row = (state.pickOrderSummary || []).find((r) => r.transaction_line_id === lineId);
+  if (!row) return toast('SAVED Pick line was not found. Refresh the Sales Order summary and try again.', 'error');
+  if (state.mode !== 'ACTIVE') return toast('Administrative Pause is active.', 'error');
+  if (state.pick.lockToken) return toast('Complete or cancel the current rack before reporting a SAVED Pick mistake.', 'error');
+  if (state.pickOrder.status !== 'OPEN') return toast('Only an OPEN Sales Order can receive a new Saved Pick mistake report.', 'error');
+  if (!row.correction_eligible) return toast(row.correction_block_reason || 'This SAVED line is protected from automatic correction.', 'error');
+
+  const actorMayReport = isSupervisor() || row.original_picker_id === state.session?.user?.id;
+  if (!actorMayReport) return toast('Only the original picker or Supervisor/Admin/Owner may report this SAVED Pick line.', 'error');
+
+  if (Number(row.unresolved_request_count || 0) > 0) {
+    return toast('This SAVED line already has an unresolved correction request/return.', 'error');
+  }
+
+  const remaining = Number(row.remaining_reportable_qty || 0);
+  if (remaining <= 0) return toast('This SAVED line has no remaining correctable quantity.', 'error');
+
+  const item = [row.brand,row.description,row.variant,row.size].filter(Boolean).join(' ') || 'SKU';
+  $('saved-pick-correction-line-id').value = row.transaction_line_id;
+  $('saved-pick-correction-context').innerHTML = `<strong>${escapeHtml(item)}</strong><br>
+    Sales Order: <strong>${escapeHtml($('pick-so').value.trim())}</strong> · Original transaction: ${escapeHtml(row.transaction_no)}<br>
+    Picker: ${escapeHtml(row.original_picker_username || '—')} · Rack: <strong>${escapeHtml(row.location_code)}</strong><br>
+    Container: ${escapeHtml(row.container_no)} · Expiry: ${fmtDate(row.expiry_date)}<br>
+    Original SAVED quantity: ${fmtQtyUom(row.picked_qty,row.uom)} · Remaining reportable: <strong>${fmtQtyUom(remaining,row.uom)}</strong>`;
+
+  $('saved-pick-correction-qty').value = '';
+  $('saved-pick-correction-qty').max = String(remaining);
+  $('saved-pick-correction-qty').dataset.uom = row.uom;
+  $('saved-pick-correction-mode').value = 'PHYSICAL_RETURN';
+  $('saved-pick-correction-reason').value = '';
+  $('saved-pick-correction-dialog').showModal();
+  $('saved-pick-correction-qty').focus();
+}
+
+async function submitSavedPickMistakeReport(event) {
+  event.preventDefault();
+  const lineId = $('saved-pick-correction-line-id').value;
+  const qty = Number($('saved-pick-correction-qty').value);
+  const physicalState = $('saved-pick-correction-mode').value;
+  const reason = $('saved-pick-correction-reason').value.trim();
+
+  if (!Number.isInteger(qty) || qty <= 0) {
+    return toast('Reported correction quantity must be a whole number greater than zero.', 'error');
+  }
+  if (!reason) return toast('Enter why the SAVED Pick is wrong.', 'error');
+
+  if (!window.confirm('Report this SAVED Pick mistake for Supervisor review? No Inventory quantity will change yet.')) return;
+
+  const button = event.submitter;
+  setBusy(button,true,'Reporting mistake…');
+
+  const { data,error } = await supabase.rpc('report_saved_pick_mistake', {
+    p_transaction_line_id:lineId,
+    p_reported_qty:qty,
+    p_physical_state:physicalState,
+    p_reason:reason
+  });
+
+  setBusy(button,false);
+  if (error) return toast(friendlyError(error),'error');
+
+  $('saved-pick-correction-dialog').close();
+  const result = data?.[0];
+  toast(`Correction request reported by ${result?.reported_by_username || 'warehouse user'}. Inventory was not changed; Supervisor review is now required.`, 'success');
+  invalidateReports();
+  await loadPickSalesOrderSummary();
+}
+
+function openSavedPickReview(correctionId) {
+  if (!isSupervisor()) return toast('Supervisor/Admin/Owner access is required to review Saved Pick corrections.', 'error');
+
+  const row = findSavedPickCorrection(correctionId);
+  if (!row) return toast('Saved Pick correction request was not found. Refresh and try again.', 'error');
+  if (row.correction_status !== 'REQUESTED') return toast('This correction request is no longer awaiting review.', 'error');
+  if (row.can_review === false) return toast('Supervisor/Admin/Owner review is required.', 'error');
+
+  $('saved-pick-review-id').value = correctionId;
+  $('saved-pick-review-context').innerHTML = `<strong>${escapeHtml(row.sku_name || 'SKU')}</strong><br>
+    Sales Order: <strong>${escapeHtml(row.sales_order)}</strong> · Original transaction: ${escapeHtml(row.original_transaction_no || '—')}<br>
+    Original picker: ${escapeHtml(row.original_picker_username || '—')} · Reported by: ${escapeHtml(row.reported_by_username || '—')}<br>
+    Original rack: <strong>${escapeHtml(row.expected_location_code || row.original_location_code || '—')}</strong> · Container: ${escapeHtml(row.container_no || '—')} · Expiry: ${fmtDate(row.expiry_date)}<br>
+    Picker reported: <strong>${fmtQtyUom(row.reported_qty,row.uom)}</strong> · ${escapeHtml(savedPickPhysicalStateLabel(row.reported_physical_state))}<br>
+    <span class="small-note">Reason: ${escapeHtml(row.report_reason || '—')}</span>`;
+
+  $('saved-pick-review-qty').value = String(row.reported_qty || '');
+  $('saved-pick-review-qty').min = '1';
+  $('saved-pick-review-qty').max = String(row.original_picked_qty || row.reported_qty || '');
+  $('saved-pick-review-qty').dataset.uom = row.uom;
+  $('saved-pick-review-mode').value = row.reported_physical_state || 'PHYSICAL_RETURN';
+  $('saved-pick-review-note').value = '';
+  $('saved-pick-review-dialog').showModal();
+  $('saved-pick-review-qty').focus();
+}
+
+async function submitSavedPickReviewApproval(event) {
+  event.preventDefault();
+
+  const correctionId = $('saved-pick-review-id').value;
+  const row = findSavedPickCorrection(correctionId);
+  if (!row) return toast('Correction request was not found. Refresh and try again.', 'error');
+
+  const qty = Number($('saved-pick-review-qty').value);
+  const mode = $('saved-pick-review-mode').value;
+  const note = $('saved-pick-review-note').value.trim();
+
+  if (!Number.isInteger(qty) || qty <= 0) {
+    return toast('Approved correction quantity must be a whole number greater than zero.', 'error');
+  }
+
+  const changed = qty !== Number(row.reported_qty || 0) || mode !== row.reported_physical_state;
+  if (changed && note.length < 3) {
+    return toast('Enter a Supervisor review note because you changed the picker-reported quantity or physical status.', 'error');
+  }
+
+  if (mode === 'STILL_IN_ORIGINAL_RACK') {
+    const ok = window.confirm(
+      `Confirm that ${fmtQtyUom(qty,row.uom)} NEVER physically left rack ${row.expected_location_code || row.original_location_code}. ` +
+      'Approval will restore this quantity to Inventory immediately without a return scan.'
+    );
+    if (!ok) return;
+  } else {
+    const ok = window.confirm(
+      `Approve ${fmtQtyUom(qty,row.uom)} for physical return to rack ${row.expected_location_code || row.original_location_code}? ` +
+      'Inventory will NOT be restored until the assigned picker or Supervisor confirms the rack and barcode.'
+    );
+    if (!ok) return;
+  }
+
+  const button = event.submitter;
+  setBusy(button,true,mode === 'STILL_IN_ORIGINAL_RACK' ? 'Approving + restoring…' : 'Approving return…');
+
+  const { data,error } = await supabase.rpc('review_saved_pick_correction', {
+    p_correction_id:correctionId,
+    p_decision:'APPROVE',
+    p_correction_qty:qty,
+    p_mode:mode,
+    p_review_note:note || null
+  });
+
+  setBusy(button,false);
+  if (error) return toast(friendlyError(error),'error');
+
+  $('saved-pick-review-dialog').close();
+  const result = data?.[0];
+  toast(result?.correction_status === 'COMPLETED'
+    ? 'Correction approved. Supervisor confirmed the excess never left the original rack, so stock was restored immediately.'
+    : `Correction approved. Physical return of ${fmtQtyUom(result?.correction_qty || qty,row.uom)} is now assigned to ${result?.assigned_to_username || 'the original picker'}.`,
+    'success');
+
+  invalidateReports();
+  if (state.currentScreen === 'dashboard') await loadDashboard();
+  if ($('pick-so')?.value?.trim()) await loadPickSalesOrderSummary();
+}
+
+async function submitSavedPickReviewRejection() {
+  const correctionId = $('saved-pick-review-id').value;
+  const note = $('saved-pick-review-note').value.trim();
+  if (note.length < 3) return toast('Enter the rejection reason in Supervisor review note.', 'error');
+  if (!window.confirm('Reject this Saved Pick correction request? No Inventory quantity will change.')) return;
+
+  const button = $('saved-pick-review-reject');
+  setBusy(button,true,'Rejecting…');
+
+  const { data,error } = await supabase.rpc('review_saved_pick_correction', {
+    p_correction_id:correctionId,
+    p_decision:'REJECT',
+    p_correction_qty:null,
+    p_mode:null,
+    p_review_note:note
+  });
+
+  setBusy(button,false);
+  if (error) return toast(friendlyError(error),'error');
+
+  $('saved-pick-review-dialog').close();
+  toast('Saved Pick correction request rejected. Inventory was not changed.', 'success');
+  invalidateReports();
+  if (state.currentScreen === 'dashboard') await loadDashboard();
+  if ($('pick-so')?.value?.trim()) await loadPickSalesOrderSummary();
+}
+
+function openSavedPickReturn(correctionId) {
+  const row = findSavedPickCorrection(correctionId);
+  if (!row) return toast('Pending Saved Pick return was not found. Refresh and try again.', 'error');
+  if (row.correction_status !== 'PENDING_RETURN') return toast('This correction is not waiting for a physical return.', 'error');
+  if (row.can_complete_return === false) return toast('This return is assigned to the original picker. Supervisor/Admin/Owner may also complete it.', 'error');
+
+  $('saved-pick-return-id').value = correctionId;
+  $('saved-pick-return-context').innerHTML = `<strong>${escapeHtml(row.sku_name || 'SKU')}</strong><br>
+    Sales Order: <strong>${escapeHtml(row.sales_order)}</strong> · Return ${fmtQtyUom(row.correction_qty,row.uom)}<br>
+    Required rack: <strong>${escapeHtml(row.expected_location_code || '—')}</strong> · Container: ${escapeHtml(row.container_no || '—')} · Expiry: ${fmtDate(row.expiry_date)}<br>
+    <span class="small-note">Picker report: ${escapeHtml(row.report_reason || '—')}</span>`;
+
+  $('saved-pick-return-location').value = '';
+  $('saved-pick-return-barcode').value = '';
+  $('saved-pick-return-dialog').showModal();
+  $('saved-pick-return-location').focus();
+}
+
+async function submitSavedPickReturn(event) {
+  event.preventDefault();
+  const correctionId = $('saved-pick-return-id').value;
+  const location = $('saved-pick-return-location').value.trim();
+  const barcode = $('saved-pick-return-barcode').value.trim();
+
+  if (!location) return toast('Scan or enter the required original return rack.', 'error');
+  if (!barcode) return toast('Scan the registered unit barcode, or use N/A only when that UOM is registered N/A.', 'error');
+
+  const button = event.submitter;
+  setBusy(button,true,'Confirming return…');
+
+  const { data,error } = await supabase.rpc('complete_saved_pick_return', {
+    p_correction_id:correctionId,
+    p_location_code:location,
+    p_barcode:barcode
+  });
+
+  setBusy(button,false);
+  if (error) return toast(friendlyError(error),'error');
+
+  $('saved-pick-return-dialog').close();
+  const row = data?.[0];
+  toast(`Return completed: ${fmtQtyUom(row?.restored_qty || 0,row?.uom)} restored to ${row?.returned_location_code || location}.`, 'success');
+
+  invalidateReports();
+  if (state.currentScreen === 'dashboard') await loadDashboard();
+  if ($('pick-so')?.value?.trim()) await loadPickSalesOrderSummary();
+}
+
+async function emergencyFinishSalesOrderWithPendingReturn() {
+  const so = $('pick-so').value.trim();
+
+  if (!so || state.pickOrder.status !== 'OPEN') return toast('An OPEN Sales Order is required.', 'error');
+  if (state.pick.lockToken) return toast('Complete or cancel the current rack first.', 'error');
+  if (state.pickRequestedCorrectionCount > 0) return toast('Emergency Finish is unavailable while a Saved Pick mistake is awaiting Supervisor review.', 'error');
+  if (state.pickBlockingPendingReturnCount <= 0) return toast('There is no approved unresolved physical return requiring Emergency Finish.', 'error');
+
+  const reason = window.prompt('Emergency Finish reason (required). Explain why the Sales Order must close before the approved physical return is completed:');
+  if (!reason?.trim()) return toast('Emergency Finish was cancelled because a reason is required.', 'error');
+
+  const approval = await requestWarehouseApproval({
+    title:'Approve Emergency Finish with Pending Saved Pick Return',
+    contextHtml:`<strong>Sales Order ${escapeHtml(so)}</strong><br>
+      ${state.pickBlockingPendingReturnCount} approved physical return${state.pickBlockingPendingReturnCount===1?'':'s'} will remain PENDING after the Sales Order closes.<br>
+      <strong>This approval does NOT restore stock and does NOT mark any return complete.</strong><br>
+      Reason: ${escapeHtml(reason.trim())}`,
+    rpcName:'approve_saved_pick_emergency_finish',
+    rpcArgs:{
+      p_requested_by:state.session.user.id,
+      p_sales_order:so,
+      p_reason:reason.trim()
+    },
+    confirmLabel:'APPROVE EMERGENCY FINISH'
+  });
+
+  if (!approval?.approval_token) return;
+
+  const { data,error } = await supabase.rpc('finish_pick_sales_order_with_pending_return_override', {
+    p_sales_order:so,
+    p_reason:reason.trim(),
+    p_approval_token:approval.approval_token
+  });
+
+  if (error) return toast(friendlyError(error),'error');
+
+  const row = data?.[0];
+  toast(`Sales Order ${row?.result_sales_order || so} finished by approved exception. ${Number(row?.pending_return_count || 0)} physical return(s) remain unresolved and will stay on the Dashboard.`, 'success');
+
+  $('pick-so').value = '';
+  $('pick-location').value = '';
+  if ($('pick-remarks')) $('pick-remarks').value = '';
+  $('pick-so-override').checked = false;
+  $('pick-so-override-reason').value = '';
+  $('pick-so-override-reason').disabled = true;
+  state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
+  resetPickCorrectionReporting();
+  invalidateReports();
+  await refreshPickSalesOrderStatus();
 }
 
 function isPickSalesOrderInputLocked() {
@@ -3762,8 +4332,16 @@ function updatePickSalesOrderControls() {
         : 'Sales Order is locked while this picking order is in progress. Finish the Sales Order to release it.')
     : '';
 
-  $('pick-finish-so-btn').disabled = adjustmentMode || !(state.mode === 'ACTIVE' && hasSo && orderOpen && hasSavedPick && unlocked);
-  $('pick-finish-so-btn').title = adjustmentMode ? 'Sales Order 0 is reusable Stock Adjustment mode and does not need to be finished.' : '';
+  const correctionStatusKnown = state.pickBlockingPendingReturnCount >= 0 && state.pickRequestedCorrectionCount >= 0;
+  const noBlockingCorrection = state.pickBlockingPendingReturnCount === 0 && state.pickRequestedCorrectionCount === 0;
+  $('pick-finish-so-btn').disabled = adjustmentMode || !(state.mode === 'ACTIVE' && hasSo && orderOpen && hasSavedPick && unlocked && correctionStatusKnown && noBlockingCorrection);
+  $('pick-finish-so-btn').title = adjustmentMode
+    ? 'Sales Order 0 is reusable Stock Adjustment mode and does not need to be finished.'
+    : (state.pickRequestedCorrectionCount > 0
+        ? 'A Saved Pick mistake is awaiting Supervisor review. Review or reject it before finishing this Sales Order.'
+        : (state.pickBlockingPendingReturnCount > 0
+            ? 'Complete the approved Saved Pick physical return before finishing this Sales Order. Emergency finish requires Supervisor/Admin/Owner approval.'
+            : (!correctionStatusKnown ? 'Checking Saved Pick correction status…' : '')));
 
   // "Cancel picking" has two safe meanings:
   // 1) NEW or COMPLETED Sales Order with no active rack: clear only this screen.
@@ -3828,6 +4406,8 @@ async function refreshPickSalesOrderStatus() {
   const so = $('pick-so').value.trim();
   const box = $('pick-so-status');
   const requestNo = ++state.pickOrderLookupSequence;
+  state.pickRequestedCorrectionCount = (so && !isStockAdjustmentSalesOrder(so)) ? -1 : 0;
+  state.pickBlockingPendingReturnCount = (so && !isStockAdjustmentSalesOrder(so)) ? -1 : 0;
 
   if (!so) {
     state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
@@ -3856,8 +4436,8 @@ async function refreshPickSalesOrderStatus() {
     state.pickOrder = { salesOrder: so, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
     box.innerHTML = `<strong>Sales order status:</strong> ${escapeHtml(friendlyError(error))}`;
     syncPickOverrideControls();
+    resetPickCorrectionReporting();
     updatePickSalesOrderControls();
-    state.pickOrderSummary = [];
     renderPickSalesOrderSummary();
     return false;
   }
@@ -3947,7 +4527,7 @@ async function exitStockAdjustmentMode() {
       openedBy: null,
       isCurrentOwner: false
     };
-    state.pickOrderSummary = [];
+    resetPickCorrectionReporting();
 
     configureOperationUi('pick', false);
     renderOperationCart('pick');
@@ -3997,7 +4577,7 @@ async function clearUnstartedPickingScreen(message) {
     openedBy: null,
     isCurrentOwner: false
   };
-  state.pickOrderSummary = [];
+  resetPickCorrectionReporting();
 
   configureOperationUi('pick', false);
   renderOperationCart('pick');
@@ -4075,7 +4655,7 @@ async function cancelEntirePicking() {
   configureOperationUi('pick', false);
   renderOperationCart('pick');
   state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
-  state.pickOrderSummary = [];
+  resetPickCorrectionReporting();
   invalidateReports();
   await refreshPickSalesOrderStatus();
 
@@ -4092,6 +4672,9 @@ async function finishPickSalesOrder() {
     return toast('Sales Order 0 is reusable Warehouse Stock Adjustment mode. Finish Sales Order is not required.', 'success');
   }
   if (state.pick.lockToken) return toast('Complete or cancel the current rack before finishing the sales order.', 'error');
+  if (state.pickRequestedCorrectionCount > 0) return toast('Finish Sales Order is blocked because a Saved Pick mistake is awaiting Supervisor review. Review or reject it first.', 'error');
+  if (state.pickBlockingPendingReturnCount > 0) return toast('Finish Sales Order is blocked until the approved Saved Pick physical return is completed. Use Emergency Finish only for a genuine operational exception.', 'error');
+  if (state.pickBlockingPendingReturnCount < 0 || state.pickRequestedCorrectionCount < 0) return toast('Saved Pick correction status is still loading. Refresh the summary and try again.', 'error');
   if (!window.confirm(`Finish sales order ${so}? After this, regular users cannot use this sales order number again.`)) return;
 
   const button = $('pick-finish-so-btn');
@@ -4109,7 +4692,7 @@ async function finishPickSalesOrder() {
   $('pick-so-override-reason').value = '';
   $('pick-so-override-reason').disabled = true;
   state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
-  state.pickOrderSummary = [];
+  resetPickCorrectionReporting();
   await refreshPickSalesOrderStatus();
   invalidateReports();
 }
@@ -7371,7 +7954,7 @@ function clearClientAfterFullReset() {
   state.transfer = freshOperationState();
   state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
   state.pickOrderLookupSequence = 0;
-  state.pickOrderSummary = [];
+  resetPickCorrectionReporting();
   state.selectedQrLocations.clear();
   Object.keys(state.data).forEach((key) => { state.data[key] = []; });
 }
