@@ -5281,9 +5281,33 @@ function printPhysicalCount() {
 
 async function loadInventory(force = false) {
   if (!force && state.data.inventory.length) return renderInventory();
-  const { data, error } = await supabase.from('v_inventory_search').select('*').order('location_sort_order', { ascending: true, nullsFirst: false }).order('location_code').order('sku_name').limit(10000);
-  if (error) throw error;
-  state.data.inventory = data || [];
+
+  // Load the complete Inventory dataset in the same safe paged manner used by
+  // Physical Count. A single large .limit(...) request can still be capped by
+  // the Supabase/PostgREST API row limit and silently omit later inventory rows.
+  const pageSize = 1000;
+  const rows = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from('v_inventory_search')
+      .select('*')
+      .order('location_sort_order', { ascending: true, nullsFirst: false })
+      .order('location_code')
+      .order('sku_name')
+      .range(offset, offset + pageSize - 1);
+
+    if (error) throw error;
+
+    const page = data || [];
+    rows.push(...page);
+
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  state.data.inventory = rows;
   renderInventory();
 }
 
