@@ -94,6 +94,47 @@
       }
     }
 
+    /* MOBILE SCREEN ONLY — Physical Count table readability hotfix.
+       Keep the multi-column report readable instead of squeezing every column
+       into portrait width. Printing/PDF is intentionally untouched below. */
+    @media screen and (max-width: 780px) {
+      .physical-count-preview-wrap {
+        overflow-x: auto;
+        overflow-y: visible;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-x: contain;
+      }
+
+      .physical-count-preview {
+        width: 100%;
+        min-width: 1040px;
+        table-layout: auto;
+      }
+
+      .physical-count-preview th,
+      .physical-count-preview td {
+        overflow-wrap: normal;
+        word-break: normal;
+      }
+
+      .physical-count-preview th:nth-child(1),
+      .physical-count-preview td:nth-child(1) { min-width: 64px; white-space: nowrap; }
+      .physical-count-preview th:nth-child(2),
+      .physical-count-preview td:nth-child(2) { min-width: 320px; white-space: normal; }
+      .physical-count-preview th:nth-child(3),
+      .physical-count-preview td:nth-child(3) { min-width: 86px; white-space: nowrap; }
+      .physical-count-preview th:nth-child(4),
+      .physical-count-preview td:nth-child(4) { min-width: 64px; white-space: nowrap; }
+      .physical-count-preview th:nth-child(5),
+      .physical-count-preview td:nth-child(5) { min-width: 60px; white-space: nowrap; }
+      .physical-count-preview th:nth-child(6),
+      .physical-count-preview td:nth-child(6) { min-width: 100px; white-space: nowrap; }
+      .physical-count-preview th:nth-child(7),
+      .physical-count-preview td:nth-child(7) { min-width: 110px; white-space: nowrap; }
+      .physical-count-preview th:nth-child(8),
+      .physical-count-preview td:nth-child(8) { min-width: 240px; }
+    }
+
     @media print {
       @page {
         size: A4 landscape;
