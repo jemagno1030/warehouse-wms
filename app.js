@@ -122,6 +122,34 @@ function pickPriorityRecommendation(lot, rows, queuedByLot = new Map()) {
   };
 }
 
+
+function pickContainerPriorityConfirmation(lot, priority) {
+  const visibleSo = $('pick-so')?.value?.trim() || '';
+  const suggestedContainer = priority?.suggestedContainer || lot?.suggestedContainer || null;
+  const suggestedLocation = priority?.suggestedLocation || lot?.suggestedContainerLocation || null;
+  const containerSuggested = Boolean(priority?.containerSuggested ?? lot?.containerPrioritySuggested);
+
+  // SO 0 is Warehouse Stock Adjustment, not customer-order Picking.
+  // Preserve its existing behavior and do not create container-priority audit events.
+  if (isStockAdjustmentSalesOrder(visibleSo) || !containerSuggested || !suggestedContainer) {
+    return { required: false, confirmed: false };
+  }
+
+  const selectedContainer = String(lot?.container_no || '').trim() || '—';
+  const selectedLocation = state.pick.locationCode || lot?.location_code || 'current rack';
+  const locationText = suggestedLocation ? ` at rack ${suggestedLocation}` : '';
+
+  const confirmed = window.confirm(
+    `CONTAINER PRIORITY OVERRIDE\n\n` +
+    `Earlier shipment container ${suggestedContainer}${locationText} is still eligible for this SKU/UOM at the same FEFO expiry.\n\n` +
+    `You selected later container ${selectedContainer} at rack ${selectedLocation}.\n\n` +
+    `Continue with the later container?\n\n` +
+    `If you click OK and the Pick is successfully saved, this override will be recorded in System Audit.`
+  );
+
+  return { required: true, confirmed };
+}
+
 const uomLabel = (uom) => ({ PIECE: 'piece', PACK: 'pack', CASE: 'case' }[String(uom || '').toUpperCase()] || String(uom || 'unit').toLowerCase());
 const fmtQtyUom = (qty, uom) => `${fmtQty(qty)} ${uomLabel(uom)}${Number(qty) === 1 ? '' : 's'}`;
 const sumByUom = (rows, qtyKey = 'qty') => rows.reduce((totals, row) => {
@@ -3449,6 +3477,13 @@ async function addSupervisorBarcodeBypass(lotId) {
     return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
   }
 
+  const containerPriorityDecision = fefoOverrideConfirmed
+    ? { required: false, confirmed: false }
+    : pickContainerPriorityConfirmation(lot, priority);
+  if (containerPriorityDecision.required && !containerPriorityDecision.confirmed) {
+    return toast('Item was not added. The earlier-container recommendation remains in effect.', 'error');
+  }
+
   const visibleSo = $('pick-so').value.trim();
   const approvalSalesOrder = isStockAdjustmentSalesOrder(visibleSo) ? state.pick.adjustmentSessionKey : visibleSo;
   if (!approvalSalesOrder) return toast('The active Sales Order/session could not be identified. Cancel/restart the rack and try again.', 'error');
@@ -3487,6 +3522,7 @@ async function addSupervisorBarcodeBypass(lotId) {
     container_priority_suggested: Boolean(priority.containerSuggested),
     suggested_container: priority.suggestedContainer || null,
     suggested_container_location: priority.suggestedLocation || null,
+    container_priority_override_confirmed: Boolean(containerPriorityDecision.confirmed),
     fefo_override_confirmed: fefoOverrideConfirmed,
     available: Number(lot.qty),
     uom: lot.uom,
@@ -3520,13 +3556,15 @@ function updatePickFefoNote() {
     return;
   }
 
-  // Priority 2: only after expiry is tied, suggest the earliest valid
-  // YYYY-BB / YYYY-BBB shipment container. This is advisory, not an override.
+  // Priority 2: only after expiry is tied, use the earliest valid
+  // YYYY-BB / YYYY-BBB shipment container. Choosing a later eligible container
+  // requires explicit confirmation for normal Sales Order Picking and is audited
+  // only after the Pick is successfully saved.
   if (lot.containerPrioritySuggested && lot.suggestedContainer) {
     const where = lot.suggestedContainerLocation
       ? ` at <strong>${escapeHtml(lot.suggestedContainerLocation)}</strong>`
       : '';
-    note.innerHTML = `<strong>Earlier shipment suggestion:</strong> selected container <strong>${escapeHtml(lot.container_no)}</strong>, but earlier container <strong>${escapeHtml(lot.suggestedContainer)}</strong>${where} has the same priority expiry <strong>${fmtDate(lot.expiry_date)}</strong>. Expiry / FEFO remains first priority; container sequencing is used only when expiry is tied.`;
+    note.innerHTML = `<strong>Earlier shipment priority:</strong> selected container <strong>${escapeHtml(lot.container_no)}</strong>, but earlier container <strong>${escapeHtml(lot.suggestedContainer)}</strong>${where} has the same priority expiry <strong>${fmtDate(lot.expiry_date)}</strong>. Expiry / FEFO remains first priority; container sequencing is used only when expiry is tied. For a normal Sales Order, choosing the later container requires confirmation and the saved override is recorded in System Audit.`;
     note.classList.remove('hidden');
     return;
   }
@@ -3573,6 +3611,17 @@ async function addOperationItem(operation) {
     return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
   }
 
+  const containerPriorityDecision = pick && !fefoOverrideConfirmed
+    ? pickContainerPriorityConfirmation(lot, {
+        containerSuggested: Boolean(lot.containerPrioritySuggested),
+        suggestedContainer: lot.suggestedContainer || null,
+        suggestedLocation: lot.suggestedContainerLocation || null
+      })
+    : { required: false, confirmed: false };
+  if (containerPriorityDecision.required && !containerPriorityDecision.confirmed) {
+    return toast('Item was not added. The earlier-container recommendation remains in effect.', 'error');
+  }
+
   opState.cart.push({
     lot_id: lot.lot_id,
     qty,
@@ -3590,6 +3639,7 @@ async function addOperationItem(operation) {
     container_priority_suggested: Boolean(lot.containerPrioritySuggested),
     suggested_container: lot.suggestedContainer || null,
     suggested_container_location: lot.suggestedContainerLocation || null,
+    container_priority_override_confirmed: Boolean(containerPriorityDecision.confirmed),
     fefo_override_confirmed: fefoOverrideConfirmed,
     available: Number(lot.qty),
     uom: lot.uom,
@@ -3625,6 +3675,19 @@ async function addOperationItem(operation) {
 
   toast(`${fmtQtyUom(qty, lot.uom)} added to the ${pick ? 'picking' : 'transfer'} session.`, 'success');
 }
+
+function pickContainerPriorityCartStatusHtml(row) {
+  if (row?.fefo_override_confirmed) return '';
+  if (row?.container_priority_override_confirmed && row?.suggested_container) {
+    const where = row.suggested_container_location ? ` at ${escapeHtml(row.suggested_container_location)}` : '';
+    return `<br><span class="pill override">Container-priority override confirmed</span><br><small>Earlier container ${escapeHtml(row.suggested_container)}${where} was available.</small>`;
+  }
+  if (row?.container_priority_suggested && row?.suggested_container) {
+    return `<br><span class="pill near">Earlier container ${escapeHtml(row.suggested_container)} available</span>`;
+  }
+  return '';
+}
+
 function renderOperationCart(operation) {
   const pick = operation === 'pick';
   const rows = state[operation].cart;
@@ -3642,10 +3705,10 @@ function renderOperationCart(operation) {
     <td class="wrap">${escapeHtml(r.sku_name)}</td><td>${r.shipper_box_id ? `<span class="pill near">${escapeHtml(r.shipper_box_no || 'Shipper')} · ${escapeHtml(r.shipper_lot_role === 'HEADER' ? 'Complete' : 'Content')}</span>` : '<span class="pill">Loose</span>'}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td>
     <td class="wrap">${pick
       ? (r.supervisor_bypass
-        ? `<span class="pill override">Approved barcode bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>${r.bypass_approved_by ? `<br><small>Approved by ${escapeHtml(r.bypass_approved_by)} (${escapeHtml(String(r.bypass_approved_role || '').toUpperCase())})</small>` : ''}${!r.fefo_override_confirmed && r.container_priority_suggested && r.suggested_container ? `<br><span class="pill near">Earlier container ${escapeHtml(r.suggested_container)} available</span>` : ''}`
+        ? `<span class="pill override">Approved barcode bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>${r.bypass_approved_by ? `<br><small>Approved by ${escapeHtml(r.bypass_approved_by)} (${escapeHtml(String(r.bypass_approved_role || '').toUpperCase())})</small>` : ''}${pickContainerPriorityCartStatusHtml(r)}`
         : `${normalizeBarcode(r.barcode) === 'N/A'
           ? `<span class="pill near">N/A ${escapeHtml((r.uom || '').toUpperCase())} selected</span>`
-          : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span>`}${r.fefo_override_confirmed ? '<br><span class="pill override">FEFO override confirmed</span>' : ''}${!r.fefo_override_confirmed && r.container_priority_suggested && r.suggested_container ? `<br><span class="pill near">Earlier container ${escapeHtml(r.suggested_container)} available</span>` : ''}`)
+          : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span>`}${r.fefo_override_confirmed ? '<br><span class="pill override">FEFO override confirmed</span>' : ''}${pickContainerPriorityCartStatusHtml(r)}`)
       : (normalizeBarcode(r.barcode) === 'N/A'
         ? `<span class="pill near">N/A ${escapeHtml((r.uom || '').toUpperCase())} selected</span>`
         : `<span class="pill">${escapeHtml((r.uom || '').toUpperCase())} barcode verified</span><br><small>${escapeHtml(r.barcode || '')}</small>`)}</td>
@@ -4713,6 +4776,9 @@ async function completePicking() {
   }
 
   const requiresOverride = state.pick.cart.some((x) => x.expiry_date > x.earliest_expiry);
+  const containerOverrideCount = adjustmentMode
+    ? 0
+    : state.pick.cart.filter((x) => x.container_priority_override_confirmed).length;
   let reason = null;
   if (requiresOverride) {
     reason = window.prompt('FEFO override reason (required):');
@@ -4724,15 +4790,16 @@ async function completePicking() {
     return toast('The Stock Adjustment session key is missing. Cancel/restart the rack and lock it again.', 'error');
   }
 
-  const items = state.pick.cart.map(({ lot_id, qty, barcode, supervisor_bypass, bypass_reason, bypass_approval_token, fefo_override_confirmed }) => ({
+  const items = state.pick.cart.map(({ lot_id, qty, barcode, supervisor_bypass, bypass_reason, bypass_approval_token, fefo_override_confirmed, container_priority_override_confirmed }) => ({
     lot_id, qty, barcode, supervisor_bypass: Boolean(supervisor_bypass), bypass_reason: bypass_reason || null,
     bypass_approval_token: bypass_approval_token || null,
-    fefo_override_confirmed: Boolean(fefo_override_confirmed)
+    fefo_override_confirmed: Boolean(fefo_override_confirmed),
+    container_priority_override_confirmed: Boolean(container_priority_override_confirmed)
   }));
 
   setBusy(button, true, adjustmentMode ? 'Saving adjustment…' : 'Completing…');
 
-  const rpcName = adjustmentMode ? 'complete_stock_adjustment_picking_with_remarks' : 'complete_picking_with_approvals';
+  const rpcName = adjustmentMode ? 'complete_stock_adjustment_picking_with_remarks' : 'complete_picking_with_approvals_and_container_audit';
   const rpcArgs = adjustmentMode
     ? {
         p_location_code: state.pick.locationCode,
@@ -4761,7 +4828,7 @@ async function completePicking() {
   if (adjustmentMode) {
     toast(`Stock Adjustment OUT saved: ${data?.[0]?.transaction_no || 'completed'} · Sales Order 0 remains reusable.${requiresOverride ? ' FEFO override recorded.' : ''} Put-away the remaining usable units as needed.`, 'success');
   } else {
-    toast(`Rack pick saved: ${data?.[0]?.transaction_no || 'completed'}${requiresOverride ? ' · FEFO override recorded' : ''}. Scan the next source rack, or finish the sales order when all items are complete.`, 'success');
+    toast(`Rack pick saved: ${data?.[0]?.transaction_no || 'completed'}${requiresOverride ? ' · FEFO override recorded' : ''}${containerOverrideCount ? ` · ${containerOverrideCount} container-priority override${containerOverrideCount === 1 ? '' : 's'} audited` : ''}. Scan the next source rack, or finish the sales order when all items are complete.`, 'success');
   }
 
   invalidateReports();
