@@ -94,47 +94,6 @@
       }
     }
 
-    /* MOBILE SCREEN ONLY — Physical Count table readability hotfix.
-       Keep the multi-column report readable instead of squeezing every column
-       into portrait width. Printing/PDF is intentionally untouched below. */
-    @media screen and (max-width: 780px) {
-      .physical-count-preview-wrap {
-        overflow-x: auto;
-        overflow-y: visible;
-        -webkit-overflow-scrolling: touch;
-        overscroll-behavior-x: contain;
-      }
-
-      .physical-count-preview {
-        width: 100%;
-        min-width: 1040px;
-        table-layout: auto;
-      }
-
-      .physical-count-preview th,
-      .physical-count-preview td {
-        overflow-wrap: normal;
-        word-break: normal;
-      }
-
-      .physical-count-preview th:nth-child(1),
-      .physical-count-preview td:nth-child(1) { min-width: 64px; white-space: nowrap; }
-      .physical-count-preview th:nth-child(2),
-      .physical-count-preview td:nth-child(2) { min-width: 320px; white-space: normal; }
-      .physical-count-preview th:nth-child(3),
-      .physical-count-preview td:nth-child(3) { min-width: 86px; white-space: nowrap; }
-      .physical-count-preview th:nth-child(4),
-      .physical-count-preview td:nth-child(4) { min-width: 64px; white-space: nowrap; }
-      .physical-count-preview th:nth-child(5),
-      .physical-count-preview td:nth-child(5) { min-width: 60px; white-space: nowrap; }
-      .physical-count-preview th:nth-child(6),
-      .physical-count-preview td:nth-child(6) { min-width: 100px; white-space: nowrap; }
-      .physical-count-preview th:nth-child(7),
-      .physical-count-preview td:nth-child(7) { min-width: 110px; white-space: nowrap; }
-      .physical-count-preview th:nth-child(8),
-      .physical-count-preview td:nth-child(8) { min-width: 240px; }
-    }
-
     @media print {
       @page {
         size: A4 landscape;
@@ -520,6 +479,56 @@
       }
     }
   </style>
+
+  <style id="history-sticky-tabs-style">
+    /* History navigation only. Existing History/Audit tables keep their current
+       desktop/mobile overflow behavior, including horizontal scrolling. */
+    #history-tab-nav {
+      position: sticky;
+      top: var(--history-tab-sticky-top, 76px);
+      z-index: 14;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: -2px 0 14px;
+      padding: 8px;
+      background: rgba(255, 255, 255, .97);
+      border: 1px solid #d7dee7;
+      border-radius: 11px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, .06);
+      backdrop-filter: blur(8px);
+    }
+
+    #history-tab-nav .history-tab-btn {
+      width: 100%;
+      min-width: 0;
+      white-space: normal;
+      line-height: 1.25;
+      text-align: center;
+    }
+
+    #history-tab-nav .history-tab-btn.active,
+    #history-tab-nav .history-tab-btn[aria-selected="true"] {
+      font-weight: 800;
+      box-shadow: inset 0 0 0 2px currentColor;
+    }
+
+    .history-tab-panel.hidden { display: none !important; }
+
+    @media (max-width: 780px) {
+      #history-tab-nav {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+        padding: 6px;
+      }
+      #history-tab-nav .history-tab-btn {
+        padding-left: 8px;
+        padding-right: 8px;
+        font-size: .82rem;
+      }
+    }
+  </style>
+
 </head>
 <body>
   <div id="toast-root" aria-live="polite"></div>
@@ -1183,48 +1192,58 @@
 
       <section id="screen-history" class="screen">
         <article class="card">
-          <div class="card-head"><div><h3>Transaction history</h3><p>Every movement, FEFO override, edit, system-control action, and saved Put-away / Transfer / Stock Adjustment remarks</p></div><button class="secondary export-btn" data-export="history">Export CSV</button></div>
-          <div class="filters grid"><div class="scan-field"><input id="history-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search transaction, user, SO, SKU, rack, remarks..." /><button type="button" id="history-exact-rack" class="secondary" aria-pressed="false" title="Exact rack location: when ON, Transaction Search matches only the exact rack code typed in the search field.">Exact rack</button></div><select id="history-type"><option value="">All actions</option><option>PUTAWAY</option><option>PICK</option><option>TRANSFER</option><option>PICK_CANCEL</option><option>TRANSFER_CANCEL</option><option>ADMIN_PAUSE</option><option>ADMIN_RESUME</option></select></div>
-          <p class="small-note">For an exact rack transaction search, type the rack code (example: F2), then turn <strong>Exact rack</strong> ON. The normal transaction search remains unchanged while it is OFF.</p>
-          <div id="history-table" class="table-wrap"></div>
-          <div class="card-head audit-head"><div><h3>System audit events</h3><p>Up to the last 90 calendar days of retained audit events, with detailed report filters</p></div><button class="secondary export-btn" data-export="audit">Export filtered audit CSV</button></div>
+          <div id="history-tab-nav" role="tablist" aria-label="History sections">
+            <button id="history-tab-transactions" type="button" class="secondary history-tab-btn active" role="tab" aria-selected="true" aria-controls="history-transaction-panel" data-history-tab="transactions">Transaction History</button>
+            <button id="history-tab-audit" type="button" class="secondary history-tab-btn" role="tab" aria-selected="false" aria-controls="history-audit-panel" data-history-tab="audit">System Audit Events</button>
+          </div>
 
-          <div class="form-grid two">
-            <label>Action
-              <select id="audit-action-filter">
-                <option value="">All actions</option>
-              </select>
-            </label>
-            <label>User
-              <input id="audit-user-filter" autocomplete="off" placeholder="Username / actor..." />
-            </label>
-            <label>Remarks
-              <input id="audit-remarks-filter" autocomplete="off" placeholder="Stored remarks / notes..." />
-            </label>
-            <label>Reason
-              <input id="audit-reason-filter" autocomplete="off" placeholder="Approval / edit / audit reason..." />
-            </label>
-            <label>Sales Order number
-              <input id="audit-so-filter" autocomplete="off" placeholder="Example: 12345 or 0" />
-            </label>
-            <label>Container number
-              <input id="audit-container-filter" autocomplete="off" placeholder="Example: 2025-76" />
-            </label>
-            <label>Rack number (exact)
-              <input id="audit-rack-filter" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Example: F2" />
-            </label>
-            <label>Coverage date from
-              <input id="audit-date-from" type="date" />
-            </label>
-            <label>Coverage date to
-              <input id="audit-date-to" type="date" />
-            </label>
+          <div id="history-transaction-panel" class="history-tab-panel" role="tabpanel" aria-labelledby="history-tab-transactions">
+            <div class="card-head"><div><h3>Transaction history</h3><p>Every movement, FEFO override, edit, system-control action, and saved Put-away / Transfer / Stock Adjustment remarks</p></div><button class="secondary export-btn" data-export="history">Export CSV</button></div>
+            <div class="filters grid"><div class="scan-field"><input id="history-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search transaction, user, SO, SKU, rack, remarks..." /><button type="button" id="history-exact-rack" class="secondary" aria-pressed="false" title="Exact rack location: when ON, Transaction Search matches only the exact rack code typed in the search field.">Exact rack</button></div><select id="history-type"><option value="">All actions</option><option>PUTAWAY</option><option>PICK</option><option>TRANSFER</option><option>PICK_CANCEL</option><option>TRANSFER_CANCEL</option><option>ADMIN_PAUSE</option><option>ADMIN_RESUME</option></select></div>
+            <p class="small-note">For an exact rack transaction search, type the rack code (example: F2), then turn <strong>Exact rack</strong> ON. The normal transaction search remains unchanged while it is OFF.</p>
+            <div id="history-table" class="table-wrap"></div>
           </div>
-          <div class="button-cluster">
-            <button id="audit-clear-filters" type="button" class="ghost">Clear audit filters</button>
+
+          <div id="history-audit-panel" class="history-tab-panel hidden" role="tabpanel" aria-labelledby="history-tab-audit">
+            <div class="card-head audit-head"><div><h3>System audit events</h3><p>Up to the last 90 calendar days of retained audit events, with detailed report filters</p></div><button class="secondary export-btn" data-export="audit">Export filtered audit CSV</button></div>
+
+            <div class="form-grid two">
+              <label>Action
+                <select id="audit-action-filter">
+                  <option value="">All actions</option>
+                </select>
+              </label>
+              <label>User
+                <input id="audit-user-filter" autocomplete="off" placeholder="Username / actor..." />
+              </label>
+              <label>Remarks
+                <input id="audit-remarks-filter" autocomplete="off" placeholder="Stored remarks / notes..." />
+              </label>
+              <label>Reason
+                <input id="audit-reason-filter" autocomplete="off" placeholder="Approval / edit / audit reason..." />
+              </label>
+              <label>Sales Order number
+                <input id="audit-so-filter" autocomplete="off" placeholder="Example: 12345 or 0" />
+              </label>
+              <label>Container number
+                <input id="audit-container-filter" autocomplete="off" placeholder="Example: 2025-76" />
+              </label>
+              <label>Rack number (exact)
+                <input id="audit-rack-filter" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Example: F2" />
+              </label>
+              <label>Coverage date from
+                <input id="audit-date-from" type="date" />
+              </label>
+              <label>Coverage date to
+                <input id="audit-date-to" type="date" />
+              </label>
+            </div>
+            <div class="button-cluster">
+              <button id="audit-clear-filters" type="button" class="ghost">Clear audit filters</button>
+            </div>
+            <p id="audit-history-count" class="small-note">Audit events will load when History opens.</p>
+            <div id="audit-history-table" class="table-wrap"></div>
           </div>
-          <p id="audit-history-count" class="small-note">Audit events will load when History opens.</p>
-          <div id="audit-history-table" class="table-wrap"></div>
         </article>
       </section>
 
@@ -1533,6 +1552,69 @@
       <button class="primary" type="submit">Save role change</button>
     </form>
   </dialog>
+
+
+  <script id="history-sticky-tabs-script">
+    (() => {
+      let activeHistoryTab = 'transactions';
+
+      function historyStickyOffset() {
+        const topbar = document.querySelector('.topbar');
+        const height = topbar ? Math.ceil(topbar.getBoundingClientRect().height) : 0;
+        document.documentElement.style.setProperty('--history-tab-sticky-top', `${height}px`);
+        return height;
+      }
+
+      function showHistoryTab(name, scrollToFilters = true) {
+        if (name !== 'transactions' && name !== 'audit') return;
+        activeHistoryTab = name;
+
+        const txPanel = document.getElementById('history-transaction-panel');
+        const auditPanel = document.getElementById('history-audit-panel');
+        const txTab = document.getElementById('history-tab-transactions');
+        const auditTab = document.getElementById('history-tab-audit');
+        const nav = document.getElementById('history-tab-nav');
+        if (!txPanel || !auditPanel || !txTab || !auditTab || !nav) return;
+
+        const showTransactions = name === 'transactions';
+        txPanel.classList.toggle('hidden', !showTransactions);
+        auditPanel.classList.toggle('hidden', showTransactions);
+        txTab.classList.toggle('active', showTransactions);
+        auditTab.classList.toggle('active', !showTransactions);
+        txTab.setAttribute('aria-selected', showTransactions ? 'true' : 'false');
+        auditTab.setAttribute('aria-selected', showTransactions ? 'false' : 'true');
+
+        if (scrollToFilters) {
+          requestAnimationFrame(() => {
+            const topbarHeight = historyStickyOffset();
+            const y = Math.max(0, window.scrollY + nav.getBoundingClientRect().top - topbarHeight - 6);
+            window.scrollTo({ top: y, behavior: 'smooth' });
+          });
+        }
+      }
+
+      function initHistoryStickyTabs() {
+        const nav = document.getElementById('history-tab-nav');
+        if (!nav) return;
+
+        historyStickyOffset();
+        nav.addEventListener('click', (event) => {
+          const button = event.target.closest('[data-history-tab]');
+          if (!button) return;
+          showHistoryTab(button.dataset.historyTab, true);
+        });
+
+        window.addEventListener('resize', historyStickyOffset, { passive: true });
+        showHistoryTab(activeHistoryTab, false);
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initHistoryStickyTabs, { once: true });
+      } else {
+        initHistoryStickyTabs();
+      }
+    })();
+  </script>
 
   <script src="config.js"></script>
   <script type="module" src="app.js?v=20260822-saved-pick-correction-v2-1"></script>
