@@ -230,6 +230,8 @@ const state = {
   pickBlockingPendingReturnCount: 0,
   dashboardPendingPickReturns: [],
   transfer: freshOperationState(),
+  pickRevertStatusByLine: new Map(),
+  pickRevertStatusLoaded: false,
   data: { inventory: [], physicalCount: [], physicalCountFiltered: [], stockCard: [], stockCardExport: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], auditFiltered: [], locations: [], rackMap: [] },
   stockCardMeta: null,
   stockCardCandidates: [],
@@ -564,6 +566,8 @@ function setupStaticEvents() {
     if (containerReportPrint) printContainerDetailReport();
     const edit = event.target.closest('[data-edit-transaction]');
     if (edit) openSupervisorEdit(edit.dataset.editTransaction);
+    const revertPickLine = event.target.closest('[data-revert-pick-line]');
+    if (revertPickLine) revertHistoryPickLine(revertPickLine.dataset.revertPickLine);
     const inventoryEdit = event.target.closest('[data-inventory-edit]');
     if (inventoryEdit) openInventoryLotEdit(inventoryEdit.dataset.inventoryEdit);
     const inventoryRemarks = event.target.closest('[data-inventory-remarks]');
@@ -1297,6 +1301,8 @@ function invalidateReports() {
   state.data.history = [];
   state.data.audit = [];
   state.data.auditFiltered = [];
+  state.pickRevertStatusByLine = new Map();
+  state.pickRevertStatusLoaded = false;
   state.data.rackMap = [];
 }
 
@@ -7428,7 +7434,8 @@ async function deleteSystemHistoryRange(event) {
 async function loadHistory(force = false) {
   ensureAuditCoverageDefaults();
 
-  if (!force && state.data.history.length && state.data.audit.length) {
+  const revertStatusReady = !isAdminOrOwner() || state.pickRevertStatusLoaded;
+  if (!force && state.data.history.length && state.data.audit.length && revertStatusReady) {
     populateAuditActionFilter();
     renderHistory();
     return renderAuditHistory();
@@ -7437,15 +7444,40 @@ async function loadHistory(force = false) {
   // Transaction History remains on its existing path.
   // System Audit is loaded independently and paged so the old 2,000-row cap
   // no longer prevents a complete retained 90-day report.
-  const [historyRes, auditRows] = await Promise.all([
+  //
+  // Admin/Owner also receives one lightweight, read-only line-status snapshot for
+  // the PICK-line Revert controls. Failure of that optional status RPC must never
+  // stop normal History/Audit from loading.
+  const revertStatusPromise = isAdminOrOwner()
+    ? supabase.rpc('admin_get_history_pick_revert_statuses')
+    : Promise.resolve({ data: [], error: null });
+
+  const [historyRes, auditRows, revertStatusRes] = await Promise.all([
     supabase.from('v_history_details').select('*').order('created_at', { ascending: false }).order('line_no').limit(10000),
-    loadAuditHistory90Days()
+    loadAuditHistory90Days(),
+    revertStatusPromise
   ]);
 
   if (historyRes.error) throw historyRes.error;
 
   state.data.history = historyRes.data || [];
   state.data.audit = auditRows || [];
+
+  if (isAdminOrOwner()) {
+    if (revertStatusRes?.error) {
+      console.warn('History PICK-line Revert status unavailable:', revertStatusRes.error);
+      state.pickRevertStatusByLine = new Map();
+    } else {
+      state.pickRevertStatusByLine = new Map(
+        (revertStatusRes?.data || []).map((row) => [String(row.transaction_line_id), row])
+      );
+    }
+    state.pickRevertStatusLoaded = true;
+  } else {
+    state.pickRevertStatusByLine = new Map();
+    state.pickRevertStatusLoaded = true;
+  }
+
   populateAuditActionFilter();
   renderHistory();
   renderAuditHistory();
@@ -7696,6 +7728,28 @@ function clearAuditHistoryFilters() {
   renderAuditHistory();
 }
 
+function historyPickRevertActionHtml(row, transactionHasShipper) {
+  if (!isAdminOrOwner()) return '';
+  if (row.transaction_type !== 'PICK' || Number(row.signed_qty) >= 0) return '';
+  if (transactionHasShipper.has(row.transaction_id)) return '';
+
+  const status = state.pickRevertStatusByLine.get(String(row.line_id));
+  if (!status) return '';
+
+  if (status.can_revert) {
+    const label = Number(status.completed_correction_qty || 0) > 0 ? 'Revert remaining' : 'Revert';
+    return `<button class="link-btn" data-revert-pick-line="${row.line_id}" title="Completed Sales Order only: restore the remaining reversible quantity of this exact Standard PICK line to its original rack.">${label}</button>`;
+  }
+
+  if (status.revert_state === 'FULLY_RESTORED') {
+    return '<span class="pill">Reverted</span>';
+  }
+  if (status.revert_state === 'CORRECTION_PENDING') {
+    return '<small>Correction pending</small>';
+  }
+  return '';
+}
+
 function renderHistory() {
   const term = $('history-search').value.trim().toLowerCase();
   const type = $('history-type').value;
@@ -7707,6 +7761,23 @@ function renderHistory() {
       : haystack.includes(term));
     return (!type || r.transaction_type === type) && searchMatches;
   });
+
+  // Use the complete loaded History, not only the currently filtered rows, when
+  // deciding whether a transaction contains Shipper lines. This avoids exposing
+  // generic correction/revert controls merely because a filter hid the Shipper row.
+  const transactionHasShipper = new Set(
+    (state.data.history || []).filter((r) => r.shipper_box_id).map((r) => r.transaction_id)
+  );
+  const transactionHasSavedPickCorrection = new Set(
+    (state.data.history || [])
+      .filter((r) => {
+        if (r.transaction_type !== 'PICK') return false;
+        const status = state.pickRevertStatusByLine.get(String(r.line_id));
+        return Boolean(status && (Number(status.completed_correction_qty || 0) > 0 || Number(status.unresolved_correction_count || 0) > 0));
+      })
+      .map((r) => r.transaction_id)
+  );
+
   const firstLineByTx = new Set();
   $('history-table').innerHTML = rows.length ? `<table><thead><tr><th>Transaction</th><th>Action</th><th>User / time</th><th>SO</th><th>Location</th><th>SKU / container</th><th>Qty</th><th>Remarks</th><th>Flags</th><th></th></tr></thead><tbody>${rows.map((r) => {
     const first = !firstLineByTx.has(r.transaction_id); firstLineByTx.add(r.transaction_id);
@@ -7715,12 +7786,89 @@ function renderHistory() {
       r.barcode_bypassed ? '<span class="pill override">Supervisor barcode bypass</span>' : '',
       r.edited_at ? '<span class="pill">Corrected</span>' : ''
     ].filter(Boolean).join(' ');
+
+    const transactionProtected = transactionHasShipper.has(r.transaction_id);
+    const savedPickCorrectionProtected = r.transaction_type === 'PICK' && transactionHasSavedPickCorrection.has(r.transaction_id);
+    const correctAction = first && isAdminOrOwner() && ['PUTAWAY','PICK','TRANSFER'].includes(r.transaction_type) && !transactionProtected && !savedPickCorrectionProtected
+      ? `<button class="link-btn" data-edit-transaction="${r.transaction_id}">Correct</button>`
+      : (first && transactionProtected
+        ? '<small>Shipper transaction protected</small>'
+        : (first && savedPickCorrectionProtected ? '<small>Saved Pick correction protected</small>' : ''));
+    const revertAction = historyPickRevertActionHtml(r, transactionHasShipper);
+    const actions = [correctAction, revertAction].filter(Boolean).join(' ');
+
     return `<tr><td><strong>${escapeHtml(r.tx_no)}</strong></td><td>${escapeHtml(r.transaction_type)}</td>
       <td>${escapeHtml(r.created_by_username)}<br><small>${fmtDateTime(r.created_at)}</small></td><td>${escapeHtml(r.sales_order || '—')}</td><td>${escapeHtml(r.location_code || '—')}</td>
       <td class="wrap">${escapeHtml(r.sku_name || 'System action')}<br><small>${escapeHtml(r.container_no || '')} ${r.expiry_date ? `· ${fmtDate(r.expiry_date)}` : ''}${r.shipper_box_no ? ` · ${escapeHtml(r.shipper_box_no)}` : ''}</small>${r.line_note ? `<br><small>${escapeHtml(r.line_note)}</small>` : ''}</td>
       <td>${r.signed_qty == null ? '—' : fmtQtyUom(r.signed_qty, r.uom)}</td><td class="wrap">${first ? escapeHtml(r.transaction_note || '—') : '—'}</td><td class="wrap">${flags}${r.shipper_action ? `<br><span class="pill near">${escapeHtml(r.shipper_action)}</span>` : ''}${r.barcode_bypassed ? `<br><small>Bypass by ${escapeHtml(r.bypassed_by_username || r.created_by_username)}: ${escapeHtml(r.bypass_reason || '')}</small>` : ''}${first && r.override_reason ? `<br><small>${escapeHtml(r.override_reason)}</small>` : ''}${first && r.edit_reason ? `<br><small>Edit: ${escapeHtml(r.edit_reason)}</small>` : ''}</td>
-      <td>${first && isAdminOrOwner() && ['PUTAWAY','PICK','TRANSFER'].includes(r.transaction_type) && !rows.some((x) => x.transaction_id === r.transaction_id && x.shipper_box_id) ? `<button class="link-btn" data-edit-transaction="${r.transaction_id}">Correct</button>` : (first && r.shipper_box_id ? '<small>Shipper transaction protected</small>' : '')}</td></tr>`;
+      <td>${actions}</td></tr>`;
   }).join('')}</tbody></table>` : emptyState('No matching history.');
+}
+
+async function revertHistoryPickLine(transactionLineId) {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required to Revert a saved PICK line.', 'error');
+
+  const row = (state.data.history || []).find((item) => String(item.line_id) === String(transactionLineId));
+  const status = state.pickRevertStatusByLine.get(String(transactionLineId));
+
+  if (!row || !status) {
+    return toast('This PICK line could not be verified for Revert. Refresh Transaction History and try again.', 'error');
+  }
+  if (!status.can_revert) {
+    return toast(status.block_reason || 'This PICK line is not eligible for Revert.', 'error');
+  }
+
+  const reversibleQty = Number(status.remaining_revert_qty || 0);
+  if (!Number.isFinite(reversibleQty) || reversibleQty <= 0) {
+    return toast('This PICK line has no remaining quantity available to Revert.', 'error');
+  }
+
+  const reason = window.prompt(
+    `Reason for reverting this PICK line (required):\n\n` +
+    `${row.tx_no} · SO ${row.sales_order || '—'}\n` +
+    `${row.sku_name || 'SKU'}\n` +
+    `${fmtQtyUom(reversibleQty, row.uom)} → ${row.location_code || 'original rack'}`
+  );
+  if (reason === null) return;
+  if (reason.trim().length < 3 || reason.trim().length > 500) {
+    return toast('Revert reason must be between 3 and 500 characters.', 'error');
+  }
+
+  const confirmed = window.confirm(
+    `REVERT THIS PICK LINE FROM A COMPLETED SALES ORDER?\n\n` +
+    `Transaction: ${row.tx_no}\n` +
+    `Sales Order: ${row.sales_order || '—'}\n` +
+    `SKU: ${row.sku_name || '—'}\n` +
+    `Restore: ${fmtQtyUom(reversibleQty, row.uom)}\n` +
+    `Original rack: ${row.location_code || '—'}\n` +
+    `Container: ${row.container_no || '—'}\n` +
+    `Expiry: ${fmtDate(row.expiry_date)}\n\n` +
+    `This immediately increases LIVE Inventory at the original rack. ` +
+    `The original PICK line will remain unchanged in Transaction History; a separate audited correction and Stock Card adjustment will record the restoration.\n\n` +
+    `Use Revert only when the physical stock is actually back / available at that original rack. ` +
+    `If the item physically left the rack and still needs to be returned, use the existing Saved Pick Correction physical-return workflow instead.\n\n` +
+    `Continue?`
+  );
+  if (!confirmed) return;
+
+  const button = document.querySelector(`[data-revert-pick-line="${CSS.escape(String(transactionLineId))}"]`);
+  if (button) setBusy(button, true, 'Reverting…');
+
+  const { data, error } = await supabase.rpc('admin_revert_history_pick_line', {
+    p_transaction_line_id: transactionLineId,
+    p_reason: reason.trim()
+  });
+
+  if (button) setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  const result = data?.[0] || {};
+  invalidateReports();
+  await loadHistory(true);
+  toast(
+    `PICK line reverted: ${fmtQtyUom(result.reverted_qty || reversibleQty, result.uom || row.uom)} restored to ${result.restored_location_code || row.location_code}. Original PICK history preserved; audit recorded.`,
+    'success'
+  );
 }
 
 function auditEventRemarks(row) {
