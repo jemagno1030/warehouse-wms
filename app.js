@@ -577,6 +577,8 @@ function setupStaticEvents() {
     if (inventoryEdit) openInventoryLotEdit(inventoryEdit.dataset.inventoryEdit);
     const inventoryRemarks = event.target.closest('[data-inventory-remarks]');
     if (inventoryRemarks) openInventoryRemarksEdit(inventoryRemarks.dataset.inventoryRemarks);
+    const inventoryBreakdown = event.target.closest('[data-inventory-breakdown]');
+    if (inventoryBreakdown) openInventoryBreakdownHelper(inventoryBreakdown.dataset.inventoryBreakdown);
     const inventoryDelete = event.target.closest('[data-inventory-delete]');
     if (inventoryDelete) deleteInventoryLot(inventoryDelete.dataset.inventoryDelete);
     const inventoryHold = event.target.closest('[data-inventory-hold]');
@@ -5441,20 +5443,22 @@ function inventoryLotActions(row) {
   if (!isSupervisor()) return '';
   const lotId = escapeHtml(row.lot_id);
   const remarks = `<button class="link-btn" data-inventory-remarks="${lotId}">Edit remarks</button>`;
+  const breakdown = `<button class="link-btn" data-inventory-breakdown="${lotId}">Breakdown</button>`;
+  const remarkActions = `${remarks} ${breakdown}`;
   const blocked = row.is_releasable === false;
   if (row.is_on_hold) {
     return isAdminOrOwner()
-      ? `<td>${remarks} <button class="link-btn" data-inventory-hold="${lotId}" data-hold-state="release">Unfreeze lot</button><br><small>Remarks may be updated while ON HOLD · Unfreeze reason required</small></td>`
-      : `<td>${remarks}<br><small>ON HOLD · Admin / Owner must unfreeze</small></td>`;
+      ? `<td>${remarkActions} <button class="link-btn" data-inventory-hold="${lotId}" data-hold-state="release">Unfreeze lot</button><br><small>Remarks may be updated while ON HOLD · Unfreeze reason required</small></td>`
+      : `<td>${remarkActions}<br><small>ON HOLD · Admin / Owner must unfreeze</small></td>`;
   }
   if (blocked) {
-    return `<td>${remarks}<br><small>Structural correction blocked by Shipper hold. Remarks remain editable.</small></td>`;
+    return `<td>${remarkActions}<br><small>Structural correction blocked by Shipper hold. Remarks remain editable.</small></td>`;
   }
   const freeze = isAdminOrOwner() ? ` <button class="link-btn" data-inventory-hold="${lotId}" data-hold-state="freeze">Freeze lot</button>` : '';
   if (row.shipper_box_id) {
-    return `<td><button class="link-btn" data-inventory-edit="${lotId}">Edit</button> ${remarks}${freeze}<br><small>Shipper-safe correction · ${escapeHtml(row.shipper_box_no || '')}</small></td>`;
+    return `<td><button class="link-btn" data-inventory-edit="${lotId}">Edit</button> ${remarkActions}${freeze}<br><small>Shipper-safe correction · ${escapeHtml(row.shipper_box_no || '')}</small></td>`;
   }
-  return `<td><button class="link-btn" data-inventory-edit="${lotId}">Edit</button> ${remarks}${isAdminOrOwner() ? ` <button class="link-btn" data-inventory-delete="${lotId}">Delete</button>${freeze}` : '<br><small>Delete / Freeze: Admin / Owner only</small>'}</td>`;
+  return `<td><button class="link-btn" data-inventory-edit="${lotId}">Edit</button> ${remarkActions}${isAdminOrOwner() ? ` <button class="link-btn" data-inventory-delete="${lotId}">Delete</button>${freeze}` : '<br><small>Delete / Freeze: Admin / Owner only</small>'}</td>`;
 }
 
 function exactRackSearchEnabled(buttonId) {
@@ -5755,11 +5759,287 @@ function renderInventory() {
   }).join('')}</tbody></table>` : emptyState('No matching inventory.');
 }
 
+const INVENTORY_REMARK_BREAKDOWN_MAX_ROWS = 20;
+
+function inventoryRemarkBreakdownUomAbbrev(uom) {
+  return ({ CASE: 'CS', PACK: 'PK', PIECE: 'PC' })[String(uom || '').toUpperCase()] || String(uom || '').toUpperCase();
+}
+
+function inventoryRemarkBreakdownAcceptedUnits(uom) {
+  const normalized = String(uom || '').toUpperCase();
+  if (normalized === 'CASE') return new Set(['CS', 'CASE', 'CASES']);
+  if (normalized === 'PACK') return new Set(['PK', 'PACK', 'PACKS']);
+  if (normalized === 'PIECE') return new Set(['PC', 'PCS', 'PIECE', 'PIECES']);
+  return new Set([normalized]);
+}
+
+function parseInventoryRemarkBreakdown(text, uom) {
+  const raw = String(text || '').trim();
+  if (!raw) return { structured: true, entries: [] };
+
+  const acceptedUnits = inventoryRemarkBreakdownAcceptedUnits(uom);
+  const parts = raw.split(/\s*(?:\||;)\s*/).filter(Boolean);
+  const entries = [];
+  const seen = new Set();
+
+  for (const part of parts) {
+    const match = part.match(/^(.+?)\s*=\s*(\d+)\s*([A-Za-z]+)?\s*$/);
+    if (!match) return { structured: false, entries: [] };
+
+    const category = match[1].trim();
+    const qty = Number(match[2]);
+    const unit = String(match[3] || '').toUpperCase();
+    const key = category.toLowerCase().replace(/\s+/g, ' ');
+
+    if (!category || category.includes('|') || category.includes('=') || !Number.isInteger(qty) || qty <= 0) {
+      return { structured: false, entries: [] };
+    }
+    if (unit && !acceptedUnits.has(unit)) return { structured: false, entries: [] };
+    if (seen.has(key)) return { structured: false, entries: [] };
+
+    seen.add(key);
+    entries.push({ category, qty });
+  }
+
+  return { structured: true, entries };
+}
+
+function formatInventoryRemarkBreakdown(entries, uom) {
+  const suffix = inventoryRemarkBreakdownUomAbbrev(uom);
+  return entries
+    .map((entry) => `${String(entry.category || '').trim().replace(/\s+/g, ' ').toUpperCase()}=${Number(entry.qty)}${suffix}`)
+    .join(' | ');
+}
+
+function ensureInventoryRemarkBreakdownUi() {
+  const form = $('inventory-remarks-form');
+  if (!form) return;
+
+  const launchers = [
+    { textareaId: 'inventory-remarks-putaway', kind: 'PUTAWAY', label: 'Open Put-away breakdown' },
+    { textareaId: 'inventory-remarks-transfer', kind: 'TRANSFER', label: 'Open Stock Transfer breakdown' }
+  ];
+
+  launchers.forEach(({ textareaId, kind, label }) => {
+    const textarea = $(textareaId);
+    const fieldLabel = textarea?.closest('label');
+    if (!textarea || !fieldLabel || form.querySelector(`[data-inventory-remark-breakdown-launch="${kind}"]`)) return;
+
+    const controls = document.createElement('div');
+    controls.className = 'small-note';
+    controls.innerHTML = `<button type="button" class="link-btn" data-inventory-remark-breakdown-launch="${kind}">${escapeHtml(label)}</button> · Optional helper only; actual stock quantity is not changed.`;
+    fieldLabel.insertAdjacentElement('afterend', controls);
+    controls.querySelector('button').addEventListener('click', () => openInventoryRemarkBreakdown(kind));
+  });
+
+  if ($('inventory-remark-breakdown-panel')) return;
+
+  const reasonLabel = $('inventory-remarks-reason')?.closest('label');
+  if (!reasonLabel) return;
+
+  const panel = document.createElement('div');
+  panel.id = 'inventory-remark-breakdown-panel';
+  panel.className = 'info-box hidden';
+  panel.innerHTML = `
+    <div><strong id="inventory-remark-breakdown-title">Remark quantity breakdown</strong></div>
+    <div id="inventory-remark-breakdown-context" class="small-note"></div>
+    <div id="inventory-remark-breakdown-notice" class="small-note"></div>
+    <div id="inventory-remark-breakdown-rows" class="stack"></div>
+    <div>
+      <button id="inventory-remark-breakdown-add" type="button" class="link-btn">+ Add category</button>
+    </div>
+    <div id="inventory-remark-breakdown-total" class="small-note"></div>
+    <p class="small-note">Only exceptional categories need to be listed. Any remaining quantity is shown as Unspecified / normal. A category may contain combined wording such as DENTED + FADED LABEL.</p>
+    <div>
+      <button id="inventory-remark-breakdown-apply" type="button" class="primary">Apply breakdown to remark field</button>
+      <button id="inventory-remark-breakdown-cancel" type="button" class="link-btn">Cancel</button>
+    </div>`;
+  reasonLabel.insertAdjacentElement('beforebegin', panel);
+
+  $('inventory-remark-breakdown-add').addEventListener('click', () => addInventoryRemarkBreakdownRow());
+  $('inventory-remark-breakdown-apply').addEventListener('click', applyInventoryRemarkBreakdown);
+  $('inventory-remark-breakdown-cancel').addEventListener('click', closeInventoryRemarkBreakdown);
+  $('inventory-remark-breakdown-rows').addEventListener('input', updateInventoryRemarkBreakdownTotals);
+  $('inventory-remark-breakdown-rows').addEventListener('click', (event) => {
+    const remove = event.target.closest('[data-remove-inventory-breakdown-row]');
+    if (!remove) return;
+    remove.closest('[data-inventory-breakdown-row]')?.remove();
+    if (!$('inventory-remark-breakdown-rows').children.length) addInventoryRemarkBreakdownRow();
+    updateInventoryRemarkBreakdownTotals();
+  });
+}
+
+function closeInventoryRemarkBreakdown() {
+  const panel = $('inventory-remark-breakdown-panel');
+  if (!panel) return;
+  panel.classList.add('hidden');
+  panel.dataset.kind = '';
+  panel.dataset.lotId = '';
+}
+
+function addInventoryRemarkBreakdownRow(entry = {}) {
+  const rows = $('inventory-remark-breakdown-rows');
+  if (!rows) return;
+  if (rows.children.length >= INVENTORY_REMARK_BREAKDOWN_MAX_ROWS) {
+    return toast(`A maximum of ${INVENTORY_REMARK_BREAKDOWN_MAX_ROWS} breakdown categories is allowed.`, 'error');
+  }
+
+  const row = document.createElement('div');
+  row.className = 'info-box';
+  row.setAttribute('data-inventory-breakdown-row', '');
+  row.innerHTML = `
+    <div class="form-grid two">
+      <label>Category<input data-breakdown-category maxlength="80" placeholder="Example: DENTED" value="${escapeHtml(entry.category || '')}" /></label>
+      <label>Quantity<input data-breakdown-qty type="number" min="1" step="1" inputmode="numeric" placeholder="0" value="${entry.qty ? escapeHtml(String(entry.qty)) : ''}" /></label>
+    </div>
+    <button type="button" class="link-btn" data-remove-inventory-breakdown-row>Remove</button>`;
+  rows.appendChild(row);
+}
+
+function collectInventoryRemarkBreakdownEntries() {
+  const rows = [...($('inventory-remark-breakdown-rows')?.querySelectorAll('[data-inventory-breakdown-row]') || [])];
+  const entries = [];
+  const seen = new Set();
+  let error = '';
+
+  for (const row of rows) {
+    const categoryRaw = row.querySelector('[data-breakdown-category]')?.value || '';
+    const qtyRaw = row.querySelector('[data-breakdown-qty]')?.value || '';
+    const category = categoryRaw.trim().replace(/\s+/g, ' ');
+    const qty = Number(qtyRaw);
+
+    if (!category && !qtyRaw) continue;
+    if (!category) { error = 'Every quantity needs a category.'; break; }
+    if (category.includes('|') || category.includes('=')) { error = 'Category names cannot contain | or =.'; break; }
+    if (!Number.isInteger(qty) || qty <= 0) { error = 'Every category quantity must be a whole number greater than zero.'; break; }
+
+    const key = category.toLowerCase();
+    if (seen.has(key)) { error = `Duplicate category: ${category}. Combine it into one row.`; break; }
+    seen.add(key);
+    entries.push({ category, qty });
+  }
+
+  return { entries, error };
+}
+
+function updateInventoryRemarkBreakdownTotals() {
+  const panel = $('inventory-remark-breakdown-panel');
+  const totalBox = $('inventory-remark-breakdown-total');
+  const applyButton = $('inventory-remark-breakdown-apply');
+  if (!panel || !totalBox || !applyButton) return;
+
+  const row = state.data.inventory.find((item) => item.lot_id === panel.dataset.lotId);
+  if (!row) {
+    totalBox.innerHTML = '<strong>Lot is no longer available. Close and refresh Inventory.</strong>';
+    applyButton.disabled = true;
+    return;
+  }
+
+  const { entries, error } = collectInventoryRemarkBreakdownEntries();
+  const tracked = entries.reduce((sum, entry) => sum + entry.qty, 0);
+  const stockQty = Number(row.qty || 0);
+  const uom = inventoryRemarkBreakdownUomAbbrev(row.uom);
+  const unspecified = stockQty - tracked;
+  const formatted = formatInventoryRemarkBreakdown(entries, row.uom);
+
+  if (error) {
+    totalBox.innerHTML = `<strong>⚠ ${escapeHtml(error)}</strong>`;
+    applyButton.disabled = true;
+    return;
+  }
+  if (!entries.length) {
+    totalBox.innerHTML = `Inventory quantity: <strong>${escapeHtml(String(stockQty))} ${escapeHtml(uom)}</strong><br>Add at least one exceptional category to use the breakdown helper.`;
+    applyButton.disabled = true;
+    return;
+  }
+  if (tracked > stockQty) {
+    totalBox.innerHTML = `<strong>⚠ INVALID BREAKDOWN</strong><br>Tracked categories: ${escapeHtml(String(tracked))} ${escapeHtml(uom)}<br>Inventory quantity: ${escapeHtml(String(stockQty))} ${escapeHtml(uom)}<br>Over by: ${escapeHtml(String(tracked - stockQty))} ${escapeHtml(uom)}`;
+    applyButton.disabled = true;
+    return;
+  }
+  if (formatted.length > 1000) {
+    totalBox.innerHTML = '<strong>⚠ The formatted remark exceeds the existing 1,000-character remark limit.</strong>';
+    applyButton.disabled = true;
+    return;
+  }
+
+  totalBox.innerHTML = tracked === stockQty
+    ? `<strong>✓ FULLY CATEGORIZED</strong><br>Tracked categories: ${escapeHtml(String(tracked))} ${escapeHtml(uom)}<br>Inventory quantity: ${escapeHtml(String(stockQty))} ${escapeHtml(uom)}`
+    : `<strong>✓ VALID</strong><br>Tracked exceptional categories: ${escapeHtml(String(tracked))} ${escapeHtml(uom)}<br>Unspecified / normal: ${escapeHtml(String(unspecified))} ${escapeHtml(uom)}<br>Inventory quantity: ${escapeHtml(String(stockQty))} ${escapeHtml(uom)}`;
+  applyButton.disabled = false;
+}
+
+function openInventoryRemarkBreakdown(kind) {
+  ensureInventoryRemarkBreakdownUi();
+  const lotId = $('inventory-remarks-lot-id')?.value;
+  const row = state.data.inventory.find((item) => item.lot_id === lotId);
+  if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
+
+  const normalizedKind = kind === 'TRANSFER' ? 'TRANSFER' : 'PUTAWAY';
+  const textarea = $(normalizedKind === 'PUTAWAY' ? 'inventory-remarks-putaway' : 'inventory-remarks-transfer');
+  const panel = $('inventory-remark-breakdown-panel');
+  const rows = $('inventory-remark-breakdown-rows');
+  if (!textarea || !panel || !rows) return;
+
+  const parsed = parseInventoryRemarkBreakdown(textarea.value, row.uom);
+  rows.innerHTML = '';
+  if (parsed.structured && parsed.entries.length) {
+    parsed.entries.forEach((entry) => addInventoryRemarkBreakdownRow(entry));
+  } else {
+    addInventoryRemarkBreakdownRow();
+  }
+
+  panel.dataset.kind = normalizedKind;
+  panel.dataset.lotId = lotId;
+  $('inventory-remark-breakdown-title').textContent = `${normalizedKind === 'PUTAWAY' ? 'Put-away' : 'Stock Transfer'} remark quantity breakdown`;
+  $('inventory-remark-breakdown-context').innerHTML = `${escapeHtml(row.sku_name)} · ${escapeHtml(row.location_code)} · ${escapeHtml(row.container_no)} · ${fmtDate(row.expiry_date)} · Current stock ${fmtQtyUom(row.qty, row.uom)}`;
+  $('inventory-remark-breakdown-notice').innerHTML = parsed.structured
+    ? (parsed.entries.length ? 'Existing structured remark detected and loaded below.' : 'No structured remark is currently saved. Add only the exceptional categories you want to track.')
+    : `<strong>Current remark is free text and was not changed:</strong> ${escapeHtml(textarea.value.trim())}<br>Using this helper will replace that current remark only after you click “Apply breakdown to remark field,” then save the main Remarks form with a reason.`;
+  panel.classList.remove('hidden');
+  updateInventoryRemarkBreakdownTotals();
+}
+
+function applyInventoryRemarkBreakdown() {
+  const panel = $('inventory-remark-breakdown-panel');
+  if (!panel) return;
+  const row = state.data.inventory.find((item) => item.lot_id === panel.dataset.lotId);
+  if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
+
+  const { entries, error } = collectInventoryRemarkBreakdownEntries();
+  const tracked = entries.reduce((sum, entry) => sum + entry.qty, 0);
+  const stockQty = Number(row.qty || 0);
+  if (error) return toast(error, 'error');
+  if (!entries.length) return toast('Add at least one category.', 'error');
+  if (tracked > stockQty) return toast('Breakdown quantity cannot exceed the current Inventory quantity.', 'error');
+
+  const formatted = formatInventoryRemarkBreakdown(entries, row.uom);
+  if (formatted.length > 1000) return toast('The formatted remark exceeds the 1,000-character limit.', 'error');
+
+  const textarea = $(panel.dataset.kind === 'TRANSFER' ? 'inventory-remarks-transfer' : 'inventory-remarks-putaway');
+  if (!textarea) return;
+  textarea.value = formatted;
+  closeInventoryRemarkBreakdown();
+  toast('Breakdown applied to the current remark field. Enter the required reason and Save current remarks to commit it.', 'success');
+}
+
+
+async function openInventoryBreakdownHelper(lotId) {
+  await openInventoryRemarksEdit(lotId);
+  const dialog = $('inventory-remarks-dialog');
+  if (!dialog?.open) return;
+  const firstLauncher = dialog.querySelector('[data-inventory-remark-breakdown-launch="PUTAWAY"]');
+  firstLauncher?.scrollIntoView({ block: 'center' });
+  toast('Breakdown helper opened. Choose Put-away or Stock Transfer breakdown; normal free-text remark editing is still available in the same dialog.');
+}
+
 async function openInventoryRemarksEdit(lotId) {
   if (!isSupervisor()) return toast('Supervisor, Admin, or Owner access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
 
+  ensureInventoryRemarkBreakdownUi();
+  closeInventoryRemarkBreakdown();
   $('inventory-remarks-lot-id').value = lotId;
   $('inventory-remarks-current').innerHTML = `<strong>Current lot:</strong> ${escapeHtml(row.sku_name)} · ${escapeHtml(row.location_code)} · ${escapeHtml(row.container_no)} · ${fmtDate(row.expiry_date)} · ${fmtQtyUom(row.qty, row.uom)}${row.is_on_hold ? '<br><span class="pill expired">ON HOLD</span> Remarks may be updated without releasing the hold.' : ''}`;
   $('inventory-remarks-putaway').value = row.putaway_remarks || '';
