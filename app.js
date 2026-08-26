@@ -20,6 +20,34 @@ const NO_EXPIRY_DATE = '9999-12-31';
 const isNoExpiryDate = (value) => String(value || '').slice(0, 10) === NO_EXPIRY_DATE;
 const fmtDate = (value) => isNoExpiryDate(value) ? 'N/A' : value ? new Date(`${String(value).slice(0, 10)}T00:00:00`).toLocaleDateString() : '—';
 const fmtDateTime = (value) => value ? new Date(value).toLocaleString() : '—';
+
+function buildFefoOverrideConfirmMessage(lot, recommendation = null) {
+  const selectedRack = lot?.location_code || state.pick?.locationCode || '—';
+  const recommendedExpiry = recommendation?.earliestExpiry || lot?.earliestExpiry || null;
+  const recommendedRack = recommendation?.earliestLocation || lot?.earliestLocation || '—';
+  const recommendedContainer = recommendation?.earliestContainer || lot?.earliestContainer || '—';
+
+  return [
+    'FEFO WARNING',
+    '',
+    'You selected stock with a later expiry date.',
+    '',
+    'SELECTED STOCK',
+    `SKU: ${lot?.sku_name || '—'}`,
+    `Expiry: ${fmtDate(lot?.expiry_date)}`,
+    `Rack: ${selectedRack}`,
+    `Container: ${lot?.container_no || '—'}`,
+    '',
+    'FEFO RECOMMENDED STOCK',
+    `Expiry: ${fmtDate(recommendedExpiry)}`,
+    `Rack: ${recommendedRack}`,
+    `Container: ${recommendedContainer}`,
+    '',
+    'FEFO recommends picking the earlier-expiring stock first.',
+    '',
+    'Continue and disregard FEFO?'
+  ].join('\\n');
+}
 const localDateKey = (value) => {
   if (!value) return '';
   const d = new Date(value);
@@ -3519,7 +3547,7 @@ async function addSupervisorBarcodeBypass(lotId) {
   const priority = pickPriorityRecommendation(lot, fefoRows || [], queuedByLot);
   const earliestSameUnit = priority.earliestExpiry || lot.expiry_date;
   const fefoOverrideConfirmed = Boolean(earliestSameUnit && lot.expiry_date > earliestSameUnit);
-  if (fefoOverrideConfirmed && !window.confirm('Are you sure you want to disregard the FEFO warning?')) {
+  if (fefoOverrideConfirmed && !window.confirm(buildFefoOverrideConfirmMessage(lot, priority))) {
     return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
   }
 
@@ -3653,7 +3681,7 @@ async function addOperationItem(operation) {
   if (qty + already > Number(lot.qty)) return toast(`Cannot exceed available stock of ${fmtQtyUom(lot.qty, lot.uom)}.`, 'error');
 
   const fefoOverrideConfirmed = Boolean(pick && lot.earliestExpiry && lot.expiry_date > lot.earliestExpiry);
-  if (fefoOverrideConfirmed && !window.confirm('Are you sure you want to disregard the FEFO warning?')) {
+  if (fefoOverrideConfirmed && !window.confirm(buildFefoOverrideConfirmMessage(lot))) {
     return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
   }
 
