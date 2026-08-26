@@ -242,7 +242,7 @@ const state = {
 };
 
 function freshOperationState() {
-  return { lockToken: null, locationCode: null, heartbeat: null, cart: [], lots: [], rackLots: [], sku: null, naMode: false, adjustmentSessionKey: null };
+  return { lockToken: null, locationCode: null, heartbeat: null, cart: [], lots: [], rackLots: [], sku: null, naMode: false, adjustmentSessionKey: null, bulkTransactionRemark: null };
 }
 
 function isStockAdjustmentSalesOrder(value) {
@@ -443,6 +443,11 @@ function setupStaticEvents() {
 
   $('tr-lock-btn').addEventListener('click', lockTransferLocation);
   $('tr-transfer-all').addEventListener('change', syncFullTransferMode);
+  $('tr-transfer-all-note').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-transfer-all-transaction-remark]');
+    if (!button) return;
+    setTransferAllTransactionRemark();
+  });
   $('tr-barcode').addEventListener('input', () => syncOperationCompleteGuard('transfer'));
   $('tr-barcode').addEventListener('change', () => {
     syncOperationCompleteGuard('transfer');
@@ -1871,6 +1876,7 @@ function putawayLinePayload() {
     piece_qty: Number($('pa-piece-qty').value || 0),
     pack_qty: Number($('pa-pack-qty').value || 0),
     case_qty: Number($('pa-case-qty').value || 0),
+    user_remark: $('pa-note').value.trim() || null,
     allow_duplicate_details: $('pa-still-add').checked,
     barcode_less_sku_id: state.putaway.barcodeLessMode === 'existing' ? state.putaway.barcodeLessSkuId : null,
     create_barcode_less_sku: state.putaway.barcodeLessMode === 'new'
@@ -1951,7 +1957,7 @@ async function addPutawayItem(event) {
 }
 
 function clearPutawayLine() {
-  ['pa-piece','pa-pack','pa-case','pa-brand','pa-description','pa-variant','pa-size','pa-container','pa-expiry'].forEach((id) => $(id).value = '');
+  ['pa-piece','pa-pack','pa-case','pa-brand','pa-description','pa-variant','pa-size','pa-container','pa-expiry','pa-note'].forEach((id) => $(id).value = '');
   $('pa-no-expiry').checked = false;
   syncNoExpiryControl('pa-expiry', 'pa-no-expiry');
   ['pa-piece-qty','pa-pack-qty','pa-case-qty'].forEach((id) => $(id).value = '0');
@@ -1972,8 +1978,8 @@ function clearPutawayLine() {
 
 function renderPutawayCart() {
   const rows = state.putaway.cart;
-  $('pa-cart').innerHTML = rows.length ? `<table><thead><tr><th>SKU</th><th>Barcodes</th><th>Container</th><th>Expiry</th><th>Quantities</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
-    <td class="wrap">${escapeHtml([r.brand,r.description,r.variant,r.size].join(' '))}</td><td class="wrap">C: ${escapeHtml(r.case_barcode)}<br>Pk: ${escapeHtml(r.pack_barcode)}<br>P: ${escapeHtml(r.piece_barcode)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${putawayQuantityText(r)}</td>
+  $('pa-cart').innerHTML = rows.length ? `<table><thead><tr><th>SKU</th><th>Barcodes</th><th>Container</th><th>Expiry</th><th>Quantities</th><th>Remarks</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
+    <td class="wrap">${escapeHtml([r.brand,r.description,r.variant,r.size].join(' '))}</td><td class="wrap">C: ${escapeHtml(r.case_barcode)}<br>Pk: ${escapeHtml(r.pack_barcode)}<br>P: ${escapeHtml(r.piece_barcode)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${putawayQuantityText(r)}</td><td class="wrap">${escapeHtml(r.user_remark || '—')}</td>
     <td><button class="link-btn" type="button" data-remove-putaway="${i}">Remove</button></td></tr>`).join('')}</tbody></table>` : emptyState('No SKU lines added to this pallet yet.');
 }
 
@@ -2020,10 +2026,9 @@ async function completePutaway() {
   }
   const button = $('pa-complete-btn');
   setBusy(button, true, 'Completing…');
-  const { data, error } = await supabase.rpc('complete_putaway', {
+  const { data, error } = await supabase.rpc('complete_putaway_with_user_remarks', {
     p_location_code: state.putaway.locationCode,
-    p_items: state.putaway.cart,
-    p_note: $('pa-note').value.trim() || null
+    p_items: state.putaway.cart
   });
   setBusy(button, false);
   syncPutawayCompleteGuard();
@@ -2874,6 +2879,11 @@ function syncFullTransferMode() {
   qsa('[data-na-target="tr-barcode"]').forEach((b) => b.disabled = !locked || bulk);
   $('tr-add-btn').disabled = !locked || bulk;
 
+  // In Transfer ALL mode the ordinary item remark is intentionally unavailable.
+  // A whole-rack transaction remark is separate and never overwrites item remarks.
+  $('tr-note').disabled = bulk;
+  if (bulk) $('tr-note').value = '';
+
   const note = $('tr-transfer-all-note');
   if (bulk) {
     if (state.transfer.cart.length) {
@@ -2889,18 +2899,46 @@ function syncFullTransferMode() {
     const activeLots = (state.transfer.rackLots || []).filter((row) => Number(row.qty) > 0);
     const heldLots = activeLots.filter((row) => row.is_releasable === false);
     const shipperBoxes = new Set(activeLots.map((row) => row.shipper_box_no).filter(Boolean));
+    const txRemark = String(state.transfer.bulkTransactionRemark || '').trim();
+    const txRemarkHtml = heldLots.length ? '' : `<br><button type="button" class="secondary" data-transfer-all-transaction-remark="1">${txRemark ? 'Edit' : 'Add'} Transfer ALL transaction remark</button>${txRemark ? `<br><small><strong>Transaction remark:</strong> ${escapeHtml(txRemark)}</small>` : '<br><small>Optional. This explains the whole relocation only and does not replace any item Put-away/Stock-transfer remark.</small>'}`;
+
     note.innerHTML = heldLots.length
       ? `<strong>WHOLE-RACK TRANSFER BLOCKED BY ON-HOLD STOCK.</strong> ${heldLots.length.toLocaleString()} inventory line(s) in <strong>${escapeHtml(state.transfer.locationCode || 'this rack')}</strong> cannot be released. Unfreeze the held lot(s), or leave Whole Rack mode OFF and transfer only eligible lots.<br><small>Held stock remains physically visible in the rack but is excluded from normal item selection.</small>`
-      : `<strong>WHOLE SOURCE-RACK / PALLET MODE ACTIVE.</strong> Completing this transfer will move every active stock balance from <strong>${escapeHtml(state.transfer.locationCode || 'the locked source')}</strong> to the destination: STANDARD stock plus all physical Shipper Boxes, while preserving each SB number and SEALED/OPEN status.<br><strong>${activeLots.length.toLocaleString()} active inventory lines · ${shipperBoxes.size.toLocaleString()} Shipper box${shipperBoxes.size === 1 ? '' : 'es'} currently detected.</strong><br><small>This is rack-level because the current WMS does not store a separate physical Pallet ID. If more than one pallet/container is stored in this rack, ALL active stock in the rack will move.</small>`;
+      : `<strong>WHOLE SOURCE-RACK / PALLET MODE ACTIVE.</strong> Completing this transfer will move every active stock balance from <strong>${escapeHtml(state.transfer.locationCode || 'the locked source')}</strong> to the destination: STANDARD stock plus all physical Shipper Boxes, while preserving each SB number and SEALED/OPEN status.<br><strong>${activeLots.length.toLocaleString()} active inventory lines · ${shipperBoxes.size.toLocaleString()} Shipper box${shipperBoxes.size === 1 ? '' : 'es'} currently detected.</strong><br><small>The system trace remains "Whole source-rack / pallet transfer". Existing individual human remarks are not replaced by that system trace.</small>${txRemarkHtml}<br><small>This is rack-level because the current WMS does not store a separate physical Pallet ID. If more than one pallet/container is stored in this rack, ALL active stock in the rack will move.</small>`;
     note.classList.remove('hidden');
   } else {
     $('tr-unit-label').textContent = 'matched unit';
+    state.transfer.bulkTransactionRemark = null;
     note.classList.add('hidden');
     note.innerHTML = '';
     if (locked && $('tr-barcode').value.trim()) loadOperationLots('transfer');
   }
 
   syncOperationCompleteGuard('transfer');
+}
+
+function setTransferAllTransactionRemark() {
+  if (!$('tr-transfer-all')?.checked || !state.transfer.lockToken) {
+    return toast('Transfer ALL mode is not active.', 'error');
+  }
+
+  const existing = String(state.transfer.bulkTransactionRemark || '');
+  const value = window.prompt(
+    `TRANSFER ALL TRANSACTION REMARK\n\n` +
+    `This optional remark explains the whole relocation only.\n\n` +
+    `It WILL NOT overwrite any individual Put-away remark or Stock-transfer remark.\n` +
+    `The WMS system trace "Whole source-rack / pallet transfer" remains separate.\n\n` +
+    `Enter the transaction remark below. Leave it blank to remove the transaction remark.`,
+    existing
+  );
+
+  if (value === null) return;
+  const remark = value.trim();
+  if (remark.length > 1000) return toast('Transfer ALL transaction remark is limited to 1,000 characters.', 'error');
+
+  state.transfer.bulkTransactionRemark = remark || null;
+  syncFullTransferMode();
+  toast(remark ? 'Transfer ALL transaction remark saved for this unsaved session.' : 'Transfer ALL transaction remark cleared.', 'success');
 }
 
 async function loadPickRackContents() {
@@ -3632,6 +3670,7 @@ async function addOperationItem(operation) {
     lot_id: lot.lot_id,
     qty,
     barcode: lot.scannedBarcode,
+    user_remark: pick ? null : ($('tr-note').value.trim() || null),
     sku_name: lot.sku_name,
     brand: lot.brand || opState.sku?.brand || '',
     description: lot.description || opState.sku?.description || '',
@@ -3674,6 +3713,7 @@ async function addOperationItem(operation) {
     clearPickBarcodeMatch('Item added. Scan or type the next barcode, or complete this rack.');
     updatePickQtyNote();
   } else {
+    $('tr-note').value = '';
     clearTransferBarcodeMatch('Item added. Scan or type the next barcode, or complete the transfer.');
     updateTransferQtyNote();
   }
@@ -3704,11 +3744,12 @@ function renderOperationCart(operation) {
     acc[r.uom] = (acc[r.uom] || 0) + Number(r.qty || 0);
     return acc;
   }, { PIECE: 0, PACK: 0, CASE: 0 });
-  const transferHeader = pick ? '' : `<div class="info-box"><strong>Transfer summary:</strong> ${rows.length.toLocaleString()} line(s) queued from ${escapeHtml(state.transfer.locationCode || '—')} · ${formatBalances(totals)}. Review these items before clicking Complete transfer.</div>`;
+  const transferHeader = pick ? '' : `<div class="info-box"><strong>Transfer summary:</strong> ${rows.length.toLocaleString()} line(s) queued from ${escapeHtml(state.transfer.locationCode || '—')} · ${formatBalances(totals)}. Review these items and their individual remarks before clicking Complete transfer.</div>`;
 
-  container.innerHTML = `${transferHeader}<table><thead><tr>${pick ? '' : '<th>Item details</th>'}<th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Quantity</th><th>Barcode control</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
+  container.innerHTML = `${transferHeader}<table><thead><tr>${pick ? '' : '<th>Item details</th>'}<th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Quantity</th>${pick ? '' : '<th>Remarks</th>'}<th>Barcode control</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr>
     ${pick ? '' : `<td class="wrap"><strong>${escapeHtml([r.brand, r.description, r.variant, r.size].filter(Boolean).join(' '))}</strong><br><small>Source: ${escapeHtml(state.transfer.locationCode || '—')}</small></td>`}
     <td class="wrap">${escapeHtml(r.sku_name)}</td><td>${r.shipper_box_id ? `<span class="pill near">${escapeHtml(r.shipper_box_no || 'Shipper')} · ${escapeHtml(r.shipper_lot_role === 'HEADER' ? 'Complete' : 'Content')}</span>` : '<span class="pill">Loose</span>'}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td>${fmtQtyUom(r.qty, r.uom)}</td>
+    ${pick ? '' : `<td class="wrap">${escapeHtml(r.user_remark || '—')}</td>`}
     <td class="wrap">${pick
       ? (r.supervisor_bypass
         ? `<span class="pill override">Approved barcode bypass</span><br><small>${escapeHtml(r.bypass_reason || '')}</small>${r.bypass_approved_by ? `<br><small>Approved by ${escapeHtml(r.bypass_approved_by)} (${escapeHtml(String(r.bypass_approved_role || '').toUpperCase())})</small>` : ''}${pickContainerPriorityCartStatusHtml(r)}`
@@ -4867,11 +4908,11 @@ async function completeTransfer() {
     if (!confirmed) return;
 
     setBusy(button, true, 'Moving whole rack…');
-    const { data, error } = await supabase.rpc('complete_full_location_transfer', {
+    const { data, error } = await supabase.rpc('complete_full_location_transfer_with_transaction_remark', {
       p_source_code: state.transfer.locationCode,
       p_destination_code: destination,
       p_lock_token: state.transfer.lockToken,
-      p_note: $('tr-note').value.trim() || null
+      p_transaction_remark: state.transfer.bulkTransactionRemark || null
     });
     setBusy(button, false);
     syncOperationCompleteGuard('transfer');
@@ -4887,12 +4928,11 @@ async function completeTransfer() {
   if (state.transfer.cart.some((item) => !Number.isInteger(Number(item.qty)))) return toast('Transfer cannot continue: CASE, PACK, and PIECE quantities must be whole numbers.', 'error');
 
   setBusy(button, true, 'Completing…');
-  const { data, error } = await supabase.rpc('complete_transfer', {
+  const { data, error } = await supabase.rpc('complete_transfer_with_user_remarks', {
     p_source_code: state.transfer.locationCode,
     p_destination_code: destination,
     p_lock_token: state.transfer.lockToken,
-    p_items: state.transfer.cart.map(({ lot_id, qty, barcode }) => ({ lot_id, qty, barcode })),
-    p_note: $('tr-note').value.trim() || null
+    p_items: state.transfer.cart.map(({ lot_id, qty, barcode, user_remark }) => ({ lot_id, qty, barcode, user_remark }))
   });
   setBusy(button, false);
   syncOperationCompleteGuard('transfer');
@@ -7452,15 +7492,41 @@ async function loadHistory(force = false) {
     ? supabase.rpc('admin_get_history_pick_revert_statuses')
     : Promise.resolve({ data: [], error: null });
 
-  const [historyRes, auditRows, revertStatusRes] = await Promise.all([
+  const [historyRes, auditRows, revertStatusRes, lineRemarkRes, transactionRemarkRes, repairRes] = await Promise.all([
     supabase.from('v_history_details').select('*').order('created_at', { ascending: false }).order('line_no').limit(10000),
     loadAuditHistory90Days(),
-    revertStatusPromise
+    revertStatusPromise,
+    supabase.from('transaction_line_user_remarks').select('transaction_line_id,remark,remark_context,remark_source').limit(10000),
+    supabase.from('transaction_user_remarks').select('transaction_id,remark,remark_context').limit(10000),
+    supabase.from('transaction_remark_scope_repairs').select('transaction_id,suppress_legacy_parent_note,suppress_legacy_line_note,repair_type').limit(10000)
   ]);
 
   if (historyRes.error) throw historyRes.error;
 
-  state.data.history = historyRes.data || [];
+  if (lineRemarkRes?.error) console.warn('Per-line user remarks unavailable:', lineRemarkRes.error);
+  if (transactionRemarkRes?.error) console.warn('Transaction user remarks unavailable:', transactionRemarkRes.error);
+  if (repairRes?.error) console.warn('Remark-scope repair overlays unavailable:', repairRes.error);
+
+  const lineRemarkById = new Map((lineRemarkRes?.data || []).map((row) => [String(row.transaction_line_id), row]));
+  const transactionRemarkById = new Map((transactionRemarkRes?.data || []).map((row) => [String(row.transaction_id), row]));
+  const repairByTransactionId = new Map((repairRes?.data || []).map((row) => [String(row.transaction_id), row]));
+
+  state.data.history = (historyRes.data || []).map((row) => {
+    const lineRemark = lineRemarkById.get(String(row.line_id));
+    const transactionRemark = transactionRemarkById.get(String(row.transaction_id));
+    const repair = repairByTransactionId.get(String(row.transaction_id));
+    return {
+      ...row,
+      user_line_remark: lineRemark?.remark || null,
+      user_line_remark_context: lineRemark?.remark_context || null,
+      user_line_remark_source: lineRemark?.remark_source || null,
+      user_transaction_remark: transactionRemark?.remark || null,
+      user_transaction_remark_context: transactionRemark?.remark_context || null,
+      remark_scope_repair_type: repair?.repair_type || null,
+      suppress_legacy_parent_note: Boolean(repair?.suppress_legacy_parent_note),
+      suppress_legacy_line_note: Boolean(repair?.suppress_legacy_line_note)
+    };
+  });
   state.data.audit = auditRows || [];
 
   if (isAdminOrOwner()) {
@@ -7755,7 +7821,7 @@ function renderHistory() {
   const type = $('history-type').value;
   const exactRack = exactRackSearchEnabled('history-exact-rack');
   const rows = state.data.history.filter((r) => {
-    const haystack = [r.tx_no, r.created_by_username, r.sales_order, r.sku_name, r.container_no, r.location_code, r.transaction_note, r.override_reason, r.edit_reason, r.line_note, r.shipper_box_no, r.shipper_status, r.shipper_action].join(' ').toLowerCase();
+    const haystack = [r.tx_no, r.created_by_username, r.sales_order, r.sku_name, r.container_no, r.location_code, r.transaction_note, r.user_transaction_remark, r.user_line_remark, r.override_reason, r.edit_reason, r.line_note, r.shipper_box_no, r.shipper_status, r.shipper_action].join(' ').toLowerCase();
     const searchMatches = !term || (exactRack
       ? exactRackLocationMatches(r.location_code, term)
       : haystack.includes(term));
@@ -7777,6 +7843,15 @@ function renderHistory() {
       })
       .map((r) => r.transaction_id)
   );
+  const transferAllTransactions = new Set(
+    (state.data.history || [])
+      .filter((r) => r.transaction_type === 'TRANSFER' && (
+        String(r.transaction_note || '').trim() === 'Whole source-rack / pallet transfer'
+        || String(r.line_note || '').startsWith('Whole source-rack / pallet transfer')
+        || String(r.shipper_action || '') === 'WHOLE_RACK_SHIPPER_TRANSFER'
+      ))
+      .map((r) => r.transaction_id)
+  );
 
   const firstLineByTx = new Set();
   $('history-table').innerHTML = rows.length ? `<table><thead><tr><th>Transaction</th><th>Action</th><th>User / time</th><th>SO</th><th>Location</th><th>SKU / container</th><th>Qty</th><th>Remarks</th><th>Flags</th><th></th></tr></thead><tbody>${rows.map((r) => {
@@ -7789,6 +7864,28 @@ function renderHistory() {
 
     const transactionProtected = transactionHasShipper.has(r.transaction_id);
     const savedPickCorrectionProtected = r.transaction_type === 'PICK' && transactionHasSavedPickCorrection.has(r.transaction_id);
+    const transferAllSystemTrace = transferAllTransactions.has(r.transaction_id);
+    const rawTransactionNote = String(r.transaction_note || '').trim();
+    const visibleLegacyLineNote = r.suppress_legacy_line_note ? '' : String(r.line_note || '').trim();
+    const legacyTransferAllTransactionRemark = transferAllSystemTrace
+      && rawTransactionNote
+      && rawTransactionNote !== 'Whole source-rack / pallet transfer'
+      ? rawTransactionNote
+      : '';
+    const visibleLegacyTransactionRemark = r.suppress_legacy_parent_note
+      ? ''
+      : (transferAllSystemTrace ? legacyTransferAllTransactionRemark : rawTransactionNote);
+    const humanRemark = String(r.user_line_remark || '').trim()
+      || (first ? (String(r.user_transaction_remark || '').trim() || visibleLegacyTransactionRemark) : '');
+    const lineTraceHtml = visibleLegacyLineNote
+      ? `<br><small>${r.shipper_action || transferAllSystemTrace ? '<strong>System:</strong> ' : ''}${escapeHtml(visibleLegacyLineNote)}</small>`
+      : '';
+    const transactionTraceHtml = first && transferAllSystemTrace
+      ? `<br><small><strong>System:</strong> Whole source-rack / pallet transfer</small>`
+      : '';
+    const repairHtml = first && r.remark_scope_repair_type
+      ? `<br><span class="pill active">Remark scope repaired</span>`
+      : '';
     const correctAction = first && isAdminOrOwner() && ['PUTAWAY','PICK','TRANSFER'].includes(r.transaction_type) && !transactionProtected && !savedPickCorrectionProtected
       ? `<button class="link-btn" data-edit-transaction="${r.transaction_id}">Correct</button>`
       : (first && transactionProtected
@@ -7799,8 +7896,8 @@ function renderHistory() {
 
     return `<tr><td><strong>${escapeHtml(r.tx_no)}</strong></td><td>${escapeHtml(r.transaction_type)}</td>
       <td>${escapeHtml(r.created_by_username)}<br><small>${fmtDateTime(r.created_at)}</small></td><td>${escapeHtml(r.sales_order || '—')}</td><td>${escapeHtml(r.location_code || '—')}</td>
-      <td class="wrap">${escapeHtml(r.sku_name || 'System action')}<br><small>${escapeHtml(r.container_no || '')} ${r.expiry_date ? `· ${fmtDate(r.expiry_date)}` : ''}${r.shipper_box_no ? ` · ${escapeHtml(r.shipper_box_no)}` : ''}</small>${r.line_note ? `<br><small>${escapeHtml(r.line_note)}</small>` : ''}</td>
-      <td>${r.signed_qty == null ? '—' : fmtQtyUom(r.signed_qty, r.uom)}</td><td class="wrap">${first ? escapeHtml(r.transaction_note || '—') : '—'}</td><td class="wrap">${flags}${r.shipper_action ? `<br><span class="pill near">${escapeHtml(r.shipper_action)}</span>` : ''}${r.barcode_bypassed ? `<br><small>Bypass by ${escapeHtml(r.bypassed_by_username || r.created_by_username)}: ${escapeHtml(r.bypass_reason || '')}</small>` : ''}${first && r.override_reason ? `<br><small>${escapeHtml(r.override_reason)}</small>` : ''}${first && r.edit_reason ? `<br><small>Edit: ${escapeHtml(r.edit_reason)}</small>` : ''}</td>
+      <td class="wrap">${escapeHtml(r.sku_name || 'System action')}<br><small>${escapeHtml(r.container_no || '')} ${r.expiry_date ? `· ${fmtDate(r.expiry_date)}` : ''}${r.shipper_box_no ? ` · ${escapeHtml(r.shipper_box_no)}` : ''}</small>${lineTraceHtml}</td>
+      <td>${r.signed_qty == null ? '—' : fmtQtyUom(r.signed_qty, r.uom)}</td><td class="wrap">${escapeHtml(humanRemark || '—')}</td><td class="wrap">${flags}${transactionTraceHtml}${repairHtml}${r.shipper_action ? `<br><span class="pill near">${escapeHtml(r.shipper_action)}</span>` : ''}${r.barcode_bypassed ? `<br><small>Bypass by ${escapeHtml(r.bypassed_by_username || r.created_by_username)}: ${escapeHtml(r.bypass_reason || '')}</small>` : ''}${first && r.override_reason ? `<br><small>${escapeHtml(r.override_reason)}</small>` : ''}${first && r.edit_reason ? `<br><small>Edit: ${escapeHtml(r.edit_reason)}</small>` : ''}</td>
       <td>${actions}</td></tr>`;
   }).join('')}</tbody></table>` : emptyState('No matching history.');
 }
