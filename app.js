@@ -46,7 +46,7 @@ function buildFefoOverrideConfirmMessage(lot, recommendation = null) {
     'FEFO recommends picking the earlier-expiring stock first.',
     '',
     'Continue and disregard FEFO?'
-  ].join('\\n');
+  ].join('\n');
 }
 const localDateKey = (value) => {
   if (!value) return '';
