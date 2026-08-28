@@ -7779,6 +7779,30 @@ async function deleteSystemHistoryRange(event) {
   toast('Selected transaction and audit history permanently deleted.', 'success');
 }
 
+async function loadPagedHistoryDataset(table, columns, orderColumns = []) {
+  const pageSize = 1000;
+  const rows = [];
+  let offset = 0;
+
+  while (true) {
+    let query = supabase.from(table).select(columns);
+    for (const order of orderColumns) {
+      query = query.order(order.column, { ascending: order.ascending !== false });
+    }
+
+    const { data, error } = await query.range(offset, offset + pageSize - 1);
+    if (error) return { data: null, error };
+
+    const page = data || [];
+    rows.push(...page);
+
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return { data: rows, error: null };
+}
+
 async function loadHistory(force = false) {
   ensureAuditCoverageDefaults();
 
@@ -7789,9 +7813,11 @@ async function loadHistory(force = false) {
     return renderAuditHistory();
   }
 
-  // Transaction History remains on its existing path.
-  // System Audit is loaded independently and paged so the old 2,000-row cap
-  // no longer prevents a complete retained 90-day report.
+  // Transaction History is loaded in complete 1,000-row pages so PostgREST's
+  // per-request row ceiling cannot silently cut off older retained transactions.
+  // The V4 historical remark overlays use the same paged read-only loader so they
+  // remain complete even when retained history grows beyond one large request.
+  // System Audit keeps its existing independent 90-day paged loader.
   //
   // Admin/Owner also receives one lightweight, read-only line-status snapshot for
   // the PICK-line Revert controls. Failure of that optional status RPC must never
@@ -7801,12 +7827,23 @@ async function loadHistory(force = false) {
     : Promise.resolve({ data: [], error: null });
 
   const [historyRes, auditRows, revertStatusRes, lineRemarkRes, transactionRemarkRes, repairRes] = await Promise.all([
-    supabase.from('v_history_details').select('*').order('created_at', { ascending: false }).order('line_no').limit(10000),
+    loadPagedHistoryDataset('v_history_details', '*', [
+      { column: 'created_at', ascending: false },
+      { column: 'line_no', ascending: true },
+      { column: 'transaction_id', ascending: true },
+      { column: 'line_id', ascending: true }
+    ]),
     loadAuditHistory90Days(),
     revertStatusPromise,
-    supabase.from('transaction_line_user_remarks').select('transaction_line_id,remark,remark_context,remark_source').limit(10000),
-    supabase.from('transaction_user_remarks').select('transaction_id,remark,remark_context').limit(10000),
-    supabase.from('transaction_remark_scope_repairs').select('transaction_id,suppress_legacy_parent_note,suppress_legacy_line_note,repair_type').limit(10000)
+    loadPagedHistoryDataset('transaction_line_user_remarks', 'transaction_line_id,remark,remark_context,remark_source', [
+      { column: 'transaction_line_id', ascending: true }
+    ]),
+    loadPagedHistoryDataset('transaction_user_remarks', 'transaction_id,remark,remark_context', [
+      { column: 'transaction_id', ascending: true }
+    ]),
+    loadPagedHistoryDataset('transaction_remark_scope_repairs', 'transaction_id,suppress_legacy_parent_note,suppress_legacy_line_note,repair_type', [
+      { column: 'transaction_id', ascending: true }
+    ])
   ]);
 
   if (historyRes.error) throw historyRes.error;
