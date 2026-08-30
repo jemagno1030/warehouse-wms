@@ -94,6 +94,41 @@
       }
     }
 
+
+    .physical-count-detailed-shipper-preview th,
+    .physical-count-detailed-shipper-preview td {
+      vertical-align: top;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .physical-count-detailed-shipper-preview .physical-count-remarks-col,
+    .physical-count-detailed-shipper-preview td.physical-count-remarks-cell {
+      min-width: 220px;
+      width: 22%;
+    }
+
+    .physical-count-detailed-shipper-preview td.physical-count-remarks-cell {
+      height: 46px;
+    }
+
+    .physical-count-detailed-shipper-header td {
+      font-weight: 700;
+      background: #f3f7fb;
+    }
+
+    .physical-count-detailed-group-start td {
+      border-top-width: 2px;
+    }
+
+    .physical-count-detailed-indent {
+      display: inline-block;
+      width: 1.1rem;
+      text-align: center;
+      font-weight: 700;
+    }
+
     @media print {
       @page {
         size: A4 landscape;
@@ -212,6 +247,36 @@
       #print-area.physical-count-print .physical-count-print-footer {
         margin-top: 4mm;
         font-size: 7.5pt;
+      }
+
+
+      #print-area.physical-count-detailed-shipper-print .pcd-rack { width: 6%; }
+      #print-area.physical-count-detailed-shipper-print .pcd-type { width: 8%; }
+      #print-area.physical-count-detailed-shipper-print .pcd-shipper { width: 10%; }
+      #print-area.physical-count-detailed-shipper-print .pcd-sku {
+        width: 27%;
+        white-space: normal !important;
+        overflow: hidden !important;
+        overflow-wrap: anywhere !important;
+        word-break: break-word !important;
+      }
+      #print-area.physical-count-detailed-shipper-print .pcd-uom { width: 6%; }
+      #print-area.physical-count-detailed-shipper-print .pcd-qty { width: 7%; text-align: right; }
+      #print-area.physical-count-detailed-shipper-print .pcd-expiry { width: 9%; }
+      #print-area.physical-count-detailed-shipper-print .pcd-container { width: 9%; white-space: nowrap !important; }
+      #print-area.physical-count-detailed-shipper-print .pcd-remarks { width: 18%; min-height: 11mm; }
+      #print-area.physical-count-detailed-shipper-print .pcd-group-start td { border-top-width: 2px; }
+      #print-area.physical-count-detailed-shipper-print .pcd-shipper-header td {
+        font-weight: 700;
+        background: #f3f3f3 !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      #print-area.physical-count-detailed-shipper-print .pcd-indent {
+        display: inline-block;
+        width: 4mm;
+        text-align: center;
+        font-weight: 700;
       }
     }
   </style>
@@ -853,13 +918,16 @@
       </section>
 
       <section id="screen-physicalcount" class="screen">
-        <article class="card">
+        <article id="physical-count-standard-panel" class="card">
           <div class="card-head">
             <div>
               <h3>Physical Count</h3>
               <p>Read-only printable count sheet for comparing current system stock against the actual warehouse.</p>
             </div>
-            <button id="physical-count-print-btn" type="button" class="primary">Print / Save PDF</button>
+            <div class="button-cluster">
+              <button id="physical-count-detailed-shipper-btn" type="button" class="secondary">Detailed Shipper View</button>
+              <button id="physical-count-print-btn" type="button" class="primary">Print / Save PDF</button>
+            </div>
           </div>
 
           <div class="info-box">
@@ -933,6 +1001,49 @@
               </thead>
               <tbody id="physical-count-table-body">
                 <tr><td colspan="8"><div class="empty-state">Loading current inventory…</div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article id="physical-count-detailed-shipper-panel" class="card hidden">
+          <div class="card-head">
+            <div>
+              <h3>Physical Count — Detailed Shipper View</h3>
+              <p>Full Physical Count with regular stock kept in sequence and every physical Shipper Box grouped by exact SB identity.</p>
+            </div>
+            <div class="button-cluster">
+              <button id="physical-count-detailed-shipper-back-btn" type="button" class="ghost">Back to Standard View</button>
+              <button id="physical-count-detailed-shipper-print-btn" type="button" class="primary">Print / Save PDF</button>
+            </div>
+          </div>
+
+          <div class="info-box">
+            <strong>Read-only alternate presentation.</strong>
+            Regular stock keeps the normal Physical Count consolidation rule. Shipper-linked stock is separated by exact
+            <strong>SB number</strong> and kept together as one block: <strong>SHIPPER</strong> header first, followed immediately by its
+            <strong>CONTENT</strong> rows. The current Physical Count filters and sort order are reused. This view does not change inventory or Shipper status.
+          </div>
+
+          <p id="physical-count-detailed-shipper-count" class="small-note">Detailed Shipper View will load from the current Physical Count data.</p>
+
+          <div class="table-wrap physical-count-detailed-shipper-wrap">
+            <table class="physical-count-detailed-shipper-preview">
+              <thead>
+                <tr>
+                  <th>Rack #</th>
+                  <th>Type</th>
+                  <th>Shipper Box</th>
+                  <th>SKU / Description / Size</th>
+                  <th>UOM</th>
+                  <th>Qty</th>
+                  <th>Expiry</th>
+                  <th>Container #</th>
+                  <th class="physical-count-remarks-col">Checker’s Remarks</th>
+                </tr>
+              </thead>
+              <tbody id="physical-count-detailed-shipper-table-body">
+                <tr><td colspan="9"><div class="empty-state">Open Detailed Shipper View to build the report.</div></td></tr>
               </tbody>
             </table>
           </div>

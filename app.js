@@ -260,7 +260,7 @@ const state = {
   transfer: freshOperationState(),
   pickRevertStatusByLine: new Map(),
   pickRevertStatusLoaded: false,
-  data: { inventory: [], physicalCount: [], physicalCountFiltered: [], stockCard: [], stockCardExport: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], auditFiltered: [], locations: [], rackMap: [] },
+  data: { inventory: [], physicalCount: [], physicalCountRaw: [], physicalCountFiltered: [], physicalCountDetailedShipperFiltered: [], stockCard: [], stockCardExport: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], auditFiltered: [], locations: [], rackMap: [] },
   stockCardMeta: null,
   stockCardCandidates: [],
   selectedQrLocations: new Set(),
@@ -505,6 +505,9 @@ function setupStaticEvents() {
   $('physical-count-sort-toggle').addEventListener('click', handlePhysicalCountSortToggle);
   $('physical-count-clear-btn').addEventListener('click', clearPhysicalCountFilters);
   $('physical-count-print-btn').addEventListener('click', printPhysicalCount);
+  $('physical-count-detailed-shipper-btn').addEventListener('click', openPhysicalCountDetailedShipperView);
+  $('physical-count-detailed-shipper-back-btn').addEventListener('click', closePhysicalCountDetailedShipperView);
+  $('physical-count-detailed-shipper-print-btn').addEventListener('click', printPhysicalCountDetailedShipperView);
 
   $('stock-card-search-form').addEventListener('submit', findStockCardSkus);
   $('stock-card-search').addEventListener('input', scheduleStockCardSuggestions);
@@ -1324,7 +1327,9 @@ function uniqueBy(rows, keyFn) {
 function invalidateReports() {
   state.data.inventory = [];
   state.data.physicalCount = [];
+  state.data.physicalCountRaw = [];
   state.data.physicalCountFiltered = [];
+  state.data.physicalCountDetailedShipperFiltered = [];
   state.data.stockCard = [];
   state.data.stockCardExport = [];
   state.stockCardMeta = null;
@@ -5192,8 +5197,12 @@ async function loadPhysicalCount(force = false) {
     offset += pageSize;
   }
 
+  state.data.physicalCountRaw = rows.filter((row) => Number(row.qty || 0) > 0);
   state.data.physicalCount = aggregatePhysicalCountRows(rows);
   renderPhysicalCount();
+  if (!$('physical-count-detailed-shipper-panel').classList.contains('hidden')) {
+    renderPhysicalCountDetailedShipperView();
+  }
 }
 
 function filteredPhysicalCountRows() {
@@ -5335,6 +5344,367 @@ function physicalCountFilterSummary() {
   if (racks) filters.push(`Rack(s): ${racks}`);
 
   return filters.length ? filters.join(' · ') : 'All current positive inventory';
+}
+
+function physicalCountDetailedSearchText(row) {
+  return [
+    physicalCountSkuSearchText(row),
+    row.shipper_box_no,
+    row.shipper_status,
+    row.shipper_lot_role
+  ].join(' ').toLowerCase();
+}
+
+function aggregatePhysicalCountDetailedRows(rows, shipperAware = false) {
+  const grouped = new Map();
+
+  (rows || []).forEach((row) => {
+    const isShipper = Boolean(row.shipper_box_id || row.shipper_box_no);
+    const role = String(row.shipper_lot_role || '').toUpperCase();
+    const key = [
+      row.location_code || '',
+      row.sku_id || '',
+      row.uom || '',
+      row.expiry_date || '',
+      row.container_no || '',
+      shipperAware && isShipper ? (row.shipper_box_id || row.shipper_box_no || '') : '',
+      shipperAware && isShipper ? role : ''
+    ].join('|');
+
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.qty += Number(row.qty || 0);
+      return;
+    }
+
+    grouped.set(key, {
+      ...row,
+      location_code: row.location_code || '',
+      location_sort_order: row.location_sort_order ?? null,
+      sku_id: row.sku_id || '',
+      brand: row.brand || '',
+      description: row.description || '',
+      variant: row.variant || '',
+      size: row.size || '',
+      sku_name: row.sku_name || [row.brand, row.description, row.variant, row.size].filter(Boolean).join(' '),
+      case_barcode: row.case_barcode || '',
+      pack_barcode: row.pack_barcode || '',
+      piece_barcode: row.piece_barcode || '',
+      uom: String(row.uom || '').toUpperCase(),
+      qty: Number(row.qty || 0),
+      expiry_date: row.expiry_date || null,
+      container_no: row.container_no || '',
+      shipper_box_id: row.shipper_box_id || null,
+      shipper_box_no: row.shipper_box_no || '',
+      shipper_status: row.shipper_status || '',
+      shipper_lot_role: role
+    });
+  });
+
+  return [...grouped.values()].filter((row) => Number(row.qty || 0) > 0);
+}
+
+function physicalCountDetailedUnitComparators() {
+  const alphaCompare = (a, b) => {
+    const fields = ['brand', 'description', 'variant', 'size'];
+    for (const field of fields) {
+      const result = String(a[field] || '').localeCompare(String(b[field] || ''), undefined, {
+        numeric: true,
+        sensitivity: 'base'
+      });
+      if (result) return result;
+    }
+
+    const containerResult = comparePhysicalCountContainers(a.container_no, b.container_no);
+    if (containerResult) return containerResult;
+
+    const rackResult = comparePhysicalCountRackCodes(a.location_code, b.location_code);
+    if (rackResult) return rackResult;
+
+    const expiryResult = String(a.expiry_date || '').localeCompare(String(b.expiry_date || ''));
+    if (expiryResult) return expiryResult;
+
+    return String(a.uom || '').localeCompare(String(b.uom || ''));
+  };
+
+  const containerCompare = (a, b) => {
+    const result = comparePhysicalCountContainers(a.container_no, b.container_no);
+    if (result) return result;
+    const alphaResult = alphaCompare(a, b);
+    if (alphaResult) return alphaResult;
+    return comparePhysicalCountRackCodes(a.location_code, b.location_code);
+  };
+
+  const rackCompare = (a, b) => {
+    const rackResult = comparePhysicalCountRackCodes(a.location_code, b.location_code);
+    if (rackResult) return rackResult;
+    return alphaCompare(a, b);
+  };
+
+  const rackContainerCompare = (a, b) => {
+    const rackResult = comparePhysicalCountRackCodes(a.location_code, b.location_code);
+    if (rackResult) return rackResult;
+    const containerResult = comparePhysicalCountContainers(a.container_no, b.container_no);
+    if (containerResult) return containerResult;
+    return alphaCompare(a, b);
+  };
+
+  return { alphaCompare, containerCompare, rackCompare, rackContainerCompare };
+}
+
+function buildPhysicalCountDetailedShipperRows() {
+  const sku = $('physical-count-sku').value.trim().toLowerCase();
+  const containerRaw = $('physical-count-container').value.trim();
+  const rackRaw = $('physical-count-racks').value.trim();
+  const exactContainers = containerRaw
+    ? containerRaw.split(',').map((value) => value.trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  const rawRows = (state.data.physicalCountRaw || []).filter((row) => Number(row.qty || 0) > 0);
+  const physicallyScopedRows = rawRows.filter((row) => {
+    if (exactContainers.length) {
+      const current = String(row.container_no || '').trim().toLowerCase();
+      if (!exactContainers.includes(current)) return false;
+    }
+    return physicalCountRackMatches(row.location_code, rackRaw);
+  });
+
+  // Regular stock keeps the current Physical Count consolidation rule.
+  const regularRows = aggregatePhysicalCountDetailedRows(
+    physicallyScopedRows.filter((row) => !(row.shipper_box_id || row.shipper_box_no))
+  ).filter((row) => !sku || physicalCountSkuSearchText(row).includes(sku));
+
+  // Shipper-linked stock stays separated by exact physical SB identity. If the SKU
+  // filter matches any row in an SB, keep that whole SB block together so the checker
+  // never loses the parent/content relationship while counting.
+  const shipperGroups = new Map();
+  physicallyScopedRows
+    .filter((row) => Boolean(row.shipper_box_id || row.shipper_box_no))
+    .forEach((row) => {
+      const key = String(row.shipper_box_id || row.shipper_box_no || 'UNKNOWN');
+      if (!shipperGroups.has(key)) shipperGroups.set(key, []);
+      shipperGroups.get(key).push(row);
+    });
+
+  const units = regularRows.map((row) => ({
+    anchor: row,
+    shipper: false,
+    rows: [{ ...row, detailed_type: 'REGULAR', detailed_group_start: false }]
+  }));
+
+  for (const groupRows of shipperGroups.values()) {
+    if (sku && !groupRows.some((row) => physicalCountDetailedSearchText(row).includes(sku))) continue;
+
+    const exactRows = aggregatePhysicalCountDetailedRows(groupRows, true);
+    exactRows.sort((a, b) => {
+      const roleA = String(a.shipper_lot_role || '').toUpperCase() === 'HEADER' ? 0 : 1;
+      const roleB = String(b.shipper_lot_role || '').toUpperCase() === 'HEADER' ? 0 : 1;
+      if (roleA !== roleB) return roleA - roleB;
+
+      const nameA = [a.brand, a.description, a.variant, a.size].filter(Boolean).join(' ');
+      const nameB = [b.brand, b.description, b.variant, b.size].filter(Boolean).join(' ');
+      const nameResult = nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
+      if (nameResult) return nameResult;
+
+      const expiryResult = String(a.expiry_date || '').localeCompare(String(b.expiry_date || ''));
+      if (expiryResult) return expiryResult;
+      return String(a.uom || '').localeCompare(String(b.uom || ''));
+    });
+
+    const header = exactRows.find((row) => String(row.shipper_lot_role || '').toUpperCase() === 'HEADER');
+    const anchorRow = header || exactRows[0];
+    if (!anchorRow) continue;
+
+    units.push({
+      anchor: anchorRow,
+      shipper: true,
+      rows: exactRows.map((row, index) => ({
+        ...row,
+        detailed_type: String(row.shipper_lot_role || '').toUpperCase() === 'HEADER' ? 'SHIPPER' : 'CONTENT',
+        detailed_group_start: index === 0
+      }))
+    });
+  }
+
+  const comparators = physicalCountDetailedUnitComparators();
+  let mode = getPhysicalCountSortMode();
+  if (mode === 'auto') mode = rackRaw ? 'rack' : 'alpha';
+
+  const compareUnits = (a, b) => {
+    if (mode === 'container') return comparators.containerCompare(a.anchor, b.anchor);
+    if (mode === 'rack') return comparators.rackCompare(a.anchor, b.anchor);
+    if (mode === 'rack-container') return comparators.rackContainerCompare(a.anchor, b.anchor);
+    return comparators.alphaCompare(a.anchor, b.anchor);
+  };
+
+  units.sort(compareUnits);
+  return units.flatMap((unit) => unit.rows);
+}
+
+function physicalCountDetailedSkuDisplay(row) {
+  return [row.brand, row.description, row.variant, row.size].filter(Boolean).join(' ') || row.sku_name || '—';
+}
+
+function renderPhysicalCountDetailedShipperView() {
+  const rows = buildPhysicalCountDetailedShipperRows();
+  state.data.physicalCountDetailedShipperFiltered = rows;
+
+  const shipperBoxes = new Set(rows.map((row) => row.shipper_box_no).filter(Boolean));
+  const regularLines = rows.filter((row) => row.detailed_type === 'REGULAR').length;
+  const selectedMode = getPhysicalCountSortMode();
+  const rackFiltered = Boolean($('physical-count-racks').value.trim());
+  const resolvedMode = selectedMode === 'auto' ? (rackFiltered ? 'rack' : 'alpha') : selectedMode;
+  const sortLabel = selectedMode === 'auto'
+    ? `Auto → ${physicalCountSortLabel(resolvedMode)}`
+    : physicalCountSortLabel(resolvedMode);
+
+  $('physical-count-detailed-shipper-count').innerHTML = rows.length
+    ? `Showing <strong>${rows.length.toLocaleString()}</strong> count line(s) · <strong>${shipperBoxes.size.toLocaleString()}</strong> physical Shipper box group(s) · <strong>${regularLines.toLocaleString()}</strong> regular line(s) · Sorted by <strong>${escapeHtml(sortLabel)}</strong>.`
+    : 'No current inventory matches the Physical Count filters.';
+
+  $('physical-count-detailed-shipper-table-body').innerHTML = rows.length ? rows.map((row) => {
+    const type = row.detailed_type || 'REGULAR';
+    const isContent = type === 'CONTENT';
+    const isShipperHeader = type === 'SHIPPER';
+    const rowClass = [
+      isShipperHeader ? 'physical-count-detailed-shipper-header' : '',
+      isContent ? 'physical-count-detailed-shipper-content' : '',
+      row.detailed_group_start ? 'physical-count-detailed-group-start' : ''
+    ].filter(Boolean).join(' ');
+    const shipperCell = row.shipper_box_no
+      ? `<strong>${escapeHtml(row.shipper_box_no)}</strong>${row.shipper_status ? `<br><small>${escapeHtml(row.shipper_status)}</small>` : ''}`
+      : '—';
+    const skuText = `${isContent ? '<span class="physical-count-detailed-indent">↳</span> ' : ''}${escapeHtml(physicalCountDetailedSkuDisplay(row))}`;
+
+    return `<tr class="${rowClass}">
+      <td><strong>${escapeHtml(row.location_code || '—')}</strong></td>
+      <td><strong>${escapeHtml(type)}</strong></td>
+      <td>${shipperCell}</td>
+      <td class="wrap">${isShipperHeader ? `<strong>${skuText}</strong>` : skuText}</td>
+      <td>${escapeHtml(row.uom || '—')}</td>
+      <td>${fmtQty(row.qty)}</td>
+      <td>${isNoExpiryDate(row.expiry_date) ? 'N/A' : fmtDate(row.expiry_date)}</td>
+      <td>${escapeHtml(row.container_no || '—')}</td>
+      <td class="physical-count-remarks-cell">&nbsp;</td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="9">${emptyState('No current inventory matches the Physical Count filters.')}</td></tr>`;
+}
+
+async function openPhysicalCountDetailedShipperView() {
+  if (!state.data.physicalCount.length || !state.data.physicalCountRaw.length) {
+    await loadPhysicalCount(true);
+  }
+
+  renderPhysicalCountDetailedShipperView();
+  $('physical-count-standard-panel').classList.add('hidden');
+  $('physical-count-detailed-shipper-panel').classList.remove('hidden');
+  $('physical-count-detailed-shipper-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closePhysicalCountDetailedShipperView() {
+  $('physical-count-detailed-shipper-panel').classList.add('hidden');
+  $('physical-count-standard-panel').classList.remove('hidden');
+  $('physical-count-standard-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function printPhysicalCountDetailedShipperView() {
+  const rows = state.data.physicalCountDetailedShipperFiltered || [];
+  if (!state.data.physicalCountRaw.length) {
+    return toast('Physical Count data is not loaded yet. Refresh the module and try again.', 'error');
+  }
+  if (!rows.length) {
+    return toast('No Detailed Shipper View rows match the current Physical Count filters.', 'error');
+  }
+
+  const printArea = document.createElement('section');
+  printArea.id = 'print-area';
+  printArea.className = 'physical-count-print physical-count-detailed-shipper-print';
+
+  const generatedAt = new Date().toLocaleString();
+  const selectedMode = getPhysicalCountSortMode();
+  const resolvedMode = selectedMode === 'auto'
+    ? ($('physical-count-racks').value.trim() ? 'rack' : 'alpha')
+    : selectedMode;
+  const sortLabel = selectedMode === 'auto'
+    ? `Auto → ${physicalCountSortLabel(resolvedMode)}`
+    : physicalCountSortLabel(resolvedMode);
+  const shipperBoxes = new Set(rows.map((row) => row.shipper_box_no).filter(Boolean));
+
+  printArea.innerHTML = `
+    <div class="physical-count-print-header">
+      <h1>IFTC WAREHOUSE LOCATOR SYSTEM (JPM)</h1>
+      <p class="physical-count-print-subtitle">PHYSICAL COUNT — DETAILED SHIPPER VIEW</p>
+
+      <div class="physical-count-print-meta">
+        <div><strong>Generated:</strong> ${escapeHtml(generatedAt)}</div>
+        <div><strong>Count lines:</strong> ${rows.length.toLocaleString()}</div>
+        <div><strong>Filters:</strong> ${escapeHtml(physicalCountFilterSummary())}</div>
+        <div><strong>Sort:</strong> ${escapeHtml(sortLabel)}</div>
+        <div><strong>Physical Shipper boxes:</strong> ${shipperBoxes.size.toLocaleString()}</div>
+        <div><strong>Rule:</strong> Each SB stays together: SHIPPER first, then CONTENT.</div>
+      </div>
+
+      <div class="physical-count-check-lines">
+        <div class="physical-count-check-line"><strong>Checker:</strong></div>
+        <div class="physical-count-check-line"><strong>Date / Time Checked:</strong></div>
+        <div class="physical-count-check-line"><strong>Verified By:</strong></div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th class="pcd-rack">Rack #</th>
+          <th class="pcd-type">Type</th>
+          <th class="pcd-shipper">Shipper Box</th>
+          <th class="pcd-sku">SKU / Description / Size</th>
+          <th class="pcd-uom">UOM</th>
+          <th class="pcd-qty">System Qty</th>
+          <th class="pcd-expiry">Expiry</th>
+          <th class="pcd-container">Container #</th>
+          <th class="pcd-remarks">Checker’s Remarks</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => {
+          const type = row.detailed_type || 'REGULAR';
+          const isContent = type === 'CONTENT';
+          const isShipperHeader = type === 'SHIPPER';
+          const rowClass = [
+            isShipperHeader ? 'pcd-shipper-header' : '',
+            isContent ? 'pcd-shipper-content' : '',
+            row.detailed_group_start ? 'pcd-group-start' : ''
+          ].filter(Boolean).join(' ');
+          const shipperLabel = row.shipper_box_no
+            ? `${escapeHtml(row.shipper_box_no)}${row.shipper_status ? `<br><small>${escapeHtml(row.shipper_status)}</small>` : ''}`
+            : '—';
+          const skuLabel = `${isContent ? '<span class="pcd-indent">↳</span> ' : ''}${escapeHtml(physicalCountDetailedSkuDisplay(row))}`;
+          return `<tr class="${rowClass}">
+            <td class="pcd-rack"><strong>${escapeHtml(row.location_code || '—')}</strong></td>
+            <td class="pcd-type"><strong>${escapeHtml(type)}</strong></td>
+            <td class="pcd-shipper">${shipperLabel}</td>
+            <td class="pcd-sku">${isShipperHeader ? `<strong>${skuLabel}</strong>` : skuLabel}</td>
+            <td class="pcd-uom">${escapeHtml(row.uom || '—')}</td>
+            <td class="pcd-qty">${fmtQty(row.qty)}</td>
+            <td class="pcd-expiry">${isNoExpiryDate(row.expiry_date) ? 'N/A' : fmtDate(row.expiry_date)}</td>
+            <td class="pcd-container">${escapeHtml(row.container_no || '—')}</td>
+            <td class="pcd-remarks">&nbsp;</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+
+    <div class="physical-count-print-footer">
+      <strong>Read-only system reference.</strong> REGULAR rows keep the current Physical Count consolidation rule. Shipper-linked rows remain separated by exact SB identity so each physical box can be checked with its own contents. No inventory is changed by this report.
+    </div>
+  `;
+
+  document.body.appendChild(printArea);
+  try {
+    window.print();
+  } finally {
+    setTimeout(() => printArea.remove(), 1000);
+  }
 }
 
 function printPhysicalCount() {
