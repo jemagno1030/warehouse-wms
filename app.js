@@ -8965,24 +8965,47 @@ async function openFullResetDialog() {
   const button = $('full-reset-open-btn');
   setBusy(button, true, 'Loading preview…');
   try {
-    const { data, error } = await supabase.rpc('owner_full_reset_preview');
+    const { data, error } = await supabase.rpc('owner_full_reset_preview_vnext');
     if (error) throw error;
     const row = data?.[0] || {};
 
     $('full-reset-preview').innerHTML = `
-      <strong>LIVE RESET PREVIEW</strong><br>
+      <strong>LIVE RESET PREVIEW — VNEXT SAFETY COVERAGE</strong><br>
+      <small>The established Full Reset core is unchanged. VNext explicitly previews newer operational tables and verifies the reset atomically before success is returned.</small><br><br>
+
+      <strong>Preserved</strong><br>
       Owner accounts preserved: <strong>${Number(row.owner_accounts || 0).toLocaleString()}</strong><br>
-      Non-Owner Auth users removed: <strong>${Number(row.non_owner_auth_users || 0).toLocaleString()}</strong><br>
-      SKU records removed: <strong>${Number(row.sku_records || 0).toLocaleString()}</strong><br>
-      Stock lots removed: <strong>${Number(row.stock_lots || 0).toLocaleString()}</strong><br>
-      Shipper boxes removed: <strong>${Number(row.shipper_boxes || 0).toLocaleString()}</strong><br>
-      Transactions removed: <strong>${Number(row.transactions || 0).toLocaleString()}</strong><br>
-      Transaction lines removed: <strong>${Number(row.transaction_lines || 0).toLocaleString()}</strong><br>
-      System audit events removed: <strong>${Number(row.audit_events || 0).toLocaleString()}</strong><br>
-      Non-FEFO detail rows removed: <strong>${Number(row.non_fefo_events || 0).toLocaleString()}</strong><br>
-      Sales Orders removed: <strong>${Number(row.sales_orders || 0).toLocaleString()}</strong><br>
-      Current location locks removed: <strong>${Number(row.active_location_locks || 0).toLocaleString()}</strong><br>
-      Hidden/removed container records cleared: <strong>${Number(row.hidden_containers || 0).toLocaleString()}</strong>`;
+      Rack/location master, System Control configuration, System Manager/Cron, database schema/functions/views/RLS/indexes: <strong>PRESERVED</strong><br><br>
+
+      <strong>Core WMS data removed</strong><br>
+      Non-Owner Auth users: <strong>${Number(row.non_owner_auth_users || 0).toLocaleString()}</strong><br>
+      Non-Owner profiles: <strong>${Number(row.non_owner_profiles || 0).toLocaleString()}</strong><br>
+      SKU records: <strong>${Number(row.sku_records || 0).toLocaleString()}</strong><br>
+      Stock lots: <strong>${Number(row.stock_lots || 0).toLocaleString()}</strong><br>
+      Shipper boxes: <strong>${Number(row.shipper_boxes || 0).toLocaleString()}</strong><br>
+      Transactions: <strong>${Number(row.transactions || 0).toLocaleString()}</strong><br>
+      Transaction lines: <strong>${Number(row.transaction_lines || 0).toLocaleString()}</strong><br>
+      System audit events: <strong>${Number(row.audit_events || 0).toLocaleString()}</strong><br>
+      Non-FEFO detail rows: <strong>${Number(row.non_fefo_events || 0).toLocaleString()}</strong><br>
+      Sales Orders: <strong>${Number(row.sales_orders || 0).toLocaleString()}</strong><br>
+      Location locks: <strong>${Number(row.location_locks_total || 0).toLocaleString()}</strong> total (${Number(row.active_location_locks || 0).toLocaleString()} active)<br>
+      Hidden/removed container records: <strong>${Number(row.hidden_containers || 0).toLocaleString()}</strong><br>
+      Inventory lot holds: <strong>${Number(row.inventory_lot_holds || 0).toLocaleString()}</strong><br><br>
+
+      <strong>Current-generation dependent/control rows removed</strong><br>
+      Current Detailed-Lot remark overrides: <strong>${Number(row.inventory_lot_remark_overrides || 0).toLocaleString()}</strong><br>
+      Saved Pick corrections: <strong>${Number(row.saved_pick_corrections || 0).toLocaleString()}</strong><br>
+      Saved Pick emergency-finish approvals: <strong>${Number(row.saved_pick_finish_approvals || 0).toLocaleString()}</strong><br>
+      V4 per-line remarks: <strong>${Number(row.transaction_line_user_remarks || 0).toLocaleString()}</strong><br>
+      V4 Transfer ALL transaction remarks: <strong>${Number(row.transaction_user_remarks || 0).toLocaleString()}</strong><br>
+      V4 historical remark repairs: <strong>${Number(row.transaction_remark_scope_repairs || 0).toLocaleString()}</strong><br>
+      Warehouse action approvals: <strong>${Number(row.warehouse_action_approvals || 0).toLocaleString()}</strong><br>
+      Shipper batch approvals: <strong>${Number(row.shipper_batch_approvals || 0).toLocaleString()}</strong><br>
+      Barcode-bypass execution contexts: <strong>${Number(row.barcode_bypass_execution_contexts || 0).toLocaleString()}</strong><br>
+      Barcode-bypass execution lines: <strong>${Number(row.barcode_bypass_execution_lines || 0).toLocaleString()}</strong><br>
+      Administrative / Full Reset attempt rows: <strong>${Number(row.control_code_attempts || 0).toLocaleString()}</strong><br><br>
+
+      <strong>VNext atomic safety:</strong> RESET_COMPLETE is returned only after all expected operational tables are verified empty, Owner/rack/system structure is verified preserved, and mode is verified as ADMINISTRATIVE_PAUSE.`;
 
     $('full-reset-pin').value = '';
     $('full-reset-understand').checked = false;
@@ -9033,7 +9056,7 @@ async function submitFullReset(event) {
   setBusy(button, true, 'Resetting…');
 
   try {
-    const { data, error } = await supabase.rpc('owner_full_reset_wms', {
+    const { data, error } = await supabase.rpc('owner_full_reset_wms_vnext', {
       p_confirmation_pin: pin
     });
     if (error) throw error;
@@ -9067,6 +9090,7 @@ async function submitFullReset(event) {
       Audit events deleted: ${Number(row.audit_events_deleted || 0).toLocaleString()}<br>
       Sales Orders deleted: ${Number(row.sales_orders_deleted || 0).toLocaleString()} ·
       Rack locks deleted: ${Number(row.location_locks_deleted || 0).toLocaleString()}<br>
+      <strong>VNext post-reset integrity verification: PASSED.</strong><br>
       <strong>System remains in Administrative Pause.</strong> Inspect the blank system before Operational Resume.`;
     $('full-reset-result').classList.remove('hidden');
 
