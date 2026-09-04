@@ -8173,6 +8173,29 @@ async function loadPagedHistoryDataset(table, columns, orderColumns = []) {
   return { data: rows, error: null };
 }
 
+async function loadPagedPickRevertStatuses() {
+  const pageSize = 1000;
+  const rows = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .rpc('admin_get_history_pick_revert_statuses')
+      .order('transaction_line_id', { ascending: true })
+      .range(offset, offset + pageSize - 1);
+
+    if (error) return { data: null, error };
+
+    const page = data || [];
+    rows.push(...page);
+
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return { data: rows, error: null };
+}
+
 async function loadHistory(force = false) {
   ensureAuditCoverageDefaults();
 
@@ -8189,11 +8212,12 @@ async function loadHistory(force = false) {
   // remain complete even when retained history grows beyond one large request.
   // System Audit keeps its existing independent 90-day paged loader.
   //
-  // Admin/Owner also receives one lightweight, read-only line-status snapshot for
-  // the PICK-line Revert controls. Failure of that optional status RPC must never
-  // stop normal History/Audit from loading.
+  // Admin/Owner receives the complete read-only PICK-line Revert status snapshot
+  // in stable 1,000-row pages. This prevents PostgREST's per-request row ceiling
+  // from silently hiding Revert controls on newer retained PICK lines.
+  // Failure remains optional and must never stop normal History/Audit from loading.
   const revertStatusPromise = isAdminOrOwner()
-    ? supabase.rpc('admin_get_history_pick_revert_statuses')
+    ? loadPagedPickRevertStatuses()
     : Promise.resolve({ data: [], error: null });
 
   const [historyRes, auditRows, revertStatusRes, lineRemarkRes, transactionRemarkRes, repairRes] = await Promise.all([
