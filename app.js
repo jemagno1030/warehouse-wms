@@ -2738,6 +2738,10 @@ async function requestReopenCompletedSalesOrder() {
     toast('This Sales Order is not currently completed, so reopening approval is not required.', 'error');
     return false;
   }
+  if (state.pickOrder.reopenAllowedThisMonth === false) {
+    toast('Opening this sales order is only valid within the month of previous completion. Prepare another SO or do necessary warehouse adjustment as an alternative', 'error');
+    return false;
+  }
 
   const reopenReason = $('pick-so-override-reason').value.trim();
   if (!reopenReason) {
@@ -3930,8 +3934,8 @@ async function loadPickSalesOrderSummary() {
   }
 
   const [summaryRes, correctionRes] = await Promise.all([
-    supabase.rpc('get_pick_sales_order_summary_with_corrections', { p_sales_order: so }),
-    supabase.rpc('get_saved_pick_corrections', { p_sales_order: so })
+    supabase.rpc('get_pick_sales_order_continuation_summary_v1', { p_sales_order: so }),
+    supabase.rpc('get_saved_pick_corrections_continuation_v1', { p_sales_order: so })
   ]);
 
   if (summaryRes.error || correctionRes.error) {
@@ -3962,6 +3966,8 @@ function savedPickLineStatus(row) {
   if (Number(row.requested_correction_qty || 0) > 0) return '<span class="pill override">CORRECTION REQUESTED</span>';
   if (Number(row.pending_return_qty || 0) > 0) return '<span class="pill near">RETURN PENDING</span>';
   if (Number(row.completed_correction_qty || 0) > 0) return '<span class="pill active">CORRECTED</span>';
+  if (row.line_status === 'PREVIOUS_PICK') return '<span class="pill">PREVIOUS PICK</span>';
+  if (row.line_status === 'CURRENT_PICK') return '<span class="pill active">CURRENT PICK</span>';
   return '<span class="pill">SAVED</span>';
 }
 
@@ -4077,7 +4083,7 @@ function renderPickSalesOrderSummary() {
 
   const saved = (state.pickOrderSummary || []).map((row) => ({
     ...row,
-    line_status:'SAVED',
+    line_status: row.pick_cycle_status === 'PREVIOUS' ? 'PREVIOUS_PICK' : 'CURRENT_PICK',
     summary_qty:Number(row.net_picked_qty ?? row.picked_qty)
   }));
 
@@ -4102,10 +4108,15 @@ function renderPickSalesOrderSummary() {
   const correctionHtml = renderSavedPickCorrections();
 
   if (!rows.length) {
-    container.innerHTML = emptyState(`No retained current-cycle pick lines are available for sales order ${so}.`) + correctionHtml;
+    container.innerHTML = emptyState(`No retained pick lines are available for sales order ${so}.`) + correctionHtml;
     return;
   }
 
+  const previousSaved = saved.filter((r) => r.line_status === 'PREVIOUS_PICK');
+  const currentSaved = saved.filter((r) => r.line_status === 'CURRENT_PICK');
+  const previousTotals = sumByUom(previousSaved,'summary_qty');
+  const currentTotals = sumByUom(currentSaved,'summary_qty');
+  const queuedTotals = sumByUom(queued,'summary_qty');
   const totals = sumByUom(rows,'summary_qty');
   const racks = new Set(rows.map((r) => r.location_code).filter(Boolean));
   const openIssues = Math.max(Number(state.pickRequestedCorrectionCount || 0),0) + Math.max(Number(state.pickPendingReturnCount || 0),0);
@@ -4114,8 +4125,12 @@ function renderPickSalesOrderSummary() {
     : '';
 
   container.innerHTML = `<div class="info-box">
-      <strong>${escapeHtml(so)} net progress:</strong> ${formatBalances(totals)} · ${racks.size.toLocaleString()} rack${racks.size===1?'':'s'} represented${issueText}.
-      SAVED lines remain immutable. A reported mistake does not reduce the net until the approved stock is actually restored.
+      <strong>${escapeHtml(so)} continuation summary:</strong><br>
+      Previous completed picks — already deducted: <strong>${formatBalances(previousTotals)}</strong><br>
+      Current open cycle saved picks — newly deducted: <strong>${formatBalances(currentTotals)}</strong><br>
+      Current rack queued — not yet deducted: <strong>${formatBalances(queuedTotals)}</strong><br>
+      Total SO net picked: <strong>${formatBalances(totals)}</strong> · ${racks.size.toLocaleString()} rack${racks.size===1?'':'s'} represented${issueText}.<br>
+      Previous PICK rows are read-only history and are never deducted again. SAVED lines remain immutable. A reported mistake does not reduce the net until the approved stock is actually restored.
     </div>
     <table><thead><tr><th>Status</th><th>Rack</th><th>Item</th><th>Container</th><th>Expiry</th><th>Picked / correction / net</th><th>Transaction / time</th><th>Action</th></tr></thead><tbody>${rows.map((r) => {
       const item = [r.brand,r.description,r.variant,r.size].filter(Boolean).join(' ') || r.sku_name || '—';
@@ -4555,7 +4570,11 @@ function syncPickOverrideControls() {
 
   const completed = state.pickOrder.status === 'COMPLETED';
   const adjustmentMode = isStockAdjustmentSalesOrder($('pick-so').value);
-  const available = state.mode === 'ACTIVE' && !adjustmentMode && completed && !state.pick.lockToken;
+  const available = state.mode === 'ACTIVE'
+    && !adjustmentMode
+    && completed
+    && state.pickOrder.reopenAllowedThisMonth !== false
+    && !state.pick.lockToken;
 
   panel.classList.toggle('hidden', !completed || adjustmentMode);
 
@@ -4570,6 +4589,9 @@ function syncPickOverrideControls() {
 
   reason.disabled = !available;
   requestButton.disabled = !available;
+  requestButton.title = completed && state.pickOrder.reopenAllowedThisMonth === false
+    ? 'Opening this sales order is only valid within the month of previous completion. Prepare another SO or do necessary warehouse adjustment as an alternative'
+    : '';
 }
 
 async function refreshPickSalesOrderStatus() {
@@ -4597,7 +4619,7 @@ async function refreshPickSalesOrderStatus() {
     return true;
   }
 
-  const { data, error } = await supabase.rpc('get_pick_sales_order_status', { p_sales_order: so });
+  const { data, error } = await supabase.rpc('get_pick_sales_order_status_continuation_v1', { p_sales_order: so });
 
   // Ignore an older lookup if the user has already entered another sales order.
   if (requestNo !== state.pickOrderLookupSequence || normalizePickSalesOrder($('pick-so').value) !== so) return false;
@@ -4621,16 +4643,28 @@ async function refreshPickSalesOrderStatus() {
       salesOrder: row.order_number,
       status: row.order_status,
       pickCount: Number(row.pick_transaction_count || 0),
+      totalPickCount: Number(row.total_pick_transaction_count || 0),
       openedBy: row.opened_by_username || null,
-      isCurrentOwner: Boolean(row.is_current_owner)
+      isCurrentOwner: Boolean(row.is_current_owner),
+      lastCompletedAt: row.last_completed_at || row.completed_at || null,
+      reopenPeriodStart: row.reopen_period_start || null,
+      reopenAllowedThisMonth: Boolean(row.reopen_allowed_this_month),
+      isReopenedCycle: Boolean(row.is_reopened_cycle)
     };
     if (row.order_status === 'COMPLETED') {
-      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was completed ${row.completed_at ? `on ${escapeHtml(fmtDateTime(row.completed_at))}` : ''}. It can be reopened only after a currently active Supervisor, Admin, or Owner approves with their normal WMS login password.`;
+      if (row.reopen_allowed_this_month === false) {
+        box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was previously completed ${row.last_completed_at || row.completed_at ? `on ${escapeHtml(fmtDateTime(row.last_completed_at || row.completed_at))}` : ''}. <strong>Opening this sales order is only valid within the month of previous completion. Prepare another SO or do necessary warehouse adjustment as an alternative</strong>`;
+      } else {
+        box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was completed ${row.last_completed_at || row.completed_at ? `on ${escapeHtml(fmtDateTime(row.last_completed_at || row.completed_at))}` : ''}. Reopening is valid only within its protected completion month and still requires a currently active Supervisor, Admin, or Owner to approve with their normal WMS login password.`;
+      }
     } else {
       const lockMessage = row.is_current_owner
         ? ' · Sales Order number is locked until you finish this Sales Order.'
         : '';
-      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> is OPEN by ${escapeHtml(row.opened_by_username || 'a user')} · ${Number(row.pick_transaction_count || 0).toLocaleString()} completed rack pick(s). Continue to another rack or finish the sales order.${lockMessage}`;
+      const continuationMessage = row.is_reopened_cycle
+        ? ` · Reopened continuation: ${Number(row.total_pick_transaction_count || 0).toLocaleString()} total historical/current rack pick(s) remain readable; only ${Number(row.pick_transaction_count || 0).toLocaleString()} pick(s) belong to this open cycle.`
+        : '';
+      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> is OPEN by ${escapeHtml(row.opened_by_username || 'a user')} · ${Number(row.pick_transaction_count || 0).toLocaleString()} completed rack pick(s) in the current cycle.${continuationMessage} Continue to another rack or finish the sales order.${lockMessage}`;
     }
   }
 
