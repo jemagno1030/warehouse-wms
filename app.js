@@ -621,6 +621,8 @@ function setupStaticEvents() {
     if (edit) openSupervisorEdit(edit.dataset.editTransaction);
     const revertPickLine = event.target.closest('[data-revert-pick-line]');
     if (revertPickLine) revertHistoryPickLine(revertPickLine.dataset.revertPickLine);
+    const inventoryBinTag = event.target.closest('[data-inventory-bintag]');
+    if (inventoryBinTag) printInventoryBinTag(inventoryBinTag.dataset.inventoryBintag);
     const inventoryEdit = event.target.closest('[data-inventory-edit]');
     if (inventoryEdit) openInventoryLotEdit(inventoryEdit.dataset.inventoryEdit);
     const inventoryRemarks = event.target.closest('[data-inventory-remarks]');
@@ -6154,12 +6156,343 @@ function printInventoryDetailedLots() {
   printInventorySection('lots');
 }
 
+function inventoryBinTagExpiry(value) {
+  if (!value || isNoExpiryDate(value)) return 'N/A';
+  const parts = String(value).slice(0, 10).split('-').map(Number);
+  if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return String(value);
+  const [year, month, day] = parts;
+  const monthName = new Intl.DateTimeFormat('en-US', { month: 'long', timeZone: 'UTC' })
+    .format(new Date(Date.UTC(year, month - 1, 1)));
+  return `${String(day).padStart(2, '0')}/${monthName}/${year}`;
+}
+
+function inventoryBinTagUomAbbrev(uom) {
+  return ({ CASE: 'CS', PACK: 'PK', PIECE: 'PC' })[String(uom || '').toUpperCase()] || String(uom || '').toUpperCase();
+}
+
+function inventoryBinTagQtyValue(qty, uom) {
+  const amount = Number(qty || 0);
+  if (!(amount > 0)) return '';
+  return `${fmtQty(amount)} ${inventoryBinTagUomAbbrev(uom)}`;
+}
+
+function inventoryBinTagItemFontPt(text) {
+  const length = String(text || '').trim().length;
+  if (length <= 28) return 31;
+  if (length <= 42) return 28;
+  if (length <= 60) return 24;
+  if (length <= 82) return 21;
+  if (length <= 110) return 18;
+  return 16;
+}
+
+function inventoryBinTagCodeFontPt(text) {
+  const length = String(text || '').trim().length;
+  if (length <= 18) return 20;
+  if (length <= 26) return 17;
+  return 14;
+}
+
+function inventoryBinTagRemarksFontPt(text) {
+  const length = String(text || '').trim().length;
+  if (length <= 100) return 12;
+  if (length <= 220) return 10.5;
+  if (length <= 400) return 9;
+  return 8;
+}
+
+function inventoryBinTagSkuText(row) {
+  return [row?.brand, row?.description, row?.variant, row?.size].filter(Boolean).join(' ') || row?.sku_name || '—';
+}
+
+function inventoryBinTagQtyGrid(label, value) {
+  return `<div class="bintag-qty-label">${escapeHtml(label)}</div>
+    <div class="bintag-qty-cells">
+      <div class="bintag-qty-cell bintag-qty-current">${escapeHtml(value || '')}</div>
+      ${'<div class="bintag-qty-cell"></div>'.repeat(5)}
+    </div>`;
+}
+
+function inventoryBinTagLocationBoxes(locationCode) {
+  return `<div class="bintag-location-cells">
+    <div class="bintag-location-cell bintag-location-current">${escapeHtml(locationCode || '')}</div>
+    ${'<div class="bintag-location-cell"></div>'.repeat(4)}
+  </div>`;
+}
+
+async function inventoryBinTagData(row) {
+  const normal = {
+    isShipper: false,
+    locationCode: row.location_code || '',
+    containerNo: row.container_no || '',
+    itemName: inventoryBinTagSkuText(row),
+    pieceBarcode: row.piece_barcode || 'N/A',
+    packBarcode: row.pack_barcode || 'N/A',
+    caseBarcode: row.case_barcode || 'N/A',
+    expiryDate: row.expiry_date || null,
+    remarks: row.putaway_remarks || '',
+    quantities: { CASE: '', PACK: '', PIECE: '' },
+    shipperBoxNo: '',
+    shipperStatus: '',
+    childRows: []
+  };
+
+  const uom = String(row.uom || '').toUpperCase();
+  if (Object.prototype.hasOwnProperty.call(normal.quantities, uom)) {
+    normal.quantities[uom] = inventoryBinTagQtyValue(row.qty, uom);
+  }
+
+  if (!row.shipper_box_id) return normal;
+
+  const sameBoxRows = (state.data.inventory || []).filter((candidate) =>
+    String(candidate.shipper_box_id || '') === String(row.shipper_box_id || '') && Number(candidate.qty || 0) > 0
+  );
+  const headerRow = sameBoxRows.find((candidate) => String(candidate.shipper_lot_role || '').toUpperCase() === 'HEADER') || null;
+  const contentRows = sameBoxRows
+    .filter((candidate) => String(candidate.shipper_lot_role || '').toUpperCase() === 'CONTENT')
+    .sort((a, b) => {
+      const skuCompare = inventoryBinTagSkuText(a).localeCompare(inventoryBinTagSkuText(b), undefined, { numeric: true, sensitivity: 'base' });
+      if (skuCompare) return skuCompare;
+      const expiryCompare = String(a.expiry_date || '').localeCompare(String(b.expiry_date || ''));
+      if (expiryCompare) return expiryCompare;
+      return String(a.uom || '').localeCompare(String(b.uom || ''));
+    });
+
+  const { data: box, error: boxError } = await supabase
+    .from('shipper_boxes')
+    .select('id,box_no,status,shipper_sku_id,container_no')
+    .eq('id', row.shipper_box_id)
+    .single();
+  if (boxError) throw boxError;
+
+  const { data: shipperSku, error: skuError } = await supabase
+    .from('skus')
+    .select('id,brand,description,variant,size,case_barcode,pack_barcode,piece_barcode')
+    .eq('id', box.shipper_sku_id)
+    .single();
+  if (skuError) throw skuError;
+
+  const contentBalances = sumByUom(contentRows);
+  let expiryDate = headerRow?.expiry_date || null;
+  if (!expiryDate && contentRows.length) {
+    expiryDate = contentRows
+      .map((child) => child.expiry_date)
+      .filter(Boolean)
+      .sort()[0] || null;
+  }
+
+  const shipperRemarks = row.putaway_remarks
+    || headerRow?.putaway_remarks
+    || contentRows.find((child) => String(child.putaway_remarks || '').trim())?.putaway_remarks
+    || '';
+
+  return {
+    isShipper: true,
+    locationCode: row.location_code || headerRow?.location_code || contentRows[0]?.location_code || '',
+    containerNo: box.container_no || row.container_no || '',
+    itemName: inventoryBinTagSkuText(shipperSku),
+    pieceBarcode: shipperSku.piece_barcode || 'N/A',
+    packBarcode: shipperSku.pack_barcode || 'N/A',
+    caseBarcode: shipperSku.case_barcode || headerRow?.case_barcode || 'N/A',
+    expiryDate,
+    remarks: shipperRemarks,
+    quantities: {
+      CASE: headerRow ? inventoryBinTagQtyValue(headerRow.qty, 'CASE') : '',
+      PACK: contentBalances.PACK > 0 ? inventoryBinTagQtyValue(contentBalances.PACK, 'PACK') : '',
+      PIECE: contentBalances.PIECE > 0 ? inventoryBinTagQtyValue(contentBalances.PIECE, 'PIECE') : ''
+    },
+    shipperBoxNo: box.box_no || row.shipper_box_no || '',
+    shipperStatus: box.status || row.shipper_status || '',
+    childRows: contentRows.map((child) => ({
+      sku: inventoryBinTagSkuText(child),
+      expiry: inventoryBinTagExpiry(child.expiry_date),
+      qty: inventoryBinTagQtyValue(child.qty, child.uom),
+      packBarcode: child.pack_barcode || 'N/A'
+    }))
+  };
+}
+
+function installInventoryBinTagPrintStyle() {
+  const existing = $('inventory-bintag-print-style');
+  if (existing) existing.remove();
+
+  const style = document.createElement('style');
+  style.id = 'inventory-bintag-print-style';
+  style.textContent = `
+    @page { size: 8.5in 11in; margin: 0.24in; }
+    @media print {
+      body > *:not(#print-area) { display: none !important; }
+      #print-area { display: block !important; }
+      html, body { background: #fff !important; }
+    }
+    .inventory-bintag-print {
+      box-sizing: border-box;
+      width: 100%;
+      max-width: 8.02in;
+      min-height: 0;
+      margin: 0 auto;
+      padding: 1mm 1.5mm 0;
+      background: #fff;
+      color: #000;
+      font-family: Arial, Helvetica, sans-serif;
+      line-height: 1.12;
+    }
+    .inventory-bintag-print * { box-sizing: border-box; color: #000; }
+    .bintag-top {
+      display: grid;
+      grid-template-columns: 30mm 50mm 28mm 1fr;
+      align-items: center;
+      gap: 2mm;
+      margin-bottom: 4mm;
+    }
+    .bintag-label { font-size: 11pt; font-weight: 800; text-transform: uppercase; }
+    .bintag-write-box { height: 13mm; border: 1.2pt solid #000; }
+    .bintag-location-cells { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); height: 13mm; }
+    .bintag-location-cell { border: 1.2pt solid #000; border-left-width: 0; display:flex; align-items:center; justify-content:center; font-size: 18pt; font-weight: 800; }
+    .bintag-location-cell:first-child { border-left-width: 1.2pt; }
+    .bintag-row { display:grid; grid-template-columns: 34mm 1fr; gap: 2mm; align-items:start; margin-bottom: 2mm; }
+    .bintag-shipment { font-size: 28pt; font-weight: 900; letter-spacing: .2mm; min-height: 13mm; display:flex; align-items:center; }
+    .bintag-item-wrap { min-height: 31mm; display:flex; align-items:center; padding: 1mm 0; }
+    .bintag-item-value { font-weight: 900; line-height: 1.03; overflow-wrap:anywhere; }
+    .bintag-code { min-height: 9mm; display:flex; align-items:center; font-weight: 800; overflow-wrap:anywhere; word-break:break-word; }
+    .bintag-qty-grid { display:grid; grid-template-columns: 34mm 1fr; gap: 0 2mm; margin-top: 2mm; margin-bottom: 3mm; }
+    .bintag-qty-label { min-height: 12mm; display:flex; align-items:center; font-size: 12pt; font-weight:800; }
+    .bintag-qty-cells { display:grid; grid-template-columns: 1.45fr repeat(5, 1fr); min-height: 12mm; }
+    .bintag-qty-cell { border: 1.1pt solid #000; border-left-width: 0; display:flex; align-items:center; justify-content:center; font-size: 14pt; font-weight:800; }
+    .bintag-qty-cell:first-child { border-left-width: 1.1pt; }
+    .bintag-expiry-value { font-size: 20pt; font-weight: 900; min-height: 10mm; display:flex; align-items:center; }
+    .bintag-remarks { border: 1.2pt solid #000; min-height: 28mm; padding: 2mm 3mm; margin: 1mm 0 3mm; }
+    .bintag-remarks-title { font-size: 11pt; font-weight:900; margin-bottom: 1mm; }
+    .bintag-remarks-text { white-space: pre-wrap; overflow-wrap:anywhere; line-height: 1.22; }
+    .bintag-sign-row { display:grid; grid-template-columns: 34mm 1fr; gap: 2mm; align-items:end; margin: 2mm 0; }
+    .bintag-line { border-bottom: 1pt solid #000; min-height: 7mm; }
+    .bintag-signatures { display:grid; grid-template-columns: 30mm 1fr 30mm 1fr; gap: 2mm; align-items:end; margin-top: 3mm; }
+    .bintag-shipper { border: 1.2pt solid #000; margin-top: 4mm; page-break-inside: auto; }
+    .bintag-shipper-heading { display:flex; justify-content:space-between; gap:3mm; align-items:center; padding: 2mm 3mm; border-bottom: 1pt solid #000; }
+    .bintag-shipper-title { font-size: 13pt; font-weight:900; }
+    .bintag-shipper-meta { font-size: 10pt; font-weight:700; text-align:right; }
+    .bintag-child-table { width:100%; border-collapse:collapse; table-layout:fixed; }
+    .bintag-child-table th, .bintag-child-table td { border: .8pt solid #000; padding: 1.3mm 1.5mm; vertical-align:top; overflow-wrap:anywhere; }
+    .bintag-child-table th { font-weight:900; text-align:center; background:#eee; }
+    .bintag-child-table th:nth-child(1) { width: 51%; }
+    .bintag-child-table th:nth-child(2) { width: 25%; }
+    .bintag-child-table th:nth-child(3) { width: 24%; }
+    .bintag-child-table thead { display: table-header-group; }
+    .bintag-child-table tr { page-break-inside: avoid; }
+    .bintag-child-empty { padding: 3mm !important; text-align:center; }
+    .bintag-shipper-note { font-size: 7.5pt; padding: 1.5mm 2mm; border-top: .8pt solid #000; }
+  `;
+  document.head.appendChild(style);
+  return style;
+}
+
+async function printInventoryBinTag(lotId) {
+  const row = state.data.inventory.find((candidate) => String(candidate.lot_id) === String(lotId));
+  if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
+
+  let data;
+  try {
+    data = await inventoryBinTagData(row);
+  } catch (error) {
+    return toast(`Bin Tag data could not be loaded: ${friendlyError(error)}`, 'error');
+  }
+
+  const itemFont = inventoryBinTagItemFontPt(data.itemName);
+  const pieceFont = inventoryBinTagCodeFontPt(data.pieceBarcode);
+  const packFont = inventoryBinTagCodeFontPt(data.packBarcode);
+  const caseFont = inventoryBinTagCodeFontPt(data.caseBarcode);
+  const remarksFont = inventoryBinTagRemarksFontPt(data.remarks);
+  const childFont = data.childRows.length > 16 ? 6.5 : data.childRows.length > 11 ? 7.5 : data.childRows.length > 7 ? 8 : 9;
+
+  const printArea = document.createElement('section');
+  printArea.id = 'print-area';
+  printArea.className = 'inventory-bintag-print';
+
+  const shipperSection = data.isShipper ? `
+    <section class="bintag-shipper">
+      <div class="bintag-shipper-heading">
+        <div class="bintag-shipper-title">SHIPPER DETAILS</div>
+        <div class="bintag-shipper-meta">SB #: <strong>${escapeHtml(data.shipperBoxNo || '—')}</strong>${data.shipperStatus ? ` · ${escapeHtml(data.shipperStatus)}` : ''}</div>
+      </div>
+      <table class="bintag-child-table" style="font-size:${childFont}pt">
+        <thead><tr><th>CHILD PACK SKU</th><th>EXPIRY</th><th>QTY</th></tr></thead>
+        <tbody>${data.childRows.length ? data.childRows.map((child) => `<tr>
+          <td>${escapeHtml(child.sku || '—')}</td>
+          <td>${escapeHtml(child.expiry || 'N/A')}</td>
+          <td><strong>${escapeHtml(child.qty || '—')}</strong></td>
+        </tr>`).join('') : '<tr><td colspan="3" class="bintag-child-empty">No positive child-pack inventory is currently recorded inside this Shipper Box.</td></tr>'}</tbody>
+      </table>
+      <div class="bintag-shipper-note">For Shipper lots, ITEM reflects the Shipper header SKU. Child lines show the current positive contents of this exact physical SB.</div>
+    </section>` : '';
+
+  printArea.innerHTML = `
+    <div class="bintag-top">
+      <div class="bintag-label">DATE ARRIVED:</div>
+      <div class="bintag-write-box"></div>
+      <div class="bintag-label">LOCATION:</div>
+      ${inventoryBinTagLocationBoxes(data.locationCode)}
+    </div>
+
+    <div class="bintag-row">
+      <div class="bintag-label">SHIPMENT #:</div>
+      <div class="bintag-shipment">${escapeHtml(data.containerNo || '')}</div>
+    </div>
+
+    ${data.isShipper ? `<div class="bintag-row"><div class="bintag-label">SB #:</div><div class="bintag-code" style="font-size:18pt">${escapeHtml(data.shipperBoxNo || '')}</div></div>` : ''}
+
+    <div class="bintag-row">
+      <div class="bintag-label">ITEM:</div>
+      <div class="bintag-item-wrap"><div class="bintag-item-value" style="font-size:${itemFont}pt">${escapeHtml(data.itemName || '')}</div></div>
+    </div>
+
+    <div class="bintag-row"><div class="bintag-label">PIECE CODE:</div><div class="bintag-code" style="font-size:${pieceFont}pt">${escapeHtml(data.pieceBarcode || 'N/A')}</div></div>
+    <div class="bintag-row"><div class="bintag-label">PACK CODE:</div><div class="bintag-code" style="font-size:${packFont}pt">${escapeHtml(data.packBarcode || 'N/A')}</div></div>
+    <div class="bintag-row"><div class="bintag-label">CASE CODE:</div><div class="bintag-code" style="font-size:${caseFont}pt">${escapeHtml(data.caseBarcode || 'N/A')}</div></div>
+
+    <div class="bintag-qty-grid">
+      ${inventoryBinTagQtyGrid('CASE QTY:', data.quantities.CASE)}
+      ${inventoryBinTagQtyGrid('PK QTY:', data.quantities.PACK)}
+      ${inventoryBinTagQtyGrid('PC QTY:', data.quantities.PIECE)}
+    </div>
+
+    <div class="bintag-row">
+      <div class="bintag-label">EXPIRY:</div>
+      <div class="bintag-expiry-value">${escapeHtml(inventoryBinTagExpiry(data.expiryDate))}</div>
+    </div>
+
+    <div class="bintag-remarks">
+      <div class="bintag-remarks-title">REMARKS:</div>
+      <div class="bintag-remarks-text" style="font-size:${remarksFont}pt">${escapeHtml(data.remarks || '')}</div>
+    </div>
+
+    <div class="bintag-sign-row"><div class="bintag-label">BUYER:</div><div class="bintag-line"></div></div>
+    <div class="bintag-signatures">
+      <div class="bintag-label">CHECKED BY:</div><div class="bintag-line"></div>
+      <div class="bintag-label">ENCODED BY:</div><div class="bintag-line"></div>
+    </div>
+
+    ${shipperSection}
+  `;
+
+  const style = installInventoryBinTagPrintStyle();
+  document.body.appendChild(printArea);
+
+  try {
+    window.print();
+  } finally {
+    setTimeout(() => {
+      printArea.remove();
+      style.remove();
+    }, 1500);
+  }
+}
+
 function renderInventory() {
   const rows = filteredInventoryRows();
   const summaryRows = buildInventorySummaryRows(rows);
   $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Held lots</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${r.heldLots ? `<span class="pill expired">${r.heldLots} ON HOLD</span>` : '—'}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
   const actionHeader = isSupervisor() ? '<th>Actions</th>' : '';
-  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => {
+  $('inventory-table').innerHTML = rows.length ? `<table><thead><tr><th>Location</th><th>SKU</th><th>Shipper box</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th><th>Bin Tag</th>${actionHeader}</tr></thead><tbody>${rows.map((r) => {
     const expiry = isNoExpiryDate(r.expiry_date) ? '<span class="pill">N/A</span>' : expiryPill(r.expiry_status);
     const hold = inventoryHoldStatus(r);
     const locationDisplay = r.is_pending
@@ -6168,7 +6501,7 @@ function renderInventory() {
     const putawayEdited = r.putaway_remarks_overridden ? '<br><small>Current remark edited · original History preserved</small>' : '';
     const transferEdited = r.transfer_remarks_overridden ? '<br><small>Current remark edited · original History preserved</small>' : '';
     return `<tr>
-      <td>${locationDisplay}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${expiry}${hold ? `<br>${hold}` : ''}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}${putawayEdited}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}${transferEdited}</td>
+      <td>${locationDisplay}</td><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${shipperBadge(r)}</td><td>${escapeHtml(r.container_no)}</td><td>${fmtDate(r.expiry_date)}</td><td class="wrap">${expiry}${hold ? `<br>${hold}` : ''}</td><td>${fmtQtyUom(r.qty, r.uom)}</td><td class="wrap">${escapeHtml(r.putaway_remarks || '—')}${putawayEdited}</td><td class="wrap">${escapeHtml(r.transfer_remarks || '—')}${transferEdited}</td><td><button class="link-btn" type="button" data-inventory-bintag="${escapeHtml(r.lot_id)}">Print Bin Tag</button></td>
       ${inventoryLotActions(r)}
     </tr>`;
   }).join('')}</tbody></table>` : emptyState('No matching inventory.');
