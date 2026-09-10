@@ -623,6 +623,12 @@ function setupStaticEvents() {
     if (revertPickLine) revertHistoryPickLine(revertPickLine.dataset.revertPickLine);
     const inventoryBinTag = event.target.closest('[data-inventory-bintag]');
     if (inventoryBinTag) printInventoryBinTag(inventoryBinTag.dataset.inventoryBintag);
+    const inventoryDetailedShipperOpen = event.target.closest('[data-inventory-detailed-shipper-open]');
+    if (inventoryDetailedShipperOpen) openInventoryDetailedShipperView();
+    const inventoryDetailedShipperBack = event.target.closest('[data-inventory-detailed-shipper-back]');
+    if (inventoryDetailedShipperBack) closeInventoryDetailedShipperView();
+    const inventoryDetailedShipperPrint = event.target.closest('[data-inventory-detailed-shipper-print]');
+    if (inventoryDetailedShipperPrint) printInventoryDetailedShipperView();
     const inventoryEdit = event.target.closest('[data-inventory-edit]');
     if (inventoryEdit) openInventoryLotEdit(inventoryEdit.dataset.inventoryEdit);
     const inventoryRemarks = event.target.closest('[data-inventory-remarks]');
@@ -6487,7 +6493,270 @@ async function printInventoryBinTag(lotId) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Inventory -> Detailed Lots -> Detailed Shipper View V1
+// Read-only alternate presentation. Mirrors the proven Physical Count Detailed
+// Shipper View rule: each exact physical SB stays together, HEADER first and
+// CONTENT rows immediately after it. Standard Detailed Lots remains unchanged.
+// ---------------------------------------------------------------------------
+function inventoryDetailedShipperGroupKey(row) {
+  if (!(row?.shipper_box_id || row?.shipper_box_no)) return '';
+  return String(row.shipper_box_id || row.shipper_box_no || '').trim();
+}
+
+function ensureInventoryDetailedShipperViewUi() {
+  if ($('inventory-detailed-shipper-panel')) return;
+
+  const standardTable = $('inventory-table');
+  const printButton = $('inventory-lots-print-btn');
+  if (!standardTable || !printButton) return;
+
+  const actions = printButton.parentElement;
+  if (actions && !$('inventory-detailed-shipper-btn')) {
+    const openButton = document.createElement('button');
+    openButton.id = 'inventory-detailed-shipper-btn';
+    openButton.type = 'button';
+    openButton.className = 'secondary';
+    openButton.dataset.inventoryDetailedShipperOpen = 'true';
+    openButton.textContent = 'Detailed Shipper View';
+    actions.insertBefore(openButton, actions.firstChild);
+  }
+
+  const panel = document.createElement('section');
+  panel.id = 'inventory-detailed-shipper-panel';
+  panel.className = 'hidden';
+  panel.innerHTML = `
+    <div class="card-head compact inventory-report-head" style="margin-top:14px">
+      <div>
+        <h4>Detailed lots — Detailed Shipper View</h4>
+        <p>Current filtered Inventory with each exact physical Shipper Box kept together as one block.</p>
+      </div>
+      <div class="inventory-section-actions">
+        <button type="button" class="ghost" data-inventory-detailed-shipper-back="true">Back to Standard View</button>
+        <button type="button" class="secondary" data-inventory-detailed-shipper-print="true">Print / Save PDF</button>
+      </div>
+    </div>
+    <div class="info-box">
+      <strong>Read-only alternate presentation.</strong>
+      Regular lots remain normal Detailed-Lot rows. Shipper-linked lots are grouped by exact <strong>SB number</strong>:
+      <strong>SHIPPER</strong> HEADER first when a positive HEADER lot exists, followed immediately by its current positive
+      <strong>CONTENT</strong> rows. If an OPEN Shipper has no positive HEADER lot, no artificial CASE balance is created.
+      Search 1, Filter 2, and both Exact rack toggles are reused. If any row in one SB matches the current text filters,
+      the whole matching SB block is shown so its parent/content relationship remains visible.
+    </div>
+    <p id="inventory-detailed-shipper-count" class="small-note">Open Detailed Shipper View to build the grouped Inventory presentation.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Location</th><th>Type</th><th>Shipper box</th><th>SKU</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away remarks</th><th>Stock transfer remarks</th><th>Bin Tag</th><th class="inventory-detailed-shipper-actions-head">Actions</th>
+        </tr></thead>
+        <tbody id="inventory-detailed-shipper-table-body"><tr><td colspan="12"><div class="empty-state">Open Detailed Shipper View to build the grouped Inventory presentation.</div></td></tr></tbody>
+      </table>
+    </div>`;
+
+  standardTable.insertAdjacentElement('afterend', panel);
+}
+
+function buildInventoryDetailedShipperRows() {
+  const matchedRows = filteredInventoryRows();
+  const inventory = (state.data.inventory || []).filter((row) => Number(row.qty || 0) > 0);
+  const orderIndex = new Map(inventory.map((row, index) => [String(row.lot_id || `${index}`), index]));
+  const matchedShipperKeys = new Set(
+    matchedRows.map(inventoryDetailedShipperGroupKey).filter(Boolean)
+  );
+
+  const units = [];
+
+  matchedRows
+    .filter((row) => !inventoryDetailedShipperGroupKey(row))
+    .forEach((row) => {
+      const index = orderIndex.get(String(row.lot_id || '')) ?? Number.MAX_SAFE_INTEGER;
+      units.push({
+        index,
+        rows: [{ ...row, inventory_detailed_type: 'REGULAR', inventory_detailed_group_start: false }]
+      });
+    });
+
+  const groups = new Map();
+  inventory.forEach((row) => {
+    const key = inventoryDetailedShipperGroupKey(row);
+    if (!key || !matchedShipperKeys.has(key)) return;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  });
+
+  groups.forEach((groupRows) => {
+    groupRows.sort((a, b) => {
+      const roleA = String(a.shipper_lot_role || '').toUpperCase() === 'HEADER' ? 0 : 1;
+      const roleB = String(b.shipper_lot_role || '').toUpperCase() === 'HEADER' ? 0 : 1;
+      if (roleA !== roleB) return roleA - roleB;
+
+      const skuResult = String(a.sku_name || '').localeCompare(String(b.sku_name || ''), undefined, {
+        numeric: true,
+        sensitivity: 'base'
+      });
+      if (skuResult) return skuResult;
+
+      const expiryResult = String(a.expiry_date || '').localeCompare(String(b.expiry_date || ''));
+      if (expiryResult) return expiryResult;
+      return String(a.uom || '').localeCompare(String(b.uom || ''));
+    });
+
+    const index = Math.min(...groupRows.map((row) => orderIndex.get(String(row.lot_id || '')) ?? Number.MAX_SAFE_INTEGER));
+    units.push({
+      index,
+      rows: groupRows.map((row, rowIndex) => ({
+        ...row,
+        inventory_detailed_type: String(row.shipper_lot_role || '').toUpperCase() === 'HEADER' ? 'SHIPPER' : 'CONTENT',
+        inventory_detailed_group_start: rowIndex === 0
+      }))
+    });
+  });
+
+  units.sort((a, b) => a.index - b.index);
+  return units.flatMap((unit) => unit.rows);
+}
+
+function inventoryDetailedShipperSkuDisplay(row) {
+  return [row.brand, row.description, row.variant, row.size].filter(Boolean).join(' ') || row.sku_name || '—';
+}
+
+function inventoryDetailedShipperRowHtml(row, includeActions = true) {
+  const type = row.inventory_detailed_type || 'REGULAR';
+  const isHeader = type === 'SHIPPER';
+  const isContent = type === 'CONTENT';
+  const locationDisplay = row.is_pending
+    ? `<strong>${escapeHtml(row.location_code || 'PENDING')}</strong><br><span class="pill near">PENDING</span>`
+    : `<strong>${escapeHtml(row.location_code || '—')}</strong>`;
+  const shipper = row.shipper_box_no
+    ? `<strong>${escapeHtml(row.shipper_box_no)}</strong>${row.shipper_status ? `<br><small>${escapeHtml(row.shipper_status)}</small>` : ''}`
+    : '—';
+  const sku = `${isContent ? '<span aria-hidden="true">↳</span> ' : ''}${escapeHtml(inventoryDetailedShipperSkuDisplay(row))}`;
+  const status = escapeHtml(inventoryDetailedStatusText(row));
+  const putawayEdited = row.putaway_remarks_overridden ? '<br><small>Current remark edited · original History preserved</small>' : '';
+  const transferEdited = row.transfer_remarks_overridden ? '<br><small>Current remark edited · original History preserved</small>' : '';
+  const rowStyle = row.inventory_detailed_group_start
+    ? 'border-top:2px solid #6b7280;'
+    : '';
+  const skuStyle = isContent ? 'padding-left:16px;' : '';
+  const headerStyle = isHeader ? 'font-weight:700;background:#f3f4f6;' : '';
+  const actions = includeActions && isSupervisor() ? inventoryLotActions(row) : '';
+
+  return `<tr style="${rowStyle}${headerStyle}">
+    <td>${locationDisplay}</td>
+    <td><strong>${escapeHtml(type)}</strong></td>
+    <td>${shipper}</td>
+    <td class="wrap" style="${skuStyle}">${isHeader ? `<strong>${sku}</strong>` : sku}</td>
+    <td>${escapeHtml(row.container_no || '—')}</td>
+    <td>${isNoExpiryDate(row.expiry_date) ? 'N/A' : fmtDate(row.expiry_date)}</td>
+    <td class="wrap">${status}</td>
+    <td>${escapeHtml(fmtQtyUom(row.qty, row.uom))}</td>
+    <td class="wrap">${escapeHtml(row.putaway_remarks || '—')}${putawayEdited}</td>
+    <td class="wrap">${escapeHtml(row.transfer_remarks || '—')}${transferEdited}</td>
+    <td><button class="link-btn" type="button" data-inventory-bintag="${escapeHtml(row.lot_id)}">Print Bin Tag</button></td>
+    ${actions}
+  </tr>`;
+}
+
+function renderInventoryDetailedShipperView() {
+  ensureInventoryDetailedShipperViewUi();
+  const body = $('inventory-detailed-shipper-table-body');
+  const count = $('inventory-detailed-shipper-count');
+  if (!body || !count) return;
+
+  const rows = buildInventoryDetailedShipperRows();
+  const shipperBoxes = new Set(rows.map((row) => row.shipper_box_no).filter(Boolean));
+  const regularLines = rows.filter((row) => row.inventory_detailed_type === 'REGULAR').length;
+  const header = $('inventory-detailed-shipper-panel')?.querySelector('.inventory-detailed-shipper-actions-head');
+  if (header) header.classList.toggle('hidden', !isSupervisor());
+
+  count.innerHTML = rows.length
+    ? `Showing <strong>${rows.length.toLocaleString()}</strong> current lot line(s) · <strong>${shipperBoxes.size.toLocaleString()}</strong> physical Shipper box group(s) · <strong>${regularLines.toLocaleString()}</strong> regular lot line(s) · Filters: <strong>${escapeHtml(inventoryFilterReportText())}</strong>.`
+    : 'No current positive Inventory matches the active filters.';
+
+  const colspan = isSupervisor() ? 12 : 11;
+  body.innerHTML = rows.length
+    ? rows.map((row) => inventoryDetailedShipperRowHtml(row, true)).join('')
+    : `<tr><td colspan="${colspan}">${emptyState('No matching Inventory.')}</td></tr>`;
+}
+
+function openInventoryDetailedShipperView() {
+  ensureInventoryDetailedShipperViewUi();
+  renderInventoryDetailedShipperView();
+  $('inventory-table')?.classList.add('hidden');
+  $('inventory-detailed-shipper-panel')?.classList.remove('hidden');
+  $('inventory-detailed-shipper-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closeInventoryDetailedShipperView() {
+  $('inventory-detailed-shipper-panel')?.classList.add('hidden');
+  $('inventory-table')?.classList.remove('hidden');
+  $('inventory-table')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function printInventoryDetailedShipperView() {
+  const rows = buildInventoryDetailedShipperRows();
+  if (!rows.length) return toast('There is no filtered Inventory data to print.', 'error');
+
+  const shipperBoxes = new Set(rows.map((row) => row.shipper_box_no).filter(Boolean));
+  const generatedAt = new Date().toLocaleString();
+  const printArea = document.createElement('section');
+  printArea.id = 'print-area';
+  printArea.className = 'inventory-section-print';
+
+  printArea.innerHTML = `
+    <div class="inventory-print-header">
+      <h1>IFTC WAREHOUSE LOCATOR SYSTEM (JPM)</h1>
+      <p class="inventory-print-subtitle">INVENTORY — DETAILED LOTS — DETAILED SHIPPER VIEW</p>
+      <div class="inventory-print-meta">
+        <div><strong>Generated:</strong> ${escapeHtml(generatedAt)}</div>
+        <div><strong>Report lines:</strong> ${rows.length.toLocaleString()}</div>
+        <div><strong>Physical Shipper boxes:</strong> ${shipperBoxes.size.toLocaleString()}</div>
+        <div><strong>Filters:</strong> ${escapeHtml(inventoryFilterReportText())}</div>
+        <div><strong>Rule:</strong> Each matching SB stays together: SHIPPER HEADER first when present, then CONTENT.</div>
+        <div><strong>Source:</strong> Current positive Inventory</div>
+      </div>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Location</th><th>Type</th><th>Shipper Box</th><th>SKU</th><th>Container</th><th>Expiry</th><th>Status</th><th>Quantity</th><th>Put-away Remarks</th><th>Transfer Remarks</th>
+      </tr></thead>
+      <tbody>${rows.map((row) => {
+        const type = row.inventory_detailed_type || 'REGULAR';
+        const isHeader = type === 'SHIPPER';
+        const isContent = type === 'CONTENT';
+        const shipper = row.shipper_box_no
+          ? `${escapeHtml(row.shipper_box_no)}${row.shipper_status ? `<br><small>${escapeHtml(row.shipper_status)}</small>` : ''}`
+          : '—';
+        const sku = `${isContent ? '↳ ' : ''}${escapeHtml(inventoryDetailedShipperSkuDisplay(row))}`;
+        const style = `${row.inventory_detailed_group_start ? 'border-top:1.5pt solid #000;' : ''}${isHeader ? 'font-weight:700;background:#eee;' : ''}`;
+        return `<tr style="${style}">
+          <td><strong>${escapeHtml(row.location_code || '—')}</strong></td>
+          <td><strong>${escapeHtml(type)}</strong></td>
+          <td>${shipper}</td>
+          <td>${isHeader ? `<strong>${sku}</strong>` : sku}</td>
+          <td>${escapeHtml(row.container_no || '—')}</td>
+          <td>${isNoExpiryDate(row.expiry_date) ? 'N/A' : fmtDate(row.expiry_date)}</td>
+          <td>${escapeHtml(inventoryDetailedStatusText(row))}</td>
+          <td>${escapeHtml(fmtQtyUom(row.qty, row.uom))}</td>
+          <td>${escapeHtml(row.putaway_remarks || '—')}</td>
+          <td>${escapeHtml(row.transfer_remarks || '—')}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>
+    <div class="inventory-print-footer"><strong>Read-only report.</strong> This grouped presentation does not modify Inventory or Shipper status. OPEN Shippers never receive an invented CASE balance.</div>`;
+
+  document.body.appendChild(printArea);
+  try {
+    window.print();
+  } finally {
+    setTimeout(() => printArea.remove(), 1000);
+  }
+}
+
 function renderInventory() {
+  ensureInventoryDetailedShipperViewUi();
   const rows = filteredInventoryRows();
   const summaryRows = buildInventorySummaryRows(rows);
   $('inventory-summary-table').innerHTML = summaryRows.length ? `<table><thead><tr><th>SKU</th><th>Balances</th><th>Containers</th><th>Locations</th><th>Held lots</th><th>Earliest expiry</th></tr></thead><tbody>${summaryRows.map((r) => `<tr><td class="wrap">${escapeHtml(r.sku_name)}</td><td>${formatBalances(r.balances)}</td><td>${r.containers.size}</td><td>${r.locations.size}</td><td>${r.heldLots ? `<span class="pill expired">${r.heldLots} ON HOLD</span>` : '—'}</td><td>${fmtDate(r.earliest)}</td></tr>`).join('')}</tbody></table>` : emptyState('No matching SKU summary.');
@@ -6505,6 +6774,10 @@ function renderInventory() {
       ${inventoryLotActions(r)}
     </tr>`;
   }).join('')}</tbody></table>` : emptyState('No matching inventory.');
+
+  if ($('inventory-detailed-shipper-panel') && !$('inventory-detailed-shipper-panel').classList.contains('hidden')) {
+    renderInventoryDetailedShipperView();
+  }
 }
 
 const INVENTORY_REMARK_BREAKDOWN_MAX_ROWS = 20;
