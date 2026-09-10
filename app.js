@@ -375,7 +375,69 @@ function isAdminOrOwner() {
   return ['admin', 'owner'].includes(state.profile?.role);
 }
 
+function configureCredentialAutofillGuards() {
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  const userSearch = $('users-search');
+  if (userSearch) {
+    // This is a WMS filter, not a login/identity field. Give it a unique identity
+    // so browser credential/form-history autofill does not inject the signed-in email.
+    userSearch.setAttribute('autocomplete', 'off');
+    userSearch.name = `wms-user-management-filter-${stamp}`;
+    userSearch.setAttribute('autocorrect', 'off');
+    userSearch.setAttribute('autocapitalize', 'off');
+    userSearch.setAttribute('spellcheck', 'false');
+    userSearch.setAttribute('aria-autocomplete', 'none');
+    userSearch.setAttribute('data-lpignore', 'true');
+    userSearch.setAttribute('data-1p-ignore', 'true');
+  }
+
+  const adminCode = $('admin-code');
+  if (adminCode) {
+    // Chrome/password managers can ignore autocomplete=off on password inputs.
+    // Use a non-login autocomplete purpose plus a unique name and explicit ignore hints.
+    adminCode.setAttribute('autocomplete', 'new-password');
+    adminCode.name = `wms-administrative-control-code-${stamp}`;
+    adminCode.setAttribute('aria-autocomplete', 'none');
+    adminCode.setAttribute('data-lpignore', 'true');
+    adminCode.setAttribute('data-1p-ignore', 'true');
+    adminCode.value = '';
+  }
+}
+
+function clearUserManagementSearchOnEntry() {
+  const input = $('users-search');
+  if (!input) return;
+  input.value = '';
+
+  // Some browsers apply credential autofill just after a hidden SPA screen becomes visible.
+  // Clear only while the field is not actively being edited by the user.
+  window.setTimeout(() => {
+    if (state.currentScreen !== 'users' || document.activeElement === input || !input.value) return;
+    input.value = '';
+    renderUsers();
+  }, 250);
+}
+
+function clearAdministrativeCodeField() {
+  const input = $('admin-code');
+  if (input) input.value = '';
+}
+
+function clearAdministrativeCodeOnEntry() {
+  const input = $('admin-code');
+  if (!input) return;
+  input.value = '';
+
+  // Defeat delayed password-manager refill after returning to System Control.
+  window.setTimeout(() => {
+    if (state.currentScreen !== 'control' || document.activeElement === input) return;
+    input.value = '';
+  }, 250);
+}
+
 function setupStaticEvents() {
+  configureCredentialAutofillGuards();
   qsa('[data-auth-tab]').forEach((btn) => btn.addEventListener('click', () => {
     qsa('[data-auth-tab]').forEach((b) => b.classList.toggle('active', b === btn));
     $('login-form').classList.toggle('hidden', btn.dataset.authTab !== 'login');
@@ -962,6 +1024,9 @@ function canOpenScreen(name) {
 }
 
 function showScreen(name) {
+  // Never leave an administrative control code in the DOM after leaving the screen.
+  if (state.currentScreen === 'control' && name !== 'control') clearAdministrativeCodeField();
+
   if (!canOpenScreen(name)) {
     if (isViewer() && !VIEWER_SCREENS.has(name)) toast('Viewer access is read-only and limited to Dashboard, Inventory, Physical Count, Containers, Rack Map, Expiry Alerts, and SKU Balance Stock Card.', 'error');
     if ((name === 'locations' || name === 'skumaster' || name === 'nonfefo') && !isSupervisor() && !isViewer()) toast('Supervisor access is required.', 'error');
@@ -977,6 +1042,12 @@ function showScreen(name) {
   $('screen-title').textContent = title;
   $('screen-subtitle').textContent = subtitle;
   $('sidebar').classList.remove('open');
+
+  // User Management should always open unfiltered; System Control should always
+  // open with a blank control-code field, regardless of browser autofill behavior.
+  if (name === 'users') clearUserManagementSearchOnEntry();
+  if (name === 'control') clearAdministrativeCodeOnEntry();
+
   loadScreen(name);
 }
 
@@ -9625,7 +9696,7 @@ async function applyAdministrativeCode() {
   setBusy(button, true, 'Applying…');
   const { data, error } = await supabase.rpc('apply_administrative_code', { p_code: code });
   setBusy(button, false);
-  $('admin-code').value = '';
+  clearAdministrativeCodeField();
   if (error) return toast(friendlyError(error), 'error');
   const row = data?.[0];
   if (row?.new_mode === 'INVALID') return toast('Invalid administrative control code.', 'error');
