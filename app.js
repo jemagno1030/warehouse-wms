@@ -248,6 +248,7 @@ const state = {
   scanner: { reader: null, controls: null, target: null, kind: null },
   putaway: freshPutawayState(),
   shipperPutaway: freshShipperPutawayState(),
+  skuMasterCreate: freshSkuMasterCreateState(),
   pick: freshOperationState(),
   pickOrder: { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false },
   pickOrderLookupSequence: 0,
@@ -308,6 +309,23 @@ function freshShipperPutawayState() {
     contentLookupSequence: 0,
     duplicateContentSkuId: null,
     pendingBatchPayload: null
+  };
+}
+
+function freshSkuMasterCreateState() {
+  return {
+    type: 'STANDARD',
+    matchedParentSku: null,
+    parentLookupSequence: 0,
+    duplicateParentSkuId: null,
+    barcodeLessMode: null,
+    barcodeLessSkuId: null,
+    barcodeLessSkus: [],
+    barcodeLessLoaded: false,
+    contents: [],
+    contentSku: null,
+    contentLookupSequence: 0,
+    duplicateContentSkuId: null
   };
 }
 
@@ -437,6 +455,7 @@ function clearAdministrativeCodeOnEntry() {
 }
 
 function setupStaticEvents() {
+  installSkuMasterCreateUi();
   configureCredentialAutofillGuards();
   qsa('[data-auth-tab]').forEach((btn) => btn.addEventListener('click', () => {
     qsa('[data-auth-tab]').forEach((b) => b.classList.toggle('active', b === btn));
@@ -605,6 +624,26 @@ function setupStaticEvents() {
 
   $('sku-master-search').addEventListener('input', renderSkuMaster);
   $('sku-master-search').addEventListener('change', renderSkuMaster); // Scanner writes the barcode then dispatches change.
+  $('sku-master-create-btn').addEventListener('click', openSkuMasterCreateDialog);
+  $('sku-master-create-close').addEventListener('click', closeSkuMasterCreateDialog);
+  $('sku-master-create-form').addEventListener('submit', submitSkuMasterCreate);
+  $('smc-type').addEventListener('change', switchSkuMasterCreateType);
+  ['smc-case','smc-pack','smc-piece'].forEach((id) => $(id).addEventListener('change', resolveSkuMasterCreateParent));
+  ['smc-brand','smc-description','smc-variant','smc-size'].forEach((id) => $(id).addEventListener('input', () => {
+    clearTimeout(putawayDetailsTimer);
+    putawayDetailsTimer = setTimeout(checkSkuMasterCreateParentDuplicateDetails, 350);
+  }));
+  $('smc-barcode-less-search').addEventListener('input', renderSkuMasterCreateBarcodeLessOptions);
+  $('smc-barcode-less-select').addEventListener('change', selectSkuMasterCreateBarcodeLessSku);
+  $('smc-barcode-less-new-btn').addEventListener('click', startNewSkuMasterCreateBarcodeLessSku);
+  $('smc-content-pack').addEventListener('change', resolveSkuMasterCreateContentSku);
+  ['smc-content-brand','smc-content-description','smc-content-variant','smc-content-size'].forEach((id) => $(id).addEventListener('input', () => {
+    clearTimeout(putawayDetailsTimer);
+    putawayDetailsTimer = setTimeout(checkSkuMasterCreateContentDuplicateDetails, 350);
+  }));
+  $('smc-add-content-btn').addEventListener('click', addSkuMasterCreateContentLine);
+  $('smc-clear-content-btn').addEventListener('click', clearSkuMasterCreateContentLine);
+  $('sku-master-create-dialog').addEventListener('close', resetSkuMasterCreateDialog);
   $('sku-health-search').addEventListener('input', renderSkuHealth);
   $('sku-health-filter').addEventListener('change', renderSkuHealth);
   $('container-search').addEventListener('input', renderContainers);
@@ -705,6 +744,8 @@ function setupStaticEvents() {
     if (skuMasterEdit) openSkuMasterEdit(skuMasterEdit.dataset.skuMasterEdit);
     const skuMasterDelete = event.target.closest('[data-sku-master-delete]');
     if (skuMasterDelete) deleteSkuMaster(skuMasterDelete.dataset.skuMasterDelete);
+    const skuMasterCreateChildRemove = event.target.closest('[data-smc-remove-content]');
+    if (skuMasterCreateChildRemove) removeSkuMasterCreateContentLine(Number(skuMasterCreateChildRemove.dataset.smcRemoveContent));
     const skuHealthReview = event.target.closest('[data-sku-health-review]');
     if (skuHealthReview) reviewSkuHealthInMasterlist(skuHealthReview.dataset.skuHealthReview);
     const containerDelete = event.target.closest('[data-container-delete]');
@@ -2514,7 +2555,7 @@ async function checkShipperContentDuplicateDetails() {
     p_size: $('sp-content-size').value.trim()
   };
   if (Object.values(details).some((v) => !v)) { hideShipperContentDuplicateWarning(); return null; }
-  const { data, error } = await supabase.rpc('find_sku_by_details_type', { ...details, p_sku_type: 'STANDARD' });
+  const { data, error } = await supabase.rpc('find_sku_by_details', details);
   if (error) { toast(friendlyError(error), 'error'); return null; }
   const match = data?.[0];
   if (!match) {
@@ -8055,6 +8096,684 @@ function reviewSkuHealthInMasterlist(skuId) {
   }, 50);
 }
 
+function installSkuMasterCreateUi() {
+  if ($('sku-master-create-dialog')) return;
+
+  const screen = $('screen-skumaster');
+  const cardHead = screen?.querySelector('.card-head');
+  if (cardHead) {
+    const actions = document.createElement('div');
+    actions.className = 'button-cluster';
+    const existingExport = cardHead.querySelector('.export-btn');
+    const createButton = document.createElement('button');
+    createButton.id = 'sku-master-create-btn';
+    createButton.type = 'button';
+    createButton.className = 'primary hidden';
+    createButton.textContent = 'CREATE SKU';
+    actions.appendChild(createButton);
+    if (existingExport) actions.appendChild(existingExport);
+    cardHead.appendChild(actions);
+  }
+
+  const dialog = document.createElement('dialog');
+  dialog.id = 'sku-master-create-dialog';
+  dialog.className = 'edit-dialog';
+  dialog.innerHTML = `
+    <div class="scanner-head">
+      <div><h3>CREATE SKU</h3><p>Admin/Owner only. Creates SKU master data without putting stock into a rack.</p></div>
+      <button id="sku-master-create-close" class="icon-button" type="button">✕</button>
+    </div>
+    <form id="sku-master-create-form" class="stack">
+      <div class="info-box"><strong>Master-data only:</strong> this workflow does not create inventory, rack stock, warehouse transactions, containers, or physical Shipper Box IDs.</div>
+      <label>SKU type *
+        <select id="smc-type" required>
+          <option value="STANDARD">STANDARD SKU</option>
+          <option value="SHIPPER">SHIPPER SKU</option>
+        </select>
+      </label>
+
+      <div class="form-grid three" id="smc-parent-barcodes">
+        <label>CASE barcode *<div class="scan-field"><input id="smc-case" autocomplete="off" required /><button type="button" class="scan-btn" data-scan-target="smc-case" data-scan-kind="barcode">Scan</button><button type="button" class="na-btn" data-na-target="smc-case">N/A</button></div></label>
+        <label id="smc-pack-wrap">PACK barcode *<div class="scan-field"><input id="smc-pack" autocomplete="off" required /><button type="button" class="scan-btn" data-scan-target="smc-pack" data-scan-kind="barcode">Scan</button><button type="button" class="na-btn" data-na-target="smc-pack">N/A</button></div></label>
+        <label id="smc-piece-wrap">PIECE barcode *<div class="scan-field"><input id="smc-piece" autocomplete="off" required /><button type="button" class="scan-btn" data-scan-target="smc-piece" data-scan-kind="barcode">Scan</button><button type="button" class="na-btn" data-na-target="smc-piece">N/A</button></div></label>
+      </div>
+
+      <div id="smc-parent-match-note" class="info-box hidden"></div>
+
+      <div id="smc-barcode-less-panel" class="info-box hidden">
+        <strong>No CASE / PACK / PIECE barcode.</strong> Search the existing barcode-less STANDARD items first. If the product is genuinely new, explicitly choose Create new barcode-less SKU.
+        <div class="form-grid two" style="margin-top:8px">
+          <label>Search existing barcode-less SKU<input id="smc-barcode-less-search" autocomplete="off" placeholder="Brand, description, variant, size..." /></label>
+          <label>Existing barcode-less SKU<select id="smc-barcode-less-select"><option value="">Select a previously recorded barcode-less SKU</option></select></label>
+        </div>
+        <div class="button-cluster"><button id="smc-barcode-less-new-btn" class="secondary" type="button">Create new barcode-less SKU</button></div>
+        <div id="smc-barcode-less-selection-note" class="small-note"></div>
+      </div>
+
+      <div class="form-grid two">
+        <label>Brand *<input id="smc-brand" required /></label>
+        <label>Description *<input id="smc-description" required /></label>
+        <label>Variant *<input id="smc-variant" required /></label>
+        <label>Size *<input id="smc-size" required /></label>
+      </div>
+
+      <div id="smc-parent-duplicate-warning" class="warning hidden">
+        <strong>ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE.</strong>
+        <div id="smc-parent-duplicate-details" class="small-note"></div>
+        <label><input id="smc-parent-still-add" type="checkbox" /> Still Add to Database — this is genuinely a different barcode family.</label>
+      </div>
+
+      <div id="smc-shipper-content-section" class="hidden">
+        <hr />
+        <h4>Shipper child PACK SKU masters</h4>
+        <p class="small-note">Add the PACK SKUs that identify this Shipper's contents. Expiry and quantities are intentionally not captured here. No permanent Shipper composition is stored.</p>
+        <div class="form-grid two">
+          <label>PACK barcode *<div class="scan-field"><input id="smc-content-pack" autocomplete="off" /><button type="button" class="scan-btn" data-scan-target="smc-content-pack" data-scan-kind="barcode">Scan</button></div></label>
+          <div id="smc-content-match-note" class="info-box hidden"></div>
+          <label>Brand *<input id="smc-content-brand" /></label>
+          <label>Description *<input id="smc-content-description" /></label>
+          <label>Variant *<input id="smc-content-variant" /></label>
+          <label>Size *<input id="smc-content-size" /></label>
+        </div>
+        <div id="smc-content-duplicate-warning" class="warning hidden">
+          <strong>ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE.</strong>
+          <div id="smc-content-duplicate-details" class="small-note"></div>
+          <label><input id="smc-content-still-add" type="checkbox" /> Still Add to Database — this is genuinely a different PACK barcode family.</label>
+        </div>
+        <div class="button-cluster">
+          <button id="smc-add-content-btn" class="secondary" type="button">Add PACK to content</button>
+          <button id="smc-clear-content-btn" class="ghost" type="button">Clear PACK entry</button>
+        </div>
+        <div id="smc-content-table" class="table-wrap"></div>
+      </div>
+
+      <div class="button-cluster">
+        <button class="primary" type="submit">CREATE SKU</button>
+        <button class="ghost" type="button" id="smc-cancel-btn">Cancel</button>
+      </div>
+    </form>`;
+  document.body.appendChild(dialog);
+  $('smc-cancel-btn').addEventListener('click', closeSkuMasterCreateDialog);
+
+  // The dialog is injected before setupStaticEvents binds .scan-btn/.na-btn.
+  ['smc-case','smc-pack','smc-piece','smc-content-pack'].forEach((id) => {
+    const input = $(id);
+    input.setAttribute('autocomplete','off');
+    input.name = `wms-${id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    input.setAttribute('autocorrect','off');
+    input.setAttribute('autocapitalize','off');
+    input.setAttribute('spellcheck','false');
+    input.setAttribute('aria-autocomplete','none');
+  });
+}
+
+function setSkuMasterCreateParentReadonly(readonly) {
+  ['smc-brand','smc-description','smc-variant','smc-size'].forEach((id) => { $(id).readOnly = readonly; });
+}
+
+function setSkuMasterCreateContentReadonly(readonly) {
+  ['smc-content-brand','smc-content-description','smc-content-variant','smc-content-size'].forEach((id) => { $(id).readOnly = readonly; });
+}
+
+function hideSkuMasterCreateParentDuplicateWarning() {
+  state.skuMasterCreate.duplicateParentSkuId = null;
+  $('smc-parent-duplicate-warning').classList.add('hidden');
+  $('smc-parent-duplicate-details').textContent = '';
+  $('smc-parent-still-add').checked = false;
+  $('smc-parent-still-add').disabled = false;
+}
+
+function hideSkuMasterCreateContentDuplicateWarning() {
+  state.skuMasterCreate.duplicateContentSkuId = null;
+  $('smc-content-duplicate-warning').classList.add('hidden');
+  $('smc-content-duplicate-details').textContent = '';
+  $('smc-content-still-add').checked = false;
+}
+
+function skuMasterCreateParentBarcodeValues() {
+  return ['smc-case','smc-pack','smc-piece'].map((id) => normalizeBarcode($(id).value));
+}
+
+function isSkuMasterCreateAllNa() {
+  return state.skuMasterCreate.type === 'STANDARD' && skuMasterCreateParentBarcodeValues().every((code) => code === 'N/A');
+}
+
+function resetSkuMasterCreateDialog() {
+  if (!$('sku-master-create-form')) return;
+  state.skuMasterCreate = freshSkuMasterCreateState();
+  $('sku-master-create-form').reset();
+  $('smc-type').value = 'STANDARD';
+  $('smc-pack').readOnly = false;
+  $('smc-piece').readOnly = false;
+  $('smc-pack-wrap').classList.remove('hidden');
+  $('smc-piece-wrap').classList.remove('hidden');
+  $('smc-shipper-content-section').classList.add('hidden');
+  $('smc-parent-match-note').classList.add('hidden');
+  $('smc-parent-match-note').innerHTML = '';
+  $('smc-barcode-less-panel').classList.add('hidden');
+  $('smc-barcode-less-search').value = '';
+  $('smc-barcode-less-select').innerHTML = '<option value="">Select a previously recorded barcode-less SKU</option>';
+  $('smc-barcode-less-selection-note').textContent = '';
+  setSkuMasterCreateParentReadonly(false);
+  setSkuMasterCreateContentReadonly(false);
+  hideSkuMasterCreateParentDuplicateWarning();
+  clearSkuMasterCreateContentLine();
+  renderSkuMasterCreateContents();
+}
+
+function openSkuMasterCreateDialog() {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required to create SKU Masterlist records.', 'error');
+  resetSkuMasterCreateDialog();
+  $('sku-master-create-dialog').showModal();
+  $('smc-case').focus();
+}
+
+function closeSkuMasterCreateDialog() {
+  if ($('sku-master-create-dialog')?.open) $('sku-master-create-dialog').close();
+}
+
+function switchSkuMasterCreateType() {
+  state.skuMasterCreate = freshSkuMasterCreateState();
+  state.skuMasterCreate.type = $('smc-type').value === 'SHIPPER' ? 'SHIPPER' : 'STANDARD';
+  ['smc-case','smc-pack','smc-piece','smc-brand','smc-description','smc-variant','smc-size'].forEach((id) => { $(id).value = ''; });
+  $('smc-parent-match-note').classList.add('hidden');
+  $('smc-barcode-less-panel').classList.add('hidden');
+  setSkuMasterCreateParentReadonly(false);
+  hideSkuMasterCreateParentDuplicateWarning();
+  clearSkuMasterCreateContentLine();
+  renderSkuMasterCreateContents();
+
+  const shipper = state.skuMasterCreate.type === 'SHIPPER';
+  $('smc-shipper-content-section').classList.toggle('hidden', !shipper);
+  $('smc-pack-wrap').classList.toggle('hidden', shipper);
+  $('smc-piece-wrap').classList.toggle('hidden', shipper);
+  $('smc-pack').readOnly = shipper;
+  $('smc-piece').readOnly = shipper;
+  if (shipper) {
+    $('smc-pack').value = 'N/A';
+    $('smc-piece').value = 'N/A';
+  }
+  $('smc-case').focus();
+}
+
+async function loadSkuMasterCreateBarcodeLessSkus(force = false) {
+  if (!force && state.skuMasterCreate.barcodeLessLoaded) return renderSkuMasterCreateBarcodeLessOptions();
+  const { data, error } = await supabase.rpc('find_barcode_less_standard_skus', { p_search: null });
+  if (error) return toast(friendlyError(error), 'error');
+  state.skuMasterCreate.barcodeLessSkus = data || [];
+  state.skuMasterCreate.barcodeLessLoaded = true;
+  renderSkuMasterCreateBarcodeLessOptions();
+}
+
+function renderSkuMasterCreateBarcodeLessOptions() {
+  const term = barcodeLessSearchText($('smc-barcode-less-search').value);
+  const compact = barcodeLessCompactText(term);
+  const rows = state.skuMasterCreate.barcodeLessSkus.filter((sku) => {
+    if (!term) return true;
+    const label = barcodeLessSearchText([sku.brand,sku.description,sku.variant,sku.size].join(' '));
+    return label.includes(term) || (compact && barcodeLessCompactText(label).includes(compact));
+  });
+  const current = $('smc-barcode-less-select').value;
+  $('smc-barcode-less-select').innerHTML = '<option value="">Select a previously recorded barcode-less SKU</option>' + rows.map((sku) =>
+    `<option value="${escapeHtml(sku.id)}">${escapeHtml(barcodeLessSkuLabel(sku))}</option>`
+  ).join('');
+  if (rows.some((sku) => sku.id === current)) $('smc-barcode-less-select').value = current;
+}
+
+function selectSkuMasterCreateBarcodeLessSku() {
+  const id = $('smc-barcode-less-select').value;
+  const sku = state.skuMasterCreate.barcodeLessSkus.find((row) => row.id === id);
+  if (!sku) {
+    state.skuMasterCreate.barcodeLessMode = 'select';
+    state.skuMasterCreate.barcodeLessSkuId = null;
+    state.skuMasterCreate.matchedParentSku = null;
+    ['smc-brand','smc-description','smc-variant','smc-size'].forEach((field) => { $(field).value = ''; });
+    setSkuMasterCreateParentReadonly(true);
+    $('smc-barcode-less-selection-note').textContent = '';
+    return;
+  }
+  state.skuMasterCreate.barcodeLessMode = 'existing';
+  state.skuMasterCreate.barcodeLessSkuId = sku.id;
+  state.skuMasterCreate.matchedParentSku = sku;
+  $('smc-brand').value = sku.brand || '';
+  $('smc-description').value = sku.description || '';
+  $('smc-variant').value = sku.variant || '';
+  $('smc-size').value = sku.size || '';
+  setSkuMasterCreateParentReadonly(true);
+  hideSkuMasterCreateParentDuplicateWarning();
+  $('smc-barcode-less-selection-note').innerHTML = '<strong>Existing barcode-less SKU selected.</strong> CREATE SKU will reuse this record and will not create a duplicate.';
+}
+
+function startNewSkuMasterCreateBarcodeLessSku() {
+  state.skuMasterCreate.barcodeLessMode = 'new';
+  state.skuMasterCreate.barcodeLessSkuId = null;
+  state.skuMasterCreate.matchedParentSku = null;
+  $('smc-barcode-less-select').value = '';
+  ['smc-brand','smc-description','smc-variant','smc-size'].forEach((field) => { $(field).value = ''; });
+  setSkuMasterCreateParentReadonly(false);
+  hideSkuMasterCreateParentDuplicateWarning();
+  $('smc-barcode-less-selection-note').innerHTML = '<strong>New barcode-less SKU mode.</strong> Enter Brand, Description, Variant, and Size. Exact duplicate all-N/A details are blocked.';
+  $('smc-brand').focus();
+}
+
+async function resolveSkuMasterCreateParent() {
+  const sequence = ++state.skuMasterCreate.parentLookupSequence;
+  const type = state.skuMasterCreate.type;
+  const entries = type === 'SHIPPER'
+    ? [{ id:'smc-case', expectedType:'CASE' }]
+    : [{ id:'smc-case', expectedType:'CASE' },{ id:'smc-pack', expectedType:'PACK' },{ id:'smc-piece', expectedType:'PIECE' }];
+
+  entries.forEach((entry) => { $(entry.id).value = normalizeBarcode($(entry.id).value); });
+  const actualEntries = entries.map((entry) => ({ ...entry, value: normalizeBarcode($(entry.id).value) })).filter((entry) => entry.value && entry.value !== 'N/A');
+
+  if (type === 'STANDARD' && isSkuMasterCreateAllNa()) {
+    $('smc-parent-match-note').classList.add('hidden');
+    $('smc-barcode-less-panel').classList.remove('hidden');
+    await loadSkuMasterCreateBarcodeLessSkus();
+    if (state.skuMasterCreate.barcodeLessMode === 'existing' && state.skuMasterCreate.barcodeLessSkuId) {
+      return 'existing';
+    }
+    if (state.skuMasterCreate.barcodeLessMode === 'new') {
+      setSkuMasterCreateParentReadonly(false);
+      return 'new';
+    }
+    state.skuMasterCreate.matchedParentSku = null;
+    state.skuMasterCreate.barcodeLessMode = 'select';
+    state.skuMasterCreate.barcodeLessSkuId = null;
+    setSkuMasterCreateParentReadonly(true);
+    hideSkuMasterCreateParentDuplicateWarning();
+    return 'barcode-less-select';
+  }
+
+  $('smc-barcode-less-panel').classList.add('hidden');
+  state.skuMasterCreate.barcodeLessMode = null;
+  state.skuMasterCreate.barcodeLessSkuId = null;
+
+  if (!actualEntries.length) {
+    state.skuMasterCreate.matchedParentSku = null;
+    setSkuMasterCreateParentReadonly(false);
+    $('smc-parent-match-note').classList.add('hidden');
+    return 'new';
+  }
+
+  const responses = await Promise.all(actualEntries.map(async (entry) => {
+    const [typed, all, archivedTyped] = await Promise.all([
+      supabase.rpc('find_sku_by_barcode_type', { p_barcode: entry.value, p_barcode_type: entry.expectedType }),
+      supabase.rpc('find_sku_barcode_matches', { p_barcode: entry.value }),
+      supabase.rpc('find_archived_sku_by_barcode_type', { p_barcode: entry.value, p_barcode_type: entry.expectedType })
+    ]);
+    return { entry, typed, all, archivedTyped };
+  }));
+  if (sequence !== state.skuMasterCreate.parentLookupSequence) return 'stale';
+  const anyError = responses.find((r) => r.typed.error || r.all.error || r.archivedTyped.error);
+  if (anyError) return toast(friendlyError(anyError.typed.error || anyError.all.error || anyError.archivedTyped.error), 'error');
+
+  const uniqueById = (rows) => [...new Map(rows.filter(Boolean).map((row) => [row.id,row])).values()];
+  const matches = uniqueById(responses.map((r) => r.typed.data?.[0]));
+  const archivedMatches = uniqueById(responses.map((r) => r.archivedTyped.data?.[0]));
+
+  if (matches.length > 1) {
+    state.skuMasterCreate.matchedParentSku = null;
+    setSkuMasterCreateParentReadonly(false);
+    $('smc-parent-match-note').innerHTML = '<strong>Barcode conflict:</strong> the entered barcode fields point to more than one active SKU. Check the entered CASE/PACK/PIECE values.';
+    $('smc-parent-match-note').classList.remove('hidden');
+    return 'conflict';
+  }
+
+  const sku = matches[0];
+  if (sku) {
+    if (type === 'SHIPPER') {
+      if (String(sku.sku_type || 'STANDARD').toUpperCase() !== 'SHIPPER') {
+        state.skuMasterCreate.matchedParentSku = null;
+        setSkuMasterCreateParentReadonly(false);
+        $('smc-parent-match-note').innerHTML = '<strong>STANDARD SKU detected.</strong> This CASE barcode belongs to a normal SKU, not a Shipper master.';
+        $('smc-parent-match-note').classList.remove('hidden');
+        return 'conflict';
+      }
+    } else {
+      for (const entry of actualEntries) {
+        const stored = normalizeBarcode(sku[`${entry.expectedType.toLowerCase()}_barcode`]);
+        if (entry.value.toLowerCase() !== stored.toLowerCase()) {
+          state.skuMasterCreate.matchedParentSku = null;
+          setSkuMasterCreateParentReadonly(false);
+          $('smc-parent-match-note').innerHTML = `<strong>Barcode conflict:</strong> ${escapeHtml(entry.expectedType)} ${escapeHtml(entry.value)} does not match the stored ${escapeHtml(entry.expectedType)} barcode ${escapeHtml(stored)} for the identified SKU.`;
+          $('smc-parent-match-note').classList.remove('hidden');
+          return 'conflict';
+        }
+      }
+      if (String(sku.sku_type || 'STANDARD').toUpperCase() !== 'STANDARD') {
+        $('smc-parent-match-note').innerHTML = '<strong>SHIPPER SKU detected.</strong> Change SKU type to SHIPPER.';
+        $('smc-parent-match-note').classList.remove('hidden');
+        return 'conflict';
+      }
+      $('smc-case').value = sku.case_barcode;
+      $('smc-pack').value = sku.pack_barcode;
+      $('smc-piece').value = sku.piece_barcode;
+    }
+
+    state.skuMasterCreate.matchedParentSku = sku;
+    $('smc-brand').value = sku.brand || '';
+    $('smc-description').value = sku.description || '';
+    $('smc-variant').value = sku.variant || '';
+    $('smc-size').value = sku.size || '';
+    setSkuMasterCreateParentReadonly(true);
+    hideSkuMasterCreateParentDuplicateWarning();
+    $('smc-parent-match-note').innerHTML = `<strong>Existing ${escapeHtml(type)} SKU found.</strong> Stored master details loaded. CREATE SKU will reuse this record; it will not create a duplicate.`;
+    $('smc-parent-match-note').classList.remove('hidden');
+    return 'existing';
+  }
+
+  if (archivedMatches.length) {
+    if (archivedMatches.length > 1) {
+      $('smc-parent-match-note').innerHTML = '<strong>Archived SKU conflict:</strong> the barcode fields point to more than one archived SKU. Review SKU Master Data Health.';
+      $('smc-parent-match-note').classList.remove('hidden');
+      return 'conflict';
+    }
+    const archived = archivedMatches[0];
+    $('smc-parent-match-note').innerHTML = `<strong>Previously deleted SKU found.</strong> ${escapeHtml(archivedSkuLabel(archived))}<br>${escapeHtml(archivedSkuBarcodeText(archived))}<br>Reactivate the original record instead of creating a duplicate.`;
+    $('smc-parent-match-note').classList.remove('hidden');
+    const reactivated = await offerArchivedSkuReactivation(archived, 'SKU Masterlist CREATE SKU');
+    if (reactivated) {
+      state.skuMasterCreate.barcodeLessLoaded = false;
+      await loadSkuMaster(true);
+      return resolveSkuMasterCreateParent();
+    }
+    return 'archived';
+  }
+
+  state.skuMasterCreate.matchedParentSku = null;
+  setSkuMasterCreateParentReadonly(false);
+  const crossWarnings = [];
+  responses.forEach((response) => {
+    const other = (response.all.data || []).find((row) => String(row.matched_type || '').toUpperCase() !== response.entry.expectedType);
+    if (other) crossWarnings.push(`${response.entry.value} is already registered as a ${String(other.matched_type || '').toUpperCase()} barcode.`);
+  });
+  if (crossWarnings.length) {
+    $('smc-parent-match-note').innerHTML = `<strong>Barcode category warning:</strong> ${escapeHtml(crossWarnings.join(' '))}${type === 'SHIPPER' ? '<br>SHIPPER creation will be blocked by the database if its CASE barcode collides with another barcode category.' : '<br>Standard Put-away currently treats barcode identity by CASE/PACK/PIECE category; double-check before creating.'}`;
+    $('smc-parent-match-note').classList.remove('hidden');
+  } else {
+    $('smc-parent-match-note').innerHTML = `<strong>New ${escapeHtml(type)} SKU.</strong> Enter the master details below.`;
+    $('smc-parent-match-note').classList.remove('hidden');
+  }
+  await checkSkuMasterCreateParentDuplicateDetails();
+  return 'new';
+}
+
+async function checkSkuMasterCreateParentDuplicateDetails() {
+  if (state.skuMasterCreate.matchedParentSku) return hideSkuMasterCreateParentDuplicateWarning();
+  if (isSkuMasterCreateAllNa() && state.skuMasterCreate.barcodeLessMode !== 'new') return hideSkuMasterCreateParentDuplicateWarning();
+  const details = {
+    p_brand: $('smc-brand').value.trim(),
+    p_description: $('smc-description').value.trim(),
+    p_variant: $('smc-variant').value.trim(),
+    p_size: $('smc-size').value.trim()
+  };
+  if (Object.values(details).some((v) => !v)) return hideSkuMasterCreateParentDuplicateWarning();
+
+  if (isSkuMasterCreateAllNa() && state.skuMasterCreate.barcodeLessMode === 'new') {
+    const candidates = state.skuMasterCreate.barcodeLessLoaded ? state.skuMasterCreate.barcodeLessSkus : [];
+    const exact = candidates.find((sku) =>
+      barcodeLessSearchText(sku.brand) === barcodeLessSearchText(details.p_brand) &&
+      barcodeLessSearchText(sku.description) === barcodeLessSearchText(details.p_description) &&
+      barcodeLessSearchText(sku.variant) === barcodeLessSearchText(details.p_variant) &&
+      barcodeLessSearchText(sku.size) === barcodeLessSearchText(details.p_size)
+    );
+    if (exact) {
+      state.skuMasterCreate.duplicateParentSkuId = exact.id;
+      $('smc-parent-still-add').checked = false;
+      $('smc-parent-still-add').disabled = true;
+      $('smc-parent-duplicate-details').textContent = `This exact barcode-less SKU already exists: ${barcodeLessSkuLabel(exact)}. Select the existing item instead. Exact all-N/A duplication is blocked.`;
+      $('smc-parent-duplicate-warning').classList.remove('hidden');
+      return exact;
+    }
+    hideSkuMasterCreateParentDuplicateWarning();
+    return null;
+  }
+
+  const lookupType = state.skuMasterCreate.type === 'SHIPPER' ? 'SHIPPER' : 'STANDARD';
+  const { data, error } = await supabase.rpc('find_sku_by_details', details);
+  if (error) return toast(friendlyError(error), 'error');
+  const match = data?.[0];
+  if (!match) {
+    try {
+      const archivedRows = await findArchivedSkuByDetails(details, lookupType);
+      const archived = archivedRows[0];
+      if (archived) {
+        state.skuMasterCreate.duplicateParentSkuId = archived.id;
+        $('smc-parent-duplicate-details').textContent = `A previously deleted ${lookupType} SKU has the same details. Archived barcodes — ${archivedSkuBarcodeText(archived)}. If this is the same product, use its original barcode and reactivate it; use Still Add only for a genuinely different barcode family.`;
+        $('smc-parent-duplicate-warning').classList.remove('hidden');
+        return { ...archived, archived: true };
+      }
+    } catch (error2) { toast(friendlyError(error2), 'error'); }
+    hideSkuMasterCreateParentDuplicateWarning();
+    return null;
+  }
+  state.skuMasterCreate.duplicateParentSkuId = match.id;
+  $('smc-parent-duplicate-details').textContent = `Existing barcodes — CASE: ${match.case_barcode}; PACK: ${match.pack_barcode}; PIECE: ${match.piece_barcode}. Added by: ${match.created_by_username || 'unknown user'}.`;
+  $('smc-parent-duplicate-warning').classList.remove('hidden');
+  return match;
+}
+
+async function resolveSkuMasterCreateContentSku() {
+  const sequence = ++state.skuMasterCreate.contentLookupSequence;
+  const pack = normalizeBarcode($('smc-content-pack').value);
+  $('smc-content-pack').value = pack;
+  if (!pack || pack === 'N/A') {
+    state.skuMasterCreate.contentSku = null;
+    setSkuMasterCreateContentReadonly(false);
+    $('smc-content-match-note').classList.add('hidden');
+    if (pack === 'N/A') toast('Shipper child content requires an actual PACK barcode.', 'error');
+    return null;
+  }
+
+  const [typedResult, allResult, archivedResult] = await Promise.all([
+    supabase.rpc('find_sku_by_barcode_type', { p_barcode: pack, p_barcode_type: 'PACK' }),
+    supabase.rpc('find_sku_barcode_matches', { p_barcode: pack }),
+    supabase.rpc('find_archived_sku_by_barcode_type', { p_barcode: pack, p_barcode_type: 'PACK' })
+  ]);
+  if (sequence !== state.skuMasterCreate.contentLookupSequence) return null;
+  if (typedResult.error || allResult.error || archivedResult.error) return toast(friendlyError(typedResult.error || allResult.error || archivedResult.error), 'error');
+
+  const sku = typedResult.data?.[0];
+  if (!sku && archivedResult.data?.[0]) {
+    const archived = archivedResult.data[0];
+    $('smc-content-match-note').innerHTML = `<strong>Previously deleted child SKU found.</strong> ${escapeHtml(archivedSkuLabel(archived))}<br>${escapeHtml(archivedSkuBarcodeText(archived))}`;
+    $('smc-content-match-note').classList.remove('hidden');
+    const reactivated = await offerArchivedSkuReactivation(archived, 'SKU Masterlist Shipper child');
+    if (reactivated) {
+      await loadSkuMaster(true);
+      return resolveSkuMasterCreateContentSku();
+    }
+    return null;
+  }
+
+  if (!sku) {
+    state.skuMasterCreate.contentSku = null;
+    setSkuMasterCreateContentReadonly(false);
+    const cross = (allResult.data || []).find((row) => String(row.matched_type || '').toUpperCase() !== 'PACK');
+    if (cross) {
+      $('smc-content-match-note').innerHTML = `<strong>Barcode category warning:</strong> ${escapeHtml(pack)} is already registered as a ${escapeHtml(String(cross.matched_type || '').toUpperCase())} barcode. The Shipper backend will block this PACK barcode from being reused across categories.`;
+    } else {
+      $('smc-content-match-note').innerHTML = '<strong>New PACK barcode.</strong> Enter Brand, Description, Variant, and Size. The child will be stored as a STANDARD SKU with CASE/PIECE = N/A.';
+    }
+    $('smc-content-match-note').classList.remove('hidden');
+    await checkSkuMasterCreateContentDuplicateDetails();
+    return null;
+  }
+
+  if (String(sku.sku_type || 'STANDARD').toUpperCase() !== 'STANDARD') {
+    $('smc-content-match-note').innerHTML = '<strong>SHIPPER SKU detected.</strong> A Shipper master cannot be used as a child PACK SKU.';
+    $('smc-content-match-note').classList.remove('hidden');
+    return toast('A Shipper SKU cannot be used as a child PACK item.', 'error');
+  }
+
+  state.skuMasterCreate.contentSku = sku;
+  $('smc-content-brand').value = sku.brand || '';
+  $('smc-content-description').value = sku.description || '';
+  $('smc-content-variant').value = sku.variant || '';
+  $('smc-content-size').value = sku.size || '';
+  setSkuMasterCreateContentReadonly(true);
+  hideSkuMasterCreateContentDuplicateWarning();
+  $('smc-content-match-note').innerHTML = `<strong>Existing PACK SKU found.</strong> ${escapeHtml([sku.brand,sku.description,sku.variant,sku.size].join(' '))}. It will be reused; no duplicate SKU record will be created.`;
+  $('smc-content-match-note').classList.remove('hidden');
+  return sku;
+}
+
+async function checkSkuMasterCreateContentDuplicateDetails() {
+  if (state.skuMasterCreate.contentSku) return hideSkuMasterCreateContentDuplicateWarning();
+  const details = {
+    p_brand: $('smc-content-brand').value.trim(),
+    p_description: $('smc-content-description').value.trim(),
+    p_variant: $('smc-content-variant').value.trim(),
+    p_size: $('smc-content-size').value.trim()
+  };
+  if (Object.values(details).some((v) => !v)) return hideSkuMasterCreateContentDuplicateWarning();
+  const { data, error } = await supabase.rpc('find_sku_by_details_type', { ...details, p_sku_type: 'STANDARD' });
+  if (error) return toast(friendlyError(error), 'error');
+  const match = data?.[0];
+  if (!match) {
+    try {
+      const archivedRows = await findArchivedSkuByDetails(details, 'STANDARD');
+      const archived = archivedRows[0];
+      if (archived) {
+        state.skuMasterCreate.duplicateContentSkuId = archived.id;
+        $('smc-content-duplicate-details').textContent = `A previously deleted STANDARD SKU has the same details. Archived PACK: ${archived.pack_barcode}. Use the original PACK barcode if this is the same product; otherwise Still Add may be used for a genuinely different PACK barcode family.`;
+        $('smc-content-duplicate-warning').classList.remove('hidden');
+        return { ...archived, archived:true };
+      }
+    } catch (error2) { toast(friendlyError(error2), 'error'); }
+    hideSkuMasterCreateContentDuplicateWarning();
+    return null;
+  }
+  state.skuMasterCreate.duplicateContentSkuId = match.id;
+  $('smc-content-duplicate-details').textContent = `Existing barcodes — CASE: ${match.case_barcode}; PACK: ${match.pack_barcode}; PIECE: ${match.piece_barcode}. Added by: ${match.created_by_username || 'unknown user'}.`;
+  $('smc-content-duplicate-warning').classList.remove('hidden');
+  return match;
+}
+
+function clearSkuMasterCreateContentLine() {
+  if (!$('smc-content-pack')) return;
+  ['smc-content-pack','smc-content-brand','smc-content-description','smc-content-variant','smc-content-size'].forEach((id) => { $(id).value = ''; });
+  state.skuMasterCreate.contentSku = null;
+  state.skuMasterCreate.contentLookupSequence += 1;
+  setSkuMasterCreateContentReadonly(false);
+  hideSkuMasterCreateContentDuplicateWarning();
+  $('smc-content-match-note').classList.add('hidden');
+  $('smc-content-match-note').innerHTML = '';
+}
+
+async function addSkuMasterCreateContentLine() {
+  const button = $('smc-add-content-btn');
+  const duplicateConfirmedBeforeLookup = $('smc-content-still-add').checked;
+  setBusy(button,true,'Checking…');
+  try {
+    await resolveSkuMasterCreateContentSku();
+    const pack = normalizeBarcode($('smc-content-pack').value);
+    const brand = $('smc-content-brand').value.trim();
+    const description = $('smc-content-description').value.trim();
+    const variant = $('smc-content-variant').value.trim();
+    const size = $('smc-content-size').value.trim();
+    if (!pack || pack === 'N/A') return toast('Enter the actual PACK barcode for this child SKU.', 'error');
+    if (!brand || !description || !variant || !size) return toast('Brand, description, variant, and size are required for the child PACK SKU.', 'error');
+
+    const duplicate = await checkSkuMasterCreateContentDuplicateDetails();
+    if (duplicate && !state.skuMasterCreate.contentSku && !duplicateConfirmedBeforeLookup && !$('smc-content-still-add').checked) {
+      return toast('ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE, or select Still Add to Database.', 'error');
+    }
+
+    if (state.skuMasterCreate.contents.some((row) => row.pack_barcode.toLowerCase() === pack.toLowerCase())) {
+      return toast('This PACK barcode is already staged in the Shipper child list.', 'error');
+    }
+
+    state.skuMasterCreate.contents.push({
+      pack_barcode: pack,
+      brand,
+      description,
+      variant,
+      size,
+      allow_duplicate_details: Boolean($('smc-content-still-add').checked || duplicateConfirmedBeforeLookup),
+      status: state.skuMasterCreate.contentSku ? 'EXISTING' : 'NEW'
+    });
+    renderSkuMasterCreateContents();
+    clearSkuMasterCreateContentLine();
+  } finally {
+    setBusy(button,false);
+  }
+}
+
+function removeSkuMasterCreateContentLine(index) {
+  state.skuMasterCreate.contents.splice(index,1);
+  renderSkuMasterCreateContents();
+}
+
+function renderSkuMasterCreateContents() {
+  if (!$('smc-content-table')) return;
+  const rows = state.skuMasterCreate.contents;
+  $('smc-content-table').innerHTML = rows.length ? `<table><thead><tr><th>PACK barcode</th><th>SKU details</th><th>Status</th><th></th></tr></thead><tbody>${rows.map((row,index) => `<tr>
+    <td>${escapeHtml(row.pack_barcode)}</td>
+    <td class="wrap">${escapeHtml([row.brand,row.description,row.variant,row.size].join(' '))}</td>
+    <td><span class="pill ${row.status === 'NEW' ? 'near' : ''}">${escapeHtml(row.status)}</span></td>
+    <td><button class="danger ghost" type="button" data-smc-remove-content="${index}">Remove</button></td>
+  </tr>`).join('')}</tbody></table>` : emptyState('No child PACK SKU has been added yet.');
+}
+
+async function submitSkuMasterCreate(event) {
+  event.preventDefault();
+  const button = event.submitter || $('sku-master-create-form').querySelector('button[type="submit"]');
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required to create SKU Masterlist records.', 'error');
+  const type = state.skuMasterCreate.type;
+  const resolution = await resolveSkuMasterCreateParent();
+  if (['conflict','archived','stale'].includes(resolution)) return;
+  if (resolution === 'barcode-less-select' && state.skuMasterCreate.barcodeLessMode !== 'existing') {
+    return toast('Select an existing barcode-less SKU, or explicitly choose Create new barcode-less SKU.', 'error');
+  }
+
+  const parent = {
+    case_barcode: normalizeBarcode($('smc-case').value || (type === 'SHIPPER' ? '' : 'N/A')),
+    pack_barcode: type === 'SHIPPER' ? 'N/A' : normalizeBarcode($('smc-pack').value),
+    piece_barcode: type === 'SHIPPER' ? 'N/A' : normalizeBarcode($('smc-piece').value),
+    brand: $('smc-brand').value.trim(),
+    description: $('smc-description').value.trim(),
+    variant: $('smc-variant').value.trim(),
+    size: $('smc-size').value.trim(),
+    allow_duplicate_details: Boolean($('smc-parent-still-add').checked)
+  };
+
+  if (!parent.brand || !parent.description || !parent.variant || !parent.size) return toast('Brand, description, variant, and size are required.', 'error');
+  if (type === 'STANDARD' && [parent.case_barcode,parent.pack_barcode,parent.piece_barcode].some((code) => !code)) return toast('CASE, PACK, and PIECE barcode fields are required. Enter N/A when unavailable.', 'error');
+  if (type === 'SHIPPER' && (!parent.case_barcode || parent.case_barcode === 'N/A')) return toast('A SHIPPER SKU requires an actual CASE barcode.', 'error');
+  if (type === 'SHIPPER' && !state.skuMasterCreate.contents.length) return toast('Add at least one PACK child SKU before creating the SHIPPER master.', 'error');
+
+  if (type === 'STANDARD' && isSkuMasterCreateAllNa() && state.skuMasterCreate.barcodeLessMode === 'new') {
+    const duplicate = await checkSkuMasterCreateParentDuplicateDetails();
+    if (duplicate) return toast('This exact barcode-less SKU already exists. Select the existing item instead of creating a duplicate.', 'error');
+  } else if (!state.skuMasterCreate.matchedParentSku) {
+    const duplicate = await checkSkuMasterCreateParentDuplicateDetails();
+    if (duplicate && !$('smc-parent-still-add').checked) return toast('ITEM WITH THE SAME DETAILS EXISTED. Please check BARCODE, or select Still Add to Database.', 'error');
+  }
+
+  setBusy(button,true,'Creating…');
+  try {
+    const { data, error } = await supabase.rpc('admin_create_sku_master_v1', {
+      p_sku_type: type,
+      p_parent: parent,
+      p_contents: type === 'SHIPPER' ? state.skuMasterCreate.contents.map(({status,...row}) => row) : []
+    });
+    if (error) return toast(friendlyError(error), 'error');
+    const result = data?.[0] || {};
+    invalidateReports();
+    state.skuMasterCreate.barcodeLessLoaded = false;
+    await loadSkuMaster(true);
+    closeSkuMasterCreateDialog();
+    const created = Number(result.created_sku_count || 0);
+    const existing = Number(result.existing_sku_count || 0);
+    if (created > 0) toast(`CREATE SKU completed: ${created} new SKU master record${created === 1 ? '' : 's'} created${existing ? ` · ${existing} existing record${existing === 1 ? '' : 's'} reused` : ''}. No inventory was created.`, 'success');
+    else toast(`No duplicate was created. ${existing || 1} existing SKU master record${existing === 1 ? '' : 's'} reused.`, 'success');
+  } finally {
+    setBusy(button,false);
+  }
+}
+
 async function loadSkuMaster(force = false) {
   if (!isSupervisor()) return;
   if (!force && state.data.skuMaster.length) return renderSkuMaster();
@@ -8073,6 +8792,7 @@ async function loadSkuMaster(force = false) {
 
 function renderSkuMaster() {
   if (!isSupervisor()) return;
+  if ($('sku-master-create-btn')) $('sku-master-create-btn').classList.toggle('hidden', !isAdminOrOwner());
   const term = $('sku-master-search').value.trim().toLowerCase();
   const rows = state.data.skuMaster.filter((r) => [
     r.brand, r.description, r.variant, r.size,
