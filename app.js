@@ -259,6 +259,7 @@ const state = {
   pickBlockingPendingReturnCount: 0,
   dashboardPendingPickReturns: [],
   transfer: freshOperationState(),
+  uomConversion: { sourceLots: [], selectedLot: null },
   pickRevertStatusByLine: new Map(),
   pickRevertStatusLoaded: false,
   data: { inventory: [], physicalCount: [], physicalCountRaw: [], physicalCountFiltered: [], physicalCountDetailedShipperFiltered: [], stockCard: [], stockCardExport: [], skuMaster: [], skuHealth: [], containers: [], expiry: [], nonFefo: [], users: [], history: [], audit: [], auditFiltered: [], locations: [], rackMap: [] },
@@ -334,6 +335,7 @@ const screenMeta = {
   putaway: ['Put-away', 'Receive pallet contents into a rack location'],
   picking: ['Picking', 'FEFO-guided picking by source location'],
   transfer: ['Stock transfer', 'Move stock lots between rack locations'],
+  uomconversion: ['Break / Repack', 'Convert STANDARD stock between CASE / PACK / PIECE, with optional rack relocation'],
   inventory: ['Inventory', 'Stock by SKU, container, expiry, and location'],
   physicalcount: ['Physical Count', 'Printable read-only system stock sheet for manual warehouse verification'],
   stockcard: ['SKU Balance Stock Card', 'Read-only SKU movement ledger, rack movements, and running balances'],
@@ -454,8 +456,351 @@ function clearAdministrativeCodeOnEntry() {
   }, 250);
 }
 
+
+function installUomConversionUi() {
+  if ($('screen-uomconversion')) return;
+
+  const transferNav = document.querySelector('#main-nav [data-screen="transfer"]');
+  if (transferNav) {
+    const btn = transferNav.cloneNode(true);
+    btn.dataset.screen = 'uomconversion';
+    btn.removeAttribute('data-role-min');
+    const label = btn.querySelector('span:last-child');
+    if (label) label.textContent = 'Break / Repack'; else btn.textContent = 'Break / Repack';
+    transferNav.insertAdjacentElement('afterend', btn);
+  }
+
+  const transferScreen = $('screen-transfer');
+  const screen = document.createElement('section');
+  screen.id = 'screen-uomconversion';
+  screen.className = 'screen';
+  screen.innerHTML = `
+    <div class="card">
+      <div class="card-head"><div><h3>UOM Conversion — Break / Repack</h3><p>STANDARD loose stock only. Container and expiry stay with the stock. Output may remain in the same rack or be relocated to another physical rack.</p></div></div>
+      <div class="info-box"><strong>BREAK</strong> converts larger packaging to smaller packaging and may record a shortage/damage variance. <strong>REPACK</strong> converts smaller packaging to larger packaging and requires an exact complete quantity.</div>
+      <form id="uomc-form" class="stack">
+        <div class="form-grid two">
+          <label>Source rack *<div class="scan-field"><input id="uomc-source-rack" autocomplete="off" placeholder="Scan or enter rack" required /><button type="button" class="scan-btn" data-scan-target="uomc-source-rack" data-scan-kind="location">Scan</button></div></label>
+          <div class="button-cluster" style="align-self:end"><button id="uomc-load-source-btn" type="button" class="secondary">Load convertible stock</button></div>
+        </div>
+        <div id="uomc-source-note" class="small-note">Configure a STANDARD SKU first through SKU Masterlist → UOM Setup.</div>
+        <label>Source lot *<select id="uomc-source-lot" required><option value="">Load a source rack first</option></select></label>
+        <div id="uomc-lot-detail" class="info-box hidden"></div>
+        <div class="form-grid three">
+          <label>Source quantity *<input id="uomc-source-qty" type="number" min="1" step="1" inputmode="numeric" required /></label>
+          <label>Convert to *<select id="uomc-target-uom" required><option value="">Select target UOM</option></select></label>
+          <label>Actual output quantity *<input id="uomc-actual-output" type="number" min="1" step="1" inputmode="numeric" required /></label>
+        </div>
+        <div id="uomc-preview" class="info-box">Select a configured source lot and target UOM.</div>
+        <label><input id="uomc-relocate" type="checkbox" /> Relocate converted output to another rack</label>
+        <div id="uomc-destination-wrap" class="hidden">
+          <label>Destination rack *<div class="scan-field"><input id="uomc-destination-rack" autocomplete="off" placeholder="Scan or enter destination rack" /><button type="button" class="scan-btn" data-scan-target="uomc-destination-rack" data-scan-kind="location">Scan</button></div></label>
+          <div class="small-note">The converted output keeps the source container number and expiry date.</div>
+        </div>
+        <div class="form-grid two">
+          <label>Reason *<select id="uomc-reason" required>
+            <option value="">Select reason</option>
+            <option>Make available for piece picking</option>
+            <option>Make available for pack picking</option>
+            <option>Repacked to pack</option>
+            <option>Repacked to case</option>
+            <option>Damaged contents</option>
+            <option>Short contents</option>
+            <option>Repacking</option>
+            <option value="OTHER">Other</option>
+          </select></label>
+          <label id="uomc-other-reason-wrap" class="hidden">Other reason *<input id="uomc-other-reason" maxlength="240" /></label>
+        </div>
+        <div class="button-cluster"><button type="submit" class="primary">CONFIRM BREAK / REPACK</button><button id="uomc-clear-btn" type="button" class="ghost">Clear</button></div>
+      </form>
+    </div>`;
+  if (transferScreen?.parentElement) transferScreen.insertAdjacentElement('afterend', screen);
+
+  const dialog = document.createElement('dialog');
+  dialog.id = 'uom-config-dialog';
+  dialog.className = 'edit-dialog';
+  dialog.innerHTML = `
+    <div class="scanner-head"><div><h3>UOM Conversion Setup</h3><p>Admin/Owner only. Barcode N/A does not decide whether a physical UOM exists.</p></div><button id="uom-config-close" class="icon-button" type="button">✕</button></div>
+    <form id="uom-config-form" class="stack">
+      <input id="uom-config-sku-id" type="hidden" />
+      <div id="uom-config-sku-detail" class="info-box"></div>
+      <div class="info-box">Enable the physical UOMs that really exist for this SKU. CASE/PACK factors are expressed as equivalent PIECES. Example: 1 CASE = 24 PIECES and 1 PACK = 6 PIECES. PIECE, when enabled, is the base factor 1.</div>
+      <div class="form-grid three">
+        <label><input id="uom-config-case-enabled" type="checkbox" /> CASE enabled</label>
+        <label>Pieces per CASE<input id="uom-config-case-factor" type="number" min="1" step="1" inputmode="numeric" /></label>
+        <div></div>
+        <label><input id="uom-config-pack-enabled" type="checkbox" /> PACK enabled</label>
+        <label>Pieces per PACK<input id="uom-config-pack-factor" type="number" min="1" step="1" inputmode="numeric" /></label>
+        <div></div>
+        <label><input id="uom-config-piece-enabled" type="checkbox" /> PIECE enabled</label>
+        <div class="small-note">PIECE factor = 1</div><div></div>
+      </div>
+      <label>Reason for setup/change *<input id="uom-config-reason" maxlength="240" required placeholder="Example: Initial conversion setup verified from product packaging" /></label>
+      <div class="button-cluster"><button type="submit" class="primary">Save UOM Setup</button><button type="button" class="ghost" onclick="document.getElementById('uom-config-dialog').close()">Cancel</button></div>
+    </form>`;
+  document.body.appendChild(dialog);
+
+  const varianceDialog = document.createElement('dialog');
+  varianceDialog.id = 'uomc-variance-dialog';
+  varianceDialog.className = 'edit-dialog';
+  varianceDialog.innerHTML = `
+    <div class="scanner-head">
+      <div>
+        <h3>BREAK Variance Detected</h3>
+        <p>The recovered quantity is lower than the configured expected output.</p>
+      </div>
+      <button id="uomc-variance-close" class="icon-button" type="button">✕</button>
+    </div>
+    <form id="uomc-variance-form" class="stack">
+      <div id="uomc-variance-summary" class="info-box"></div>
+      <div class="info-box">
+        Verify the physical quantity before continuing. A separate variance reason is required so an accidental quantity entry cannot be completed as a shortage.
+      </div>
+      <label>Variance reason / explanation *
+        <textarea id="uomc-variance-reason" maxlength="240" rows="3" required
+          placeholder="Example: 1 piece damaged and not recoverable during case break"></textarea>
+      </label>
+      <div class="button-cluster">
+        <button type="submit" class="primary">CONFIRM VARIANCE & COMPLETE</button>
+        <button id="uomc-variance-cancel" type="button" class="ghost">Cancel</button>
+      </div>
+    </form>`;
+  document.body.appendChild(varianceDialog);
+
+  ['uomc-source-rack','uomc-destination-rack'].forEach((id) => {
+    const input=$(id); if (!input) return;
+    input.setAttribute('autocomplete','off'); input.name=`wms-${id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    input.setAttribute('autocorrect','off'); input.setAttribute('autocapitalize','off'); input.setAttribute('spellcheck','false');
+  });
+
+  const historyType=$('history-type');
+  if (historyType && !historyType.querySelector('option[value="UOM_CONVERSION"]')) {
+    const opt=document.createElement('option'); opt.value='UOM_CONVERSION'; opt.textContent='UOM Conversion'; historyType.appendChild(opt);
+  }
+}
+
+function syncUomConfigInputs() {
+  const caseOn=Boolean($('uom-config-case-enabled')?.checked);
+  const packOn=Boolean($('uom-config-pack-enabled')?.checked);
+  if ($('uom-config-case-factor')) { $('uom-config-case-factor').disabled=!caseOn; if (!caseOn) $('uom-config-case-factor').value=''; }
+  if ($('uom-config-pack-factor')) { $('uom-config-pack-factor').disabled=!packOn; if (!packOn) $('uom-config-pack-factor').value=''; }
+}
+
+async function openUomConfigDialog(skuId) {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required to configure UOM conversion.', 'error');
+  const sku=state.data.skuMaster.find((row)=>row.id===skuId);
+  if (!sku) return toast('SKU master record was not found. Refresh and try again.', 'error');
+  if (String(sku.sku_type||'STANDARD').toUpperCase()!=='STANDARD') return toast('Shipper SKU masters are excluded from Break / Repack V1.', 'error');
+  $('uom-config-sku-id').value=sku.id;
+  $('uom-config-sku-detail').innerHTML=`<strong>${escapeHtml([sku.brand,sku.description,sku.variant,sku.size].filter(Boolean).join(' '))}</strong><br>CASE: ${escapeHtml(sku.case_barcode||'N/A')} · PACK: ${escapeHtml(sku.pack_barcode||'N/A')} · PIECE: ${escapeHtml(sku.piece_barcode||'N/A')}<br><small>Barcode N/A is allowed; enable UOMs according to the actual physical packaging.</small>`;
+  $('uom-config-case-enabled').checked=false; $('uom-config-pack-enabled').checked=false; $('uom-config-piece-enabled').checked=false;
+  $('uom-config-case-factor').value=''; $('uom-config-pack-factor').value=''; $('uom-config-reason').value='';
+  const {data,error}=await supabase.rpc('get_sku_uom_conversion_config_v1',{p_sku_id:sku.id});
+  if (error) return toast(friendlyError(error),'error');
+  const cfgRow=data?.[0];
+  if (cfgRow) {
+    $('uom-config-case-enabled').checked=Boolean(cfgRow.case_enabled); $('uom-config-case-factor').value=cfgRow.pieces_per_case||'';
+    $('uom-config-pack-enabled').checked=Boolean(cfgRow.pack_enabled); $('uom-config-pack-factor').value=cfgRow.pieces_per_pack||'';
+    $('uom-config-piece-enabled').checked=Boolean(cfgRow.piece_enabled);
+  }
+  syncUomConfigInputs(); $('uom-config-dialog').showModal();
+}
+
+async function submitUomConfig(event) {
+  event.preventDefault();
+  const button=event.submitter;
+  const caseOn=$('uom-config-case-enabled').checked, packOn=$('uom-config-pack-enabled').checked, pieceOn=$('uom-config-piece-enabled').checked;
+  const enabled=[caseOn,packOn,pieceOn].filter(Boolean).length;
+  if (enabled<2) return toast('Enable at least two physical UOMs.', 'error');
+  const caseFactor=caseOn?Number($('uom-config-case-factor').value):null;
+  const packFactor=packOn?Number($('uom-config-pack-factor').value):null;
+  if (caseOn && (!Number.isInteger(caseFactor)||caseFactor<1)) return toast('Pieces per CASE must be a whole number of at least 1.','error');
+  if (packOn && (!Number.isInteger(packFactor)||packFactor<1)) return toast('Pieces per PACK must be a whole number of at least 1.','error');
+  if (caseOn&&packOn&&(caseFactor<packFactor||caseFactor%packFactor!==0)) return toast('Pieces per CASE must be an exact whole-number multiple of pieces per PACK.','error');
+  const reason=$('uom-config-reason').value.trim(); if (!reason) return toast('Enter a reason for the setup/change.','error');
+  setBusy(button,true,'Saving…');
+  try {
+    const {error}=await supabase.rpc('admin_set_sku_uom_conversion_config_v1',{
+      p_sku_id:$('uom-config-sku-id').value,p_case_enabled:caseOn,p_pieces_per_case:caseFactor,
+      p_pack_enabled:packOn,p_pieces_per_pack:packFactor,p_piece_enabled:pieceOn,p_reason:reason
+    });
+    if (error) return toast(friendlyError(error),'error');
+    $('uom-config-dialog').close(); state.uomConversion.sourceLots=[]; toast('UOM conversion setup saved.','success');
+  } finally { setBusy(button,false); }
+}
+
+function resetUomConversionForm() {
+  state.uomConversion={sourceLots:[],selectedLot:null};
+  $('uomc-form')?.reset();
+  if ($('uomc-source-lot')) $('uomc-source-lot').innerHTML='<option value="">Load a source rack first</option>';
+  if ($('uomc-target-uom')) $('uomc-target-uom').innerHTML='<option value="">Select target UOM</option>';
+  $('uomc-lot-detail')?.classList.add('hidden');
+  if ($('uomc-preview')) $('uomc-preview').textContent='Select a configured source lot and target UOM.';
+  syncUomConversionRelocation(); syncUomConversionReason();
+}
+
+async function loadUomConversionSourceLots() {
+  const rack=normalizeLocation($('uomc-source-rack').value);
+  if (!rack) return toast('Scan or enter the source rack.','error');
+  $('uomc-source-rack').value=rack;
+  const button=$('uomc-load-source-btn'); setBusy(button,true,'Loading…');
+  try {
+    const {data,error}=await supabase.rpc('get_uom_conversion_source_lots_v1',{p_location_code:rack});
+    if (error) return toast(friendlyError(error),'error');
+    state.uomConversion.sourceLots=data||[]; state.uomConversion.selectedLot=null;
+    const sel=$('uomc-source-lot');
+    sel.innerHTML='<option value="">Select source stock</option>'+state.uomConversion.sourceLots.map((r)=>`<option value="${escapeHtml(r.lot_id)}">${escapeHtml(r.sku_name)} · ${escapeHtml(r.source_uom)} ${fmtQty(r.qty)} · ${escapeHtml(r.container_no)} · ${fmtDate(r.expiry_date)}${r.is_releasable===false?' · ON HOLD':''}</option>`).join('');
+    $('uomc-source-note').textContent=state.uomConversion.sourceLots.length?`${state.uomConversion.sourceLots.length} configured loose stock lot(s) found in ${rack}.`:'No configured convertible loose STANDARD stock found in this rack.';
+    selectUomConversionLot();
+  } finally { setBusy(button,false); }
+}
+
+function uomFactor(lot,uom) {
+  const U=String(uom||'').toUpperCase();
+  if (U==='CASE'&&lot?.case_enabled) return Number(lot.pieces_per_case||0);
+  if (U==='PACK'&&lot?.pack_enabled) return Number(lot.pieces_per_pack||0);
+  if (U==='PIECE'&&lot?.piece_enabled) return 1;
+  return null;
+}
+
+function selectUomConversionLot() {
+  const id=$('uomc-source-lot')?.value;
+  const lot=state.uomConversion.sourceLots.find((r)=>r.lot_id===id)||null;
+  state.uomConversion.selectedLot=lot;
+  const target=$('uomc-target-uom'); target.innerHTML='<option value="">Select target UOM</option>';
+  if (!lot) { $('uomc-lot-detail')?.classList.add('hidden'); syncUomConversionPreview(); return; }
+  const source=String(lot.source_uom).toUpperCase();
+  ['CASE','PACK','PIECE'].forEach((u)=>{ if (u!==source&&uomFactor(lot,u)){ const o=document.createElement('option'); o.value=u; o.textContent=u; target.appendChild(o); }});
+  $('uomc-source-qty').value='1';
+  $('uomc-lot-detail').classList.remove('hidden');
+  $('uomc-lot-detail').innerHTML=`<strong>${escapeHtml(lot.sku_name)}</strong><br>Rack: ${escapeHtml(lot.location_code)} · Container: ${escapeHtml(lot.container_no)} · Expiry: ${fmtDate(lot.expiry_date)}<br>Available: ${fmtQtyUom(lot.qty,lot.source_uom)}${lot.is_releasable===false?'<br><span class="pill expired">ON HOLD — conversion blocked</span>':''}`;
+  syncUomConversionPreview();
+}
+
+function syncUomConversionPreview() {
+  const lot=state.uomConversion.selectedLot, target=String($('uomc-target-uom')?.value||'').toUpperCase();
+  if (!lot||!target) { if ($('uomc-preview')) $('uomc-preview').textContent='Select a configured source lot and target UOM.'; return; }
+  const source=String(lot.source_uom).toUpperCase(), sourceFactor=uomFactor(lot,source), targetFactor=uomFactor(lot,target);
+  const sourceQty=Number($('uomc-source-qty').value||0);
+  if (!Number.isInteger(sourceQty)||sourceQty<1||!sourceFactor||!targetFactor) { $('uomc-preview').textContent='Enter a whole source quantity.'; return; }
+  const base=sourceQty*sourceFactor, isBreak=sourceFactor>targetFactor;
+  if (!isBreak && base%targetFactor!==0) {
+    $('uomc-preview').innerHTML=`<strong>REPACK</strong><br>Selected ${sourceQty} ${escapeHtml(source)} cannot make a complete ${escapeHtml(target)}. Increase the source quantity.`;
+    $('uomc-actual-output').value=''; $('uomc-actual-output').readOnly=true; return;
+  }
+  const expected=base/targetFactor;
+  if (!Number.isInteger(expected)) { $('uomc-preview').textContent='Configured ratio does not produce a whole target quantity.'; return; }
+  if (isBreak) {
+    $('uomc-actual-output').readOnly=false;
+    if (!$('uomc-actual-output').value || Number($('uomc-actual-output').dataset.expected||0)!==expected) $('uomc-actual-output').value=String(expected);
+  } else { $('uomc-actual-output').readOnly=true; $('uomc-actual-output').value=String(expected); }
+  $('uomc-actual-output').dataset.expected=String(expected);
+  const actual=Number($('uomc-actual-output').value||0), variance=isBreak&&Number.isInteger(actual)?expected-actual:0;
+  $('uomc-preview').innerHTML=`<strong>${isBreak?'BREAK':'REPACK'} ${escapeHtml(source)} → ${escapeHtml(target)}</strong><br>Expected output: <strong>${fmtQtyUom(expected,target)}</strong><br>Actual output: <strong>${Number.isFinite(actual)?fmtQtyUom(actual,target):'—'}</strong><br>Variance: <strong>${isBreak&&Number.isFinite(variance)?`${fmtQty(variance)} ${escapeHtml(target)}`:'0'}</strong>`;
+}
+
+function syncUomConversionRelocation() {
+  const on=Boolean($('uomc-relocate')?.checked); $('uomc-destination-wrap')?.classList.toggle('hidden',!on);
+  if ($('uomc-destination-rack')) { $('uomc-destination-rack').required=on; if (!on) $('uomc-destination-rack').value=''; }
+}
+function syncUomConversionReason() {
+  const other=$('uomc-reason')?.value==='OTHER'; $('uomc-other-reason-wrap')?.classList.toggle('hidden',!other); if ($('uomc-other-reason')) $('uomc-other-reason').required=other;
+}
+
+function requestUomVarianceConfirmation({lot,target,sourceQty,expected,actual,variance,reason,destination}) {
+  const dialog=$('uomc-variance-dialog'), form=$('uomc-variance-form'), reasonInput=$('uomc-variance-reason');
+  const summary=$('uomc-variance-summary'), closeBtn=$('uomc-variance-close'), cancelBtn=$('uomc-variance-cancel');
+  if (!dialog||!form||!reasonInput||!summary) return Promise.resolve(null);
+
+  summary.innerHTML=`
+    <strong>BREAK ${escapeHtml(lot.source_uom)} → ${escapeHtml(target)}</strong><br>
+    SKU: ${escapeHtml(lot.sku_name)}<br>
+    Source rack: ${escapeHtml(lot.location_code)} · Destination rack: ${escapeHtml(destination)}<br>
+    Source quantity: <strong>${fmtQtyUom(sourceQty,lot.source_uom)}</strong><br>
+    Expected recovered quantity: <strong>${fmtQtyUom(expected,target)}</strong><br>
+    Actual recovered quantity: <strong>${fmtQtyUom(actual,target)}</strong><br>
+    Shortage / variance: <strong>${fmtQtyUom(variance,target)}</strong><br>
+    Original reason: ${escapeHtml(reason)}
+  `;
+  reasonInput.value='';
+
+  return new Promise((resolve)=>{
+    let settled=false;
+    const cleanup=()=>{
+      form.removeEventListener('submit',onSubmit);
+      closeBtn?.removeEventListener('click',onCancelClick);
+      cancelBtn?.removeEventListener('click',onCancelClick);
+      dialog.removeEventListener('cancel',onDialogCancel);
+    };
+    const finish=(value)=>{
+      if (settled) return;
+      settled=true;
+      cleanup();
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onSubmit=(event)=>{
+      event.preventDefault();
+      const varianceReason=reasonInput.value.trim();
+      if (!varianceReason) return toast('Enter a variance reason / explanation before confirming the shortage.','error');
+      finish(varianceReason);
+    };
+    const onCancelClick=()=>finish(null);
+    const onDialogCancel=(event)=>{ event.preventDefault(); finish(null); };
+
+    form.addEventListener('submit',onSubmit);
+    closeBtn?.addEventListener('click',onCancelClick);
+    cancelBtn?.addEventListener('click',onCancelClick);
+    dialog.addEventListener('cancel',onDialogCancel);
+    dialog.showModal();
+    window.setTimeout(()=>reasonInput.focus(),0);
+  });
+}
+
+async function submitUomConversion(event) {
+  event.preventDefault();
+  const lot=state.uomConversion.selectedLot; if (!lot) return toast('Select a source lot.','error');
+  if (lot.is_releasable===false) return toast('Source lot is ON HOLD and cannot be converted.','error');
+  const target=String($('uomc-target-uom').value||'').toUpperCase();
+  const sourceQty=Number($('uomc-source-qty').value), actual=Number($('uomc-actual-output').value);
+  if (!target||!Number.isInteger(sourceQty)||sourceQty<1||!Number.isInteger(actual)||actual<1) return toast('Enter valid whole source and output quantities.','error');
+  if (sourceQty>Number(lot.qty)) return toast('Source quantity exceeds the available lot balance.','error');
+  const reasonChoice=$('uomc-reason').value, reason=reasonChoice==='OTHER'?$('uomc-other-reason').value.trim():reasonChoice;
+  if (!reason) return toast('Select or enter a reason.','error');
+  const destination=$('uomc-relocate').checked?normalizeLocation($('uomc-destination-rack').value):lot.location_code;
+  if (!destination) return toast('Enter a destination rack.','error');
+  syncUomConversionPreview();
+  const sourceFactor=uomFactor(lot,lot.source_uom), targetFactor=uomFactor(lot,target), isBreak=sourceFactor>targetFactor;
+  const expected=(sourceQty*sourceFactor)/targetFactor;
+  if (!Number.isInteger(expected)) return toast('Configured conversion does not produce whole target units.','error');
+  if (!isBreak && actual!==expected) return toast(`REPACK must create exactly ${expected} ${target}.`,'error');
+  if (isBreak && actual>expected) return toast('Actual recovered quantity cannot exceed expected quantity in V1.','error');
+  const variance=isBreak?expected-actual:0;
+
+  let varianceReason='';
+  if (variance>0) {
+    varianceReason=await requestUomVarianceConfirmation({lot,target,sourceQty,expected,actual,variance,reason,destination});
+    if (!varianceReason) return;
+  }
+
+  const confirmed=window.confirm(`${isBreak?'BREAK':'REPACK'} ${lot.source_uom} → ${target}\n\nSKU: ${lot.sku_name}\nSource rack: ${lot.location_code}\nDestination rack: ${destination}\nContainer: ${lot.container_no}\nExpiry: ${fmtDate(lot.expiry_date)}\n\nSource: ${sourceQty} ${lot.source_uom}\nExpected: ${expected} ${target}\nActual: ${actual} ${target}\nVariance: ${variance} ${target}\n\nReason: ${reason}${varianceReason?`\nVariance reason: ${varianceReason}`:''}\n\nThis will update inventory atomically. Continue?`);
+  if (!confirmed) return;
+  const button=event.submitter; setBusy(button,true,'Converting…');
+  try {
+    const {data,error}=await supabase.rpc('complete_uom_conversion_v1_confirmed',{
+      p_source_lot_id:lot.lot_id,p_target_uom:target,p_source_qty:sourceQty,p_actual_output_qty:actual,
+      p_destination_location_code:destination,p_reason:reason,p_variance_reason:varianceReason||null
+    });
+    if (error) return toast(friendlyError(error),'error');
+    const result=data?.[0]||{}; invalidateReports();
+    toast(`${result.operation||'UOM conversion'} completed${result.transaction_no?` · ${result.transaction_no}`:''}. ${sourceQty} ${lot.source_uom} → ${actual} ${target}${variance?` · variance ${variance}`:''}.`,'success');
+    const rack=$('uomc-source-rack').value; resetUomConversionForm(); $('uomc-source-rack').value=rack; await loadUomConversionSourceLots();
+  } finally { setBusy(button,false); }
+}
+
 function setupStaticEvents() {
   installSkuMasterCreateUi();
+  installUomConversionUi();
   configureCredentialAutofillGuards();
   qsa('[data-auth-tab]').forEach((btn) => btn.addEventListener('click', () => {
     qsa('[data-auth-tab]').forEach((b) => b.classList.toggle('active', b === btn));
@@ -479,6 +824,19 @@ function setupStaticEvents() {
     target.dispatchEvent(new Event('change', { bubbles: true }));
   }));
   qsa('.export-btn').forEach((btn) => btn.addEventListener('click', () => exportDataset(btn.dataset.export)));
+
+  $('uomc-load-source-btn')?.addEventListener('click', loadUomConversionSourceLots);
+  $('uomc-source-lot')?.addEventListener('change', selectUomConversionLot);
+  $('uomc-target-uom')?.addEventListener('change', syncUomConversionPreview);
+  $('uomc-source-qty')?.addEventListener('input', syncUomConversionPreview);
+  $('uomc-actual-output')?.addEventListener('input', syncUomConversionPreview);
+  $('uomc-relocate')?.addEventListener('change', syncUomConversionRelocation);
+  $('uomc-reason')?.addEventListener('change', syncUomConversionReason);
+  $('uomc-form')?.addEventListener('submit', submitUomConversion);
+  $('uomc-clear-btn')?.addEventListener('click', resetUomConversionForm);
+  $('uom-config-close')?.addEventListener('click', () => $('uom-config-dialog')?.close());
+  $('uom-config-form')?.addEventListener('submit', submitUomConfig);
+  ['uom-config-case-enabled','uom-config-pack-enabled','uom-config-piece-enabled'].forEach((id) => $(id)?.addEventListener('change', syncUomConfigInputs));
 
   $('putaway-form').addEventListener('submit', addPutawayItem);
   $('pa-no-expiry').addEventListener('change', () => syncNoExpiryControl('pa-expiry', 'pa-no-expiry'));
@@ -742,6 +1100,8 @@ function setupStaticEvents() {
     if (inventoryHold) toggleInventoryLotHold(inventoryHold.dataset.inventoryHold, inventoryHold.dataset.holdState === 'freeze');
     const skuMasterEdit = event.target.closest('[data-sku-master-edit]');
     if (skuMasterEdit) openSkuMasterEdit(skuMasterEdit.dataset.skuMasterEdit);
+    const uomConfig = event.target.closest('[data-uom-config]');
+    if (uomConfig) openUomConfigDialog(uomConfig.dataset.uomConfig);
     const skuMasterDelete = event.target.closest('[data-sku-master-delete]');
     if (skuMasterDelete) deleteSkuMaster(skuMasterDelete.dataset.skuMasterDelete);
     const skuMasterCreateChildRemove = event.target.closest('[data-smc-remove-content]');
@@ -1135,6 +1495,10 @@ async function refreshCurrentScreen() {
         }
         break;
 
+      case 'uomconversion':
+        if ($('uomc-source-rack')?.value.trim()) await loadUomConversionSourceLots();
+        break;
+
       case 'inventory':
         await loadInventory(true);
         break;
@@ -1196,6 +1560,7 @@ async function loadScreen(name, force = false) {
   try {
     if (name === 'dashboard') await loadDashboard();
     if (name === 'picking') await refreshPickSalesOrderStatus();
+    if (name === 'uomconversion') syncUomConversionPreview();
     if (name === 'inventory') await loadInventory(force);
     if (name === 'physicalcount') await loadPhysicalCount(force);
     if (name === 'stockcard') await loadStockCard(force);
@@ -8816,7 +9181,7 @@ function renderSkuMaster() {
     <td>${escapeHtml(r.piece_barcode)}</td>
     <td>${escapeHtml(r.created_by_username || '—')}</td>
     <td>${fmtDateTime(r.created_at)}</td>
-    ${isAdminOrOwner() ? `<td><div class="button-cluster"><button class="link-btn" type="button" data-sku-master-edit="${escapeHtml(r.id)}">Edit</button><button class="danger ghost" type="button" data-sku-master-delete="${escapeHtml(r.id)}">Delete</button></div></td>` : ''}
+    ${isAdminOrOwner() ? `<td><div class="button-cluster"><button class="link-btn" type="button" data-sku-master-edit="${escapeHtml(r.id)}">Edit</button>${String(r.sku_type || 'STANDARD').toUpperCase() === 'STANDARD' ? `<button class="link-btn" type="button" data-uom-config="${escapeHtml(r.id)}">UOM Setup</button>` : ''}<button class="danger ghost" type="button" data-sku-master-delete="${escapeHtml(r.id)}">Delete</button></div></td>` : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching SKU master records.');
   $('sku-master-count').textContent = `${rows.length.toLocaleString()} of ${state.data.skuMaster.length.toLocaleString()} SKU record(s) shown`;
 }
