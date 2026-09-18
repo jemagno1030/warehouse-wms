@@ -799,7 +799,6 @@ async function submitUomConversion(event) {
 }
 
 function setupStaticEvents() {
-  installSkuMasterBarcodeLessFilterUi();
   installSkuMasterCreateUi();
   installUomConversionUi();
   configureCredentialAutofillGuards();
@@ -983,7 +982,6 @@ function setupStaticEvents() {
 
   $('sku-master-search').addEventListener('input', renderSkuMaster);
   $('sku-master-search').addEventListener('change', renderSkuMaster); // Scanner writes the barcode then dispatches change.
-  $('sku-master-barcode-less-toggle').addEventListener('click', toggleSkuMasterBarcodeLessFilter);
   $('sku-master-create-btn').addEventListener('click', openSkuMasterCreateDialog);
   $('sku-master-create-close').addEventListener('click', closeSkuMasterCreateDialog);
   $('sku-master-create-form').addEventListener('submit', submitSkuMasterCreate);
@@ -8463,41 +8461,6 @@ function reviewSkuHealthInMasterlist(skuId) {
   }, 50);
 }
 
-function installSkuMasterBarcodeLessFilterUi() {
-  if ($('sku-master-barcode-less-toggle')) return;
-  const search = $('sku-master-search');
-  const filters = search?.closest('.filters');
-  if (!filters) return;
-
-  const button = document.createElement('button');
-  button.id = 'sku-master-barcode-less-toggle';
-  button.type = 'button';
-  button.className = 'secondary';
-  button.setAttribute('aria-pressed', 'false');
-  button.textContent = 'Barcode-less Only';
-  filters.appendChild(button);
-}
-
-function skuMasterBarcodeLessFilterActive() {
-  return $('sku-master-barcode-less-toggle')?.getAttribute('aria-pressed') === 'true';
-}
-
-function isSkuMasterBarcodeLess(row) {
-  return ['case_barcode', 'pack_barcode', 'piece_barcode']
-    .every((field) => String(row?.[field] || '').trim().toUpperCase() === 'N/A');
-}
-
-function toggleSkuMasterBarcodeLessFilter() {
-  const button = $('sku-master-barcode-less-toggle');
-  if (!button) return;
-  const active = !skuMasterBarcodeLessFilterActive();
-  button.setAttribute('aria-pressed', active ? 'true' : 'false');
-  button.classList.toggle('primary', active);
-  button.classList.toggle('secondary', !active);
-  button.textContent = active ? '✓ Barcode-less Only' : 'Barcode-less Only';
-  renderSkuMaster();
-}
-
 function installSkuMasterCreateUi() {
   if ($('sku-master-create-dialog')) return;
 
@@ -9196,15 +9159,11 @@ function renderSkuMaster() {
   if (!isSupervisor()) return;
   if ($('sku-master-create-btn')) $('sku-master-create-btn').classList.toggle('hidden', !isAdminOrOwner());
   const term = $('sku-master-search').value.trim().toLowerCase();
-  const barcodeLessOnly = skuMasterBarcodeLessFilterActive();
-  const rows = state.data.skuMaster.filter((r) => {
-    const matchesSearch = [
-      r.brand, r.description, r.variant, r.size,
-      r.case_barcode, r.pack_barcode, r.piece_barcode, r.sku_type,
-      r.created_by_username
-    ].join(' ').toLowerCase().includes(term);
-    return matchesSearch && (!barcodeLessOnly || isSkuMasterBarcodeLess(r));
-  });
+  const rows = state.data.skuMaster.filter((r) => [
+    r.brand, r.description, r.variant, r.size,
+    r.case_barcode, r.pack_barcode, r.piece_barcode, r.sku_type,
+    r.created_by_username
+  ].join(' ').toLowerCase().includes(term));
 
   const actionHeader = isAdminOrOwner() ? '<th>Admin / Owner action</th>' : '';
   $('sku-master-table').innerHTML = rows.length ? `<table><thead><tr>
@@ -9224,7 +9183,7 @@ function renderSkuMaster() {
     <td>${fmtDateTime(r.created_at)}</td>
     ${isAdminOrOwner() ? `<td><div class="button-cluster"><button class="link-btn" type="button" data-sku-master-edit="${escapeHtml(r.id)}">Edit</button>${String(r.sku_type || 'STANDARD').toUpperCase() === 'STANDARD' ? `<button class="link-btn" type="button" data-uom-config="${escapeHtml(r.id)}">UOM Setup</button>` : ''}<button class="danger ghost" type="button" data-sku-master-delete="${escapeHtml(r.id)}">Delete</button></div></td>` : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching SKU master records.');
-  $('sku-master-count').textContent = `${rows.length.toLocaleString()} of ${state.data.skuMaster.length.toLocaleString()} SKU record(s) shown${barcodeLessOnly ? ' · Barcode-less only' : ''}`;
+  $('sku-master-count').textContent = `${rows.length.toLocaleString()} of ${state.data.skuMaster.length.toLocaleString()} SKU record(s) shown`;
 }
 
 function openSkuMasterEdit(skuId) {
