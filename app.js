@@ -11189,12 +11189,18 @@ async function openFullResetDialog() {
 
       <strong>Preserved</strong><br>
       Owner accounts preserved: <strong>${Number(row.owner_accounts || 0).toLocaleString()}</strong><br>
-      Rack/location master, System Control configuration, System Manager/Cron, database schema/functions/views/RLS/indexes: <strong>PRESERVED</strong><br><br>
+      Rack/location master: <strong>${Number(row.locations_total || 0).toLocaleString()}</strong> total ·
+      ${Number(row.active_physical_racks || 0).toLocaleString()} active physical ·
+      ${Number(row.inactive_physical_racks || 0).toLocaleString()} inactive physical ·
+      ${Number(row.active_pending_locations || 0).toLocaleString()} active pending<br>
+      <small>V2 verifies the exact rack/location UUID, code, name/layout, active/inactive state, and pending state. Inactive physical rack identities/code reservations are preserved.</small><br>
+      System Control configuration, System Manager/Cron, database schema/functions/views/RLS/indexes: <strong>PRESERVED</strong><br><br>
 
       <strong>Core WMS data removed</strong><br>
       Non-Owner Auth users: <strong>${Number(row.non_owner_auth_users || 0).toLocaleString()}</strong><br>
       Non-Owner profiles: <strong>${Number(row.non_owner_profiles || 0).toLocaleString()}</strong><br>
       SKU records: <strong>${Number(row.sku_records || 0).toLocaleString()}</strong><br>
+      UOM conversion configurations: <strong>${Number(row.sku_uom_conversion_configs || 0).toLocaleString()}</strong><br>
       Stock lots: <strong>${Number(row.stock_lots || 0).toLocaleString()}</strong><br>
       Shipper boxes: <strong>${Number(row.shipper_boxes || 0).toLocaleString()}</strong><br>
       Transactions: <strong>${Number(row.transactions || 0).toLocaleString()}</strong><br>
@@ -11219,7 +11225,7 @@ async function openFullResetDialog() {
       Barcode-bypass execution lines: <strong>${Number(row.barcode_bypass_execution_lines || 0).toLocaleString()}</strong><br>
       Administrative / Full Reset attempt rows: <strong>${Number(row.control_code_attempts || 0).toLocaleString()}</strong><br><br>
 
-      <strong>VNext atomic safety:</strong> RESET_COMPLETE is returned only after all expected operational tables are verified empty, Owner/rack/system structure is verified preserved, and mode is verified as ADMINISTRATIVE_PAUSE.`;
+      <strong>VNext V2 atomic safety:</strong> RESET_COMPLETE is returned only after expected operational tables (including UOM conversion setup) are verified empty, exact Owner/rack identity is verified preserved, UOM/Physical-Rack infrastructure is verified unchanged, and mode is verified as ADMINISTRATIVE_PAUSE.`;
 
     $('full-reset-pin').value = '';
     $('full-reset-understand').checked = false;
@@ -11259,7 +11265,7 @@ async function submitFullReset(event) {
 
   const finalConfirm = window.confirm(
     'FINAL CONFIRMATION\n\n' +
-    'This will permanently clear the WMS SKU Masterlist, current inventory, containers, Shipper data, Sales Orders, ' +
+    'This will permanently clear the WMS SKU Masterlist, UOM conversion setup, current inventory, containers, Shipper data, Sales Orders, ' +
     'Transaction History, System Audit Events, other operational reports, and every non-Owner user account.\n\n' +
     'Owner accounts, rack locations, system configuration, and database structure will remain.\n\n' +
     'Continue with FULL RESET?'
@@ -11304,7 +11310,8 @@ async function submitFullReset(event) {
       Audit events deleted: ${Number(row.audit_events_deleted || 0).toLocaleString()}<br>
       Sales Orders deleted: ${Number(row.sales_orders_deleted || 0).toLocaleString()} ·
       Rack locks deleted: ${Number(row.location_locks_deleted || 0).toLocaleString()}<br>
-      <strong>VNext post-reset integrity verification: PASSED.</strong><br>
+      UOM conversion configuration: cleared with SKU Master and verified empty.<br>
+      <strong>VNext V2 post-reset integrity verification: PASSED.</strong><br>
       <strong>System remains in Administrative Pause.</strong> Inspect the blank system before Operational Resume.`;
     $('full-reset-result').classList.remove('hidden');
 
