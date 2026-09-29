@@ -340,6 +340,7 @@ function installUi() {
             <button id="rcv-report-refresh" type="button" class="secondary">Apply filters</button>
             <button id="rcv-report-reset" type="button" class="ghost">Reset filters</button>
             <button id="rcv-report-export" type="button" class="secondary">Export filtered CSV</button>
+            <button id="rcv-report-print" type="button" class="secondary">Print Report</button>
           </div>
         </div>
 
@@ -427,6 +428,7 @@ function bindEvents() {
   $('rcv-report-refresh')?.addEventListener('click', () => void loadReport().catch((error) => toast(friendlyError(error), 'error')));
   $('rcv-report-reset')?.addEventListener('click', resetReportFilters);
   $('rcv-report-export')?.addEventListener('click', exportReport);
+  $('rcv-report-print')?.addEventListener('click', () => void printReceivingReport());
 
   // Receiving V1 is additive and the base app does not know it as a native screen.
   // Clear the Receiving-active marker only when the user explicitly navigates to
@@ -1274,6 +1276,200 @@ function resetReportFilters() {
     .forEach((id) => { if ($(id)) $(id).value = ''; });
 
   void loadReport().catch((error) => toast(friendlyError(error), 'error'));
+}
+
+function reportPrintFilterItems() {
+  const items = [];
+  const addSelect = (id, label) => {
+    const node = $(id);
+    if (!node?.value) return;
+    const text = node.selectedOptions?.[0]?.textContent?.trim() || node.value;
+    items.push(`${label}: ${text}`);
+  };
+  const addText = (id, label) => {
+    const value = String($(id)?.value || '').trim();
+    if (value) items.push(`${label}: ${value}`);
+  };
+
+  addSelect('rcv-report-type', 'Type');
+  addSelect('rcv-report-status', 'Receipt status');
+  addSelect('rcv-report-putaway-status', 'Put-away status');
+  addText('rcv-report-document', 'Document');
+  addText('rcv-report-customer', 'Customer');
+  addText('rcv-report-sku', 'SKU / barcode');
+  addText('rcv-report-container', 'Container');
+
+  const expiryFrom = $('rcv-report-expiry-from')?.value || '';
+  const expiryTo = $('rcv-report-expiry-to')?.value || '';
+  if (expiryFrom || expiryTo) {
+    items.push(`Expiry: ${expiryFrom || 'Any'} to ${expiryTo || 'Any'}`);
+  }
+
+  addSelect('rcv-report-user', 'Receiving user');
+  addText('rcv-report-rack', 'Destination rack');
+
+  return items;
+}
+
+function receivingReportPrintSummary(rows) {
+  const receipts = new Set(rows.map((row) => row.receipt_id)).size;
+  const backloads = new Set(
+    rows.filter((row) => row.receipt_type === 'BACKLOAD_RETURN').map((row) => row.receipt_id)
+  ).size;
+  const pendingLines = rows.filter((row) => row.putaway_status !== 'PUTAWAY_COMPLETE').length;
+  const allocationCount = rows.reduce((sum, row) => sum + Number(row.allocation_count || 0), 0);
+  return { receipts, backloads, pendingLines, allocationCount };
+}
+
+function allocationHistoryPrintHtml(row) {
+  const allocations = allocationHistoryRows(row);
+  if (!allocations.length) return '—';
+  return allocations.map((allocation) => {
+    const qty = [
+      Number(allocation.case_qty) ? `CASE ${fmtQty(allocation.case_qty)}` : '',
+      Number(allocation.pack_qty) ? `PACK ${fmtQty(allocation.pack_qty)}` : '',
+      Number(allocation.piece_qty) ? `PIECE ${fmtQty(allocation.piece_qty)}` : ''
+    ].filter(Boolean).join(' · ');
+    const details = [allocation.putaway_transaction_no, allocation.putaway_by_username]
+      .filter(Boolean).join(' · ');
+    return `<div class="allocation"><strong>${escapeHtml(allocation.destination_rack || '—')}</strong> · ${escapeHtml(qty || '0')}${details ? `<br><span>${escapeHtml(details)}</span>` : ''}</div>`;
+  }).join('');
+}
+
+async function printReceivingReport() {
+  const printWindow = window.open('', '_blank');
+  if (!printWindow) {
+    toast('Printer-friendly report could not open. Allow pop-ups for this WMS site and try again.', 'error');
+    return;
+  }
+
+  try {
+    printWindow.document.write('<!doctype html><title>Preparing Receiving Report…</title><p style="font-family:Arial,sans-serif">Preparing Receiving Report…</p>');
+    printWindow.document.close();
+
+    // Re-run the report first so the printout always reflects the filter fields
+    // currently visible to the user, even if Apply filters was not clicked.
+    await loadReport();
+
+    const rows = state.reportRows || [];
+    if (!rows.length) {
+      printWindow.close();
+      toast('There is no Receiving data to print for the current filters.', 'error');
+      return;
+    }
+
+    const filters = reportPrintFilterItems();
+    const summary = receivingReportPrintSummary(rows);
+    const generatedAt = new Date().toLocaleString();
+    const filterHtml = filters.length
+      ? filters.map((item) => `<span class="filter-chip">${escapeHtml(item)}</span>`).join('')
+      : '<span class="filter-chip">No filters — all Receiving records</span>';
+
+    const bodyRows = rows.map((row) => {
+      const documentText = [row.document_type, row.document_number].filter(Boolean).join(' ');
+      const customerText = row.intended_customer_name || '';
+      const sourceText = row.source_name || '';
+      const receiptMeta = [sourceText, documentText, customerText].filter(Boolean).join(' · ');
+      const skuText = [row.brand, row.description, row.variant, row.size].filter(Boolean).join(' ');
+      const remark = row.user_remark || '';
+      return `<tr>
+        <td><strong>${escapeHtml(row.receipt_no || '')}</strong><br><span>${escapeHtml(row.receipt_type === 'BACKLOAD_RETURN' ? 'Backload Return' : 'Regular Delivery')}</span><br><span>${escapeHtml(row.receipt_status || '')}</span></td>
+        <td>${escapeHtml(fmtDateTime(row.received_at))}<br><span>${escapeHtml(row.received_by_username || '')}</span></td>
+        <td>${escapeHtml(receiptMeta || '—')}${row.return_reason ? `<br><span>Return: ${escapeHtml(row.return_reason)}</span>` : ''}</td>
+        <td><strong>${escapeHtml(skuText || '—')}</strong></td>
+        <td>${escapeHtml(row.container_no || '—')}<br><span>Expiry: ${escapeHtml(fmtDate(row.expiry_date))}</span></td>
+        <td>${escapeHtml(qtyText(row) || '0')}</td>
+        <td>${escapeHtml(qtyTextByPrefix(row, 'putaway_'))}</td>
+        <td>${escapeHtml(qtyTextByPrefix(row, 'remaining_'))}</td>
+        <td>${escapeHtml(row.putaway_status || '')}<br><span>${Number(row.allocation_count || 0)} allocation(s)</span></td>
+        <td>${allocationHistoryPrintHtml(row)}</td>
+        <td>${escapeHtml(remark || '—')}</td>
+      </tr>`;
+    }).join('');
+
+    const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Receiving Report</title>
+<style>
+  @page { size: Letter landscape; margin: 9mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: #111; font-family: Arial, Helvetica, sans-serif; font-size: 8px; line-height: 1.25; }
+  h1 { margin: 0 0 2px; font-size: 16px; }
+  .subtitle { margin: 0 0 7px; font-size: 9px; }
+  .meta { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 6px; font-size: 8px; }
+  .summary { display: flex; gap: 6px; flex-wrap: wrap; margin: 5px 0 6px; }
+  .summary span, .filter-chip { border: 1px solid #777; border-radius: 3px; padding: 2px 5px; }
+  .filters { display: flex; gap: 4px; flex-wrap: wrap; margin: 5px 0 8px; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; page-break-inside: avoid; }
+  th, td { border: 1px solid #777; padding: 3px 4px; vertical-align: top; overflow-wrap: anywhere; word-break: break-word; }
+  th { background: #eee; font-size: 7.5px; text-align: left; }
+  td span, .allocation span { font-size: 7px; color: #333; }
+  .allocation { margin-bottom: 3px; }
+  .allocation:last-child { margin-bottom: 0; }
+  .footer-note { margin-top: 6px; font-size: 7px; }
+  th:nth-child(1), td:nth-child(1) { width: 9%; }
+  th:nth-child(2), td:nth-child(2) { width: 8%; }
+  th:nth-child(3), td:nth-child(3) { width: 12%; }
+  th:nth-child(4), td:nth-child(4) { width: 12%; }
+  th:nth-child(5), td:nth-child(5) { width: 8%; }
+  th:nth-child(6), td:nth-child(6) { width: 8%; }
+  th:nth-child(7), td:nth-child(7) { width: 8%; }
+  th:nth-child(8), td:nth-child(8) { width: 8%; }
+  th:nth-child(9), td:nth-child(9) { width: 8%; }
+  th:nth-child(10), td:nth-child(10) { width: 11%; }
+  th:nth-child(11), td:nth-child(11) { width: 8%; }
+  @media print {
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+  <h1>IFTC Warehouse Locator System (JPM) — Receiving Report</h1>
+  <div class="meta"><span>Generated: ${escapeHtml(generatedAt)}</span><span>Printed rows: ${rows.length}</span></div>
+  <div class="summary">
+    <span>${summary.receipts} receipt(s)</span>
+    <span>${rows.length} received line(s)</span>
+    <span>${summary.allocationCount} Put-away allocation(s)</span>
+    <span>${summary.backloads} Backload receipt(s)</span>
+    <span>${summary.pendingLines} line(s) with remaining qty</span>
+  </div>
+  <div class="filters">${filterHtml}</div>
+  <table>
+    <thead><tr>
+      <th>Receipt / Type / Status</th>
+      <th>Received / User</th>
+      <th>Source / Document / Customer</th>
+      <th>SKU</th>
+      <th>Container / Expiry</th>
+      <th>Received Qty</th>
+      <th>Put-away Qty</th>
+      <th>Remaining Qty</th>
+      <th>Put-away Status</th>
+      <th>Allocation History</th>
+      <th>Line Remark</th>
+    </tr></thead>
+    <tbody>${bodyRows}</tbody>
+  </table>
+  <div class="footer-note">Printer-friendly Receiving Report · All rows matching the current report filters are included.</div>
+<script>
+  window.addEventListener('load', function () {
+    setTimeout(function () { window.print(); }, 150);
+  });
+<\/script>
+</body>
+</html>`;
+
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
+  } catch (error) {
+    try { printWindow.close(); } catch (_) {}
+    toast(`Receiving report print failed: ${friendlyError(error)}`, 'error');
+  }
 }
 
 function csvCell(value) {
