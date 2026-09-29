@@ -275,6 +275,8 @@ const state = {
   selectedQrLocations: new Set(),
   accountAccessTimer: null,
   warehouseApproval: null,
+  specialPutawayAccessPending: false,
+  specialPutawayGateBypass: false,
   containerReport: { containerNo: null, rows: [], mode: 'rack' }
 };
 
@@ -1431,6 +1433,43 @@ function saveCurrentScreen(name) {
   try { localStorage.setItem(key, name); } catch (_) { /* Browser storage can be unavailable. */ }
 }
 
+const SPECIAL_PUTAWAY_WARNING =
+  'This module is reserved for special situations only.\n' +
+  'Regular put-away can be found under RECEIVING module.\n' +
+  'Do you still want to open this module?';
+
+async function requestSpecialPutawayAccess() {
+  if (state.specialPutawayAccessPending) return;
+  if (!state.session?.user?.id) return toast('Your WMS session is no longer active. Sign in again.', 'error');
+
+  const confirmed = window.confirm(SPECIAL_PUTAWAY_WARNING);
+  if (!confirmed) return;
+
+  state.specialPutawayAccessPending = true;
+  try {
+    const approval = await requestWarehouseApproval({
+      title: 'Special Put-away access',
+      contextHtml: `
+        <strong>This module is reserved for special situations only.</strong><br>
+        Regular put-away can be found under <strong>RECEIVING</strong> module.<br><br>
+        Enter the WMS login email and password of an active <strong>Supervisor, Admin, or Owner</strong> to continue.
+        This access grant will be recorded in Audit History.
+      `,
+      rpcName: 'approve_special_putaway_access_v1',
+      rpcArgs: { p_requested_by: state.session.user.id },
+      confirmLabel: 'OPEN PUT-AWAY'
+    });
+
+    if (!approval) return;
+
+    state.specialPutawayGateBypass = true;
+    showScreen('putaway');
+  } finally {
+    state.specialPutawayGateBypass = false;
+    state.specialPutawayAccessPending = false;
+  }
+}
+
 function canOpenScreen(name) {
   if (!name || !screenMeta[name] || !$(`screen-${name}`)) return false;
   if (isViewer() && !VIEWER_SCREENS.has(name)) return false;
@@ -1443,6 +1482,11 @@ function canOpenScreen(name) {
 }
 
 function showScreen(name) {
+  if (name === 'putaway' && !state.specialPutawayGateBypass) {
+    void requestSpecialPutawayAccess();
+    return;
+  }
+
   // Never leave an administrative control code in the DOM after leaving the screen.
   if (state.currentScreen === 'control' && name !== 'control') clearAdministrativeCodeField();
 
