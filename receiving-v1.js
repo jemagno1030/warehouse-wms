@@ -511,8 +511,9 @@ function bindEvents() {
   $('rcv-receipt-form')?.addEventListener('submit', submitReceipt);
   $('rcv-reset-receipt-btn')?.addEventListener('click', resetReceiptForm);
   $('rcv-pending-receipt')?.addEventListener('change', renderPendingLines);
-  $('rcv-select-all-lines')?.addEventListener('click', () => qsa('#rcv-pending-lines [data-rcv-pending-line]').forEach((node) => { node.checked = true; }));
-  $('rcv-clear-line-selection')?.addEventListener('click', () => qsa('#rcv-pending-lines [data-rcv-pending-line]').forEach((node) => { node.checked = false; }));
+  $('rcv-select-all-lines')?.addEventListener('click', selectAllPendingLines);
+  $('rcv-clear-line-selection')?.addEventListener('click', clearPendingLineSelection);
+  $('rcv-pending-lines')?.addEventListener('change', handlePendingLineSelectionChange);
   $('rcv-putaway-form')?.addEventListener('submit', submitPutaway);
   $('rcv-report-refresh')?.addEventListener('click', () => void loadReport().catch((error) => toast(friendlyError(error), 'error')));
   $('rcv-report-reset')?.addEventListener('click', resetReportFilters);
@@ -1166,7 +1167,7 @@ function renderPendingLines() {
     return `
       <div class="rcv-allocation-row" data-rcv-allocation-row="${escapeHtml(row.receipt_line_id)}">
         <label>
-          <input type="checkbox" data-rcv-pending-line="${escapeHtml(row.receipt_line_id)}" checked />
+          <input type="checkbox" data-rcv-pending-line="${escapeHtml(row.receipt_line_id)}" />
           <span>
             <strong>${escapeHtml([row.brand, row.description, row.variant, row.size].filter(Boolean).join(' '))}</strong><br>
             ${escapeHtml(row.container_no)} · ${escapeHtml(fmtDate(row.expiry_date))}
@@ -1181,20 +1182,56 @@ function renderPendingLines() {
         <div class="rcv-qty-grid">
           <label>CASE to rack
             <input type="number" min="0" max="${remainingCase}" step="1" inputmode="numeric"
-              data-rcv-allocation-case value="${remainingCase}" ${remainingCase <= 0 ? 'disabled' : ''} />
+              data-rcv-allocation-case value="0" ${remainingCase <= 0 ? 'disabled' : ''} />
           </label>
           <label>PACK to rack
             <input type="number" min="0" max="${remainingPack}" step="1" inputmode="numeric"
-              data-rcv-allocation-pack value="${remainingPack}" ${remainingPack <= 0 ? 'disabled' : ''} />
+              data-rcv-allocation-pack value="0" ${remainingPack <= 0 ? 'disabled' : ''} />
           </label>
           <label>PIECE to rack
             <input type="number" min="0" max="${remainingPiece}" step="1" inputmode="numeric"
-              data-rcv-allocation-piece value="${remainingPiece}" ${remainingPiece <= 0 ? 'disabled' : ''} />
+              data-rcv-allocation-piece value="0" ${remainingPiece <= 0 ? 'disabled' : ''} />
           </label>
         </div>
       </div>
     `;
   }).join('');
+}
+
+function setPendingAllocationInputs(rowNode, useMaximum) {
+  if (!rowNode) return;
+  for (const selector of [
+    '[data-rcv-allocation-case]',
+    '[data-rcv-allocation-pack]',
+    '[data-rcv-allocation-piece]'
+  ]) {
+    const input = rowNode.querySelector(selector);
+    if (!input) continue;
+    input.value = useMaximum ? String(Number(input.max || 0)) : '0';
+  }
+}
+
+function selectAllPendingLines() {
+  qsa('#rcv-pending-lines [data-rcv-allocation-row]').forEach((rowNode) => {
+    const checkbox = rowNode.querySelector('[data-rcv-pending-line]');
+    if (!checkbox) return;
+    checkbox.checked = true;
+    setPendingAllocationInputs(rowNode, true);
+  });
+}
+
+function clearPendingLineSelection() {
+  qsa('#rcv-pending-lines [data-rcv-allocation-row]').forEach((rowNode) => {
+    const checkbox = rowNode.querySelector('[data-rcv-pending-line]');
+    if (checkbox) checkbox.checked = false;
+    setPendingAllocationInputs(rowNode, false);
+  });
+}
+
+function handlePendingLineSelectionChange(event) {
+  const checkbox = event.target.closest('[data-rcv-pending-line]');
+  if (!checkbox || checkbox.checked) return;
+  setPendingAllocationInputs(checkbox.closest('[data-rcv-allocation-row]'), false);
 }
 
 async function submitPutaway(event) {
