@@ -372,8 +372,8 @@ function installUi() {
           <label>Customer search<input id="rcv-report-customer" autocomplete="off" /></label>
           <label>SKU / barcode search<input id="rcv-report-sku" autocomplete="off" /></label>
           <label>Container search<input id="rcv-report-container" autocomplete="off" /></label>
-          <label>Expiry from<input id="rcv-report-expiry-from" type="date" /></label>
-          <label>Expiry to<input id="rcv-report-expiry-to" type="date" /></label>
+          <label>Received date from<input id="rcv-report-received-from" type="date" /></label>
+          <label>Received date to<input id="rcv-report-received-to" type="date" /></label>
           <label>Receiving user<select id="rcv-report-user"><option value="">All users</option></select></label>
           <label>Destination rack<input id="rcv-report-rack" autocomplete="off" /></label>
         </div>
@@ -1191,14 +1191,20 @@ async function submitPutaway(event) {
 }
 
 function reportArgs() {
+  const receivedFrom = $('rcv-report-received-from')?.value || '';
+  const receivedTo = $('rcv-report-received-to')?.value || '';
+  if (receivedFrom && receivedTo && receivedFrom > receivedTo) {
+    throw new Error('Received date From cannot be later than Received date To.');
+  }
+
   return {
     p_receipt_type: $('rcv-report-type')?.value || null,
     p_document_search: $('rcv-report-document')?.value.trim() || null,
     p_customer_search: $('rcv-report-customer')?.value.trim() || null,
     p_sku_search: $('rcv-report-sku')?.value.trim() || null,
     p_container_search: $('rcv-report-container')?.value.trim() || null,
-    p_expiry_from: $('rcv-report-expiry-from')?.value || null,
-    p_expiry_to: $('rcv-report-expiry-to')?.value || null,
+    p_received_from: $('rcv-report-received-from')?.value || null,
+    p_received_to: $('rcv-report-received-to')?.value || null,
     p_status: $('rcv-report-status')?.value || null,
     p_receiving_user: $('rcv-report-user')?.value || null,
     p_putaway_status: $('rcv-report-putaway-status')?.value || null,
@@ -1210,7 +1216,7 @@ async function loadReport() {
   if (!state.session || !$('rcv-report-table')) return;
 
   const { data, error } = await supabase.rpc(
-    'get_inbound_receiving_report_v1_1',
+    'get_inbound_receiving_report_v1_2',
     reportArgs()
   );
 
@@ -1272,7 +1278,7 @@ function resetReportFilters() {
     .forEach((id) => { if ($(id)) $(id).value = ''; });
 
   ['rcv-report-document', 'rcv-report-customer', 'rcv-report-sku', 'rcv-report-container',
-   'rcv-report-expiry-from', 'rcv-report-expiry-to', 'rcv-report-rack']
+   'rcv-report-received-from', 'rcv-report-received-to', 'rcv-report-rack']
     .forEach((id) => { if ($(id)) $(id).value = ''; });
 
   void loadReport().catch((error) => toast(friendlyError(error), 'error'));
@@ -1299,10 +1305,10 @@ function reportPrintFilterItems() {
   addText('rcv-report-sku', 'SKU / barcode');
   addText('rcv-report-container', 'Container');
 
-  const expiryFrom = $('rcv-report-expiry-from')?.value || '';
-  const expiryTo = $('rcv-report-expiry-to')?.value || '';
-  if (expiryFrom || expiryTo) {
-    items.push(`Expiry: ${expiryFrom || 'Any'} to ${expiryTo || 'Any'}`);
+  const receivedFrom = $('rcv-report-received-from')?.value || '';
+  const receivedTo = $('rcv-report-received-to')?.value || '';
+  if (receivedFrom || receivedTo) {
+    items.push(`Received date: ${receivedFrom || 'Any'} to ${receivedTo || 'Any'}`);
   }
 
   addSelect('rcv-report-user', 'Receiving user');
