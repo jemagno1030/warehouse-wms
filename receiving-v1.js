@@ -122,6 +122,8 @@ function installStyles() {
     #screen-receiving .rcv-line-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}
     #screen-receiving .rcv-qty-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
     #screen-receiving .rcv-table-actions{display:flex;gap:8px;flex-wrap:wrap}
+    #screen-receiving #rcv-putaway-btn{background:#22c55e;color:#052e16;border-color:#16a34a;font-weight:800}
+    #screen-receiving #rcv-putaway-btn:hover{background:#16a34a;color:#052e16}
     #screen-receiving .rcv-status-note{margin-top:8px}
     #screen-receiving .rcv-danger{color:#9f1239;font-weight:700}
     #screen-receiving .rcv-good{color:#166534;font-weight:700}
@@ -402,7 +404,7 @@ function installUi() {
             <div id="rcv-pending-meta" class="small-note"></div>
             <div id="rcv-pending-lines" class="rcv-pending-lines"></div>
             <div class="rcv-table-actions">
-              <button id="rcv-select-all-lines" type="button" class="secondary">Select all pending</button>
+              <button id="rcv-select-all-lines" type="button" class="ghost">Select all pending</button>
               <button id="rcv-clear-line-selection" type="button" class="ghost">Clear selection</button>
             </div>
             <label>Destination rack *
@@ -411,7 +413,7 @@ function installUi() {
                 <button type="button" class="secondary" data-rcv-scan-target="rcv-destination-rack" data-rcv-scan-kind="location">Scan</button>
               </div>
             </label>
-            <button id="rcv-putaway-btn" type="submit">Put-away allocated quantities</button>
+            <button id="rcv-putaway-btn" type="submit" class="ghost">Put-away allocated quantities</button>
           </form>
         </div>
       </div>
@@ -1212,7 +1214,12 @@ function setPendingAllocationInputs(rowNode, useMaximum) {
 }
 
 function selectAllPendingLines() {
-  qsa('#rcv-pending-lines [data-rcv-allocation-row]').forEach((rowNode) => {
+  const rows = qsa('#rcv-pending-lines [data-rcv-allocation-row]');
+  if (!rows.length) return;
+
+  if (!window.confirm('This will move ALL quantity of checked items to the destination rack. ARE YOU SURE?')) return;
+
+  rows.forEach((rowNode) => {
     const checkbox = rowNode.querySelector('[data-rcv-pending-line]');
     if (!checkbox) return;
     checkbox.checked = true;
