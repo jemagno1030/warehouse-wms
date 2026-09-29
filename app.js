@@ -16,8 +16,8 @@ const supabase = configReady
 const $ = (id) => document.getElementById(id);
 const qsa = (selector, root = document) => [...root.querySelectorAll(selector)];
 const fmtQty = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 3 });
-const NO_EXPIRY_DATE = '9999-12-31';
-const isNoExpiryDate = (value) => String(value || '').slice(0, 10) === NO_EXPIRY_DATE;
+const LEGACY_NO_EXPIRY_DATE = '9999-12-31';
+const isNoExpiryDate = (value) => value === null || String(value || '').slice(0, 10) === LEGACY_NO_EXPIRY_DATE;
 const fmtDate = (value) => isNoExpiryDate(value) ? 'N/A' : value ? new Date(`${String(value).slice(0, 10)}T00:00:00`).toLocaleDateString() : '—';
 const fmtDateTime = (value) => value ? new Date(value).toLocaleString() : '—';
 
@@ -76,7 +76,16 @@ function parsePickContainerSequence(value) {
 }
 
 function pickExpiryKey(value) {
+  if (isNoExpiryDate(value)) return '';
   return String(value || '').slice(0, 10);
+}
+
+function isFefoLaterThan(selectedExpiry, recommendedExpiry) {
+  const recommended = pickExpiryKey(recommendedExpiry);
+  if (!recommended) return false;
+  const selected = pickExpiryKey(selectedExpiry);
+  if (!selected) return true;
+  return selected > recommended;
 }
 
 function pickPriorityRecommendation(lot, rows, queuedByLot = new Map()) {
@@ -132,8 +141,6 @@ function pickPriorityRecommendation(lot, rows, queuedByLot = new Map()) {
   const selectedExpiry = pickExpiryKey(lot.expiry_date);
   const selectedContainer = parsePickContainerSequence(lot.container_no);
   const containerSuggested = Boolean(
-    selectedExpiry &&
-    earliestExpiry &&
     selectedExpiry === earliestExpiry &&
     selectedContainer &&
     suggestedEntry &&
@@ -799,6 +806,7 @@ async function submitUomConversion(event) {
 }
 
 function setupStaticEvents() {
+  ensureInventoryAdjustNoExpiryUi();
   installSkuMasterBarcodeLessFilterUi();
   installSkuMasterCreateUi();
   installUomConversionUi();
@@ -1057,6 +1065,7 @@ function setupStaticEvents() {
   $('edit-close').addEventListener('click', () => $('edit-dialog').close());
   $('edit-transaction-form').addEventListener('submit', submitSupervisorEdit);
   $('inventory-adjust-close').addEventListener('click', () => $('inventory-adjust-dialog').close());
+  $('inventory-adjust-no-expiry')?.addEventListener('change', syncInventoryAdjustNoExpiry);
   $('inventory-adjust-form').addEventListener('submit', submitInventoryLotEdit);
   $('inventory-remarks-close').addEventListener('click', () => $('inventory-remarks-dialog').close());
   $('inventory-remarks-form').addEventListener('submit', submitInventoryRemarksEdit);
@@ -2528,7 +2537,7 @@ function putawayLinePayload() {
     variant: $('pa-variant').value.trim(),
     size: $('pa-size').value.trim(),
     container_no: $('pa-container').value.trim(),
-    expiry_date: $('pa-no-expiry').checked ? NO_EXPIRY_DATE : $('pa-expiry').value,
+    expiry_date: $('pa-no-expiry').checked ? null : $('pa-expiry').value,
     piece_qty: Number($('pa-piece-qty').value || 0),
     pack_qty: Number($('pa-pack-qty').value || 0),
     case_qty: Number($('pa-case-qty').value || 0),
@@ -2963,7 +2972,8 @@ async function addShipperContentLine() {
   try {
     await resolveShipperContentSku();
     const pack = normalizeBarcode($('sp-content-pack').value);
-    const expiry = $('sp-content-no-expiry').checked ? NO_EXPIRY_DATE : $('sp-content-expiry').value;
+    const noExpiry = $('sp-content-no-expiry').checked;
+    const expiry = noExpiry ? null : $('sp-content-expiry').value;
     const rawQty = String($('sp-content-qty').value || '').trim();
     const qty = Number(rawQty);
     const brand = $('sp-content-brand').value.trim();
@@ -2971,7 +2981,7 @@ async function addShipperContentLine() {
     const variant = $('sp-content-variant').value.trim();
     const size = $('sp-content-size').value.trim();
     if (!pack || pack === 'N/A') return toast('Enter the actual PACK barcode for this Shipper content line.', 'error');
-    if (!expiry) return toast('Enter the expiry date, or select No expiry (N/A), for this Shipper content line.', 'error');
+    if (!noExpiry && !expiry) return toast('Enter the expiry date, or select No expiry (N/A), for this Shipper content line.', 'error');
     if (!/^\d+$/.test(rawQty) || !Number.isSafeInteger(qty) || qty <= 0) return toast('PACK quantity must be a whole number greater than zero.', 'error');
     if (!brand || !description || !variant || !size) return toast('Brand, description, variant, and size are required for the content SKU.', 'error');
 
@@ -4175,8 +4185,8 @@ async function addSupervisorBarcodeBypass(lotId) {
     queuedByLot.set(line.lot_id, (queuedByLot.get(line.lot_id) || 0) + Number(line.qty || 0));
   });
   const priority = pickPriorityRecommendation(lot, fefoRows || [], queuedByLot);
-  const earliestSameUnit = priority.earliestExpiry || lot.expiry_date;
-  const fefoOverrideConfirmed = Boolean(earliestSameUnit && lot.expiry_date > earliestSameUnit);
+  const earliestSameUnit = priority.earliestExpiry ?? lot.expiry_date;
+  const fefoOverrideConfirmed = isFefoLaterThan(lot.expiry_date, earliestSameUnit);
   if (fefoOverrideConfirmed && !window.confirm(buildFefoOverrideConfirmMessage(lot, priority))) {
     return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
   }
@@ -4251,7 +4261,7 @@ function updatePickFefoNote() {
 
   // Priority 1: existing FEFO rule. If a genuinely earlier expiry exists,
   // show FEFO only and do not distract the picker with container sequencing.
-  if (lot.earliestExpiry && lot.expiry_date > lot.earliestExpiry) {
+  if (isFefoLaterThan(lot.expiry_date, lot.earliestExpiry)) {
     const where = lot.earliestLocation
       ? ` at <strong>${escapeHtml(lot.earliestLocation)}</strong>${lot.earliestContainer ? ` / container <strong>${escapeHtml(lot.earliestContainer)}</strong>` : ''}`
       : '';
@@ -4310,7 +4320,7 @@ async function addOperationItem(operation) {
   const already = opState.cart.filter((x) => x.lot_id === lot.lot_id).reduce((a, x) => a + Number(x.qty), 0);
   if (qty + already > Number(lot.qty)) return toast(`Cannot exceed available stock of ${fmtQtyUom(lot.qty, lot.uom)}.`, 'error');
 
-  const fefoOverrideConfirmed = Boolean(pick && lot.earliestExpiry && lot.expiry_date > lot.earliestExpiry);
+  const fefoOverrideConfirmed = Boolean(pick && isFefoLaterThan(lot.expiry_date, lot.earliestExpiry));
   if (fefoOverrideConfirmed && !window.confirm(buildFefoOverrideConfirmMessage(lot))) {
     return toast('Item was not added. The FEFO recommendation remains in effect.', 'error');
   }
@@ -5512,7 +5522,7 @@ async function completePicking() {
     return toast('Enter the Stock Adjustment reason / remarks before completing this rack.', 'error');
   }
 
-  const requiresOverride = state.pick.cart.some((x) => x.expiry_date > x.earliest_expiry);
+  const requiresOverride = state.pick.cart.some((x) => isFefoLaterThan(x.expiry_date, x.earliest_expiry));
   const containerOverrideCount = adjustmentMode
     ? 0
     : state.pick.cart.filter((x) => x.container_priority_override_confirmed).length;
@@ -7764,7 +7774,53 @@ async function toggleInventoryLotHold(lotId, shouldHold) {
   toast(result?.is_on_hold ? 'Inventory lot placed ON HOLD. Release is now blocked.' : 'Inventory lot hold released. Normal eligibility restored.', 'success');
 }
 
+function ensureInventoryAdjustNoExpiryUi() {
+  const input = $('inventory-adjust-expiry');
+  if (!input) return;
+
+  // Older cached/deployed index.html versions marked this editor field required
+  // and had no true no-expiry control. Repair the dialog at runtime so the
+  // JavaScript remains compatible while GitHub Pages catches up.
+  input.required = false;
+  input.removeAttribute('required');
+
+  let checkbox = $('inventory-adjust-no-expiry');
+  if (!checkbox) {
+    checkbox = document.createElement('input');
+    checkbox.id = 'inventory-adjust-no-expiry';
+    checkbox.type = 'checkbox';
+    checkbox.style.width = 'auto';
+
+    const row = document.createElement('span');
+    row.className = 'small-note';
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '7px';
+    row.style.marginTop = '7px';
+    row.append(checkbox, document.createTextNode(' No expiry (N/A)'));
+
+    const host = input.closest('label') || input.parentElement;
+    host?.appendChild(row);
+  }
+
+  if (!checkbox.dataset.noExpiryBound) {
+    checkbox.addEventListener('change', syncInventoryAdjustNoExpiry);
+    checkbox.dataset.noExpiryBound = 'true';
+  }
+}
+
+function syncInventoryAdjustNoExpiry() {
+  const checkbox = $('inventory-adjust-no-expiry');
+  const input = $('inventory-adjust-expiry');
+  if (!input || !checkbox) return;
+  const noExpiry = Boolean(checkbox.checked);
+  if (noExpiry) input.value = '';
+  input.disabled = noExpiry || checkbox.disabled;
+  input.required = false;
+}
+
 async function openInventoryLotEdit(lotId) {
+  ensureInventoryAdjustNoExpiryUi();
   if (!isSupervisor()) return toast('Supervisor, Admin, or Owner access is required.', 'error');
   const row = state.data.inventory.find((r) => r.lot_id === lotId);
   if (!row) return toast('Inventory lot is no longer available. Refresh Inventory and try again.', 'error');
@@ -7797,6 +7853,7 @@ async function openInventoryLotEdit(lotId) {
 
   $('inventory-adjust-container').value = row.container_no || '';
   $('inventory-adjust-expiry').value = row.expiry_date || '';
+  if ($('inventory-adjust-no-expiry')) $('inventory-adjust-no-expiry').checked = isNoExpiryDate(row.expiry_date);
   $('inventory-adjust-uom').value = row.uom || 'PIECE';
   $('inventory-adjust-qty').value = Number(row.qty);
   $('inventory-adjust-reason').value = '';
@@ -7810,7 +7867,9 @@ async function openInventoryLotEdit(lotId) {
   $('inventory-adjust-sku').disabled = false;
   $('inventory-adjust-location').disabled = false;
   $('inventory-adjust-container').disabled = false;
+  if ($('inventory-adjust-no-expiry')) $('inventory-adjust-no-expiry').disabled = false;
   $('inventory-adjust-expiry').disabled = false;
+  syncInventoryAdjustNoExpiry();
   $('inventory-adjust-uom').disabled = false;
   $('inventory-adjust-qty').disabled = false;
   $('inventory-adjust-qty').min = '1';
@@ -7851,6 +7910,7 @@ async function openInventoryLotEdit(lotId) {
       $('inventory-adjust-uom').value = 'CASE';
       $('inventory-adjust-qty').value = 1;
       $('inventory-adjust-qty').disabled = true;
+      if ($('inventory-adjust-no-expiry')) $('inventory-adjust-no-expiry').disabled = true;
       $('inventory-adjust-expiry').disabled = true;
       $('inventory-adjust-expiry').title = 'Complete Shipper expiry is automatically calculated from the earliest remaining content expiry.';
     } else {
@@ -7882,6 +7942,10 @@ async function submitInventoryLotEdit(event) {
   const reason = $('inventory-adjust-reason').value.trim();
   if (!reason) return toast('Enter the reason for this inventory adjustment.', 'error');
 
+  const adjustedExpiry = $('inventory-adjust-no-expiry')?.checked
+    ? null
+    : ($('inventory-adjust-expiry').value || null);
+
   const button = event.submitter;
   setBusy(button, true, 'Saving…');
 
@@ -7892,7 +7956,7 @@ async function submitInventoryLotEdit(event) {
       p_sku_id: $('inventory-adjust-sku').value,
       p_location_code: normalizeLocation($('inventory-adjust-location').value),
       p_container_no: $('inventory-adjust-container').value.trim(),
-      p_expiry_date: $('inventory-adjust-expiry').value || row.expiry_date,
+      p_expiry_date: shipperRole === 'HEADER' ? row.expiry_date : adjustedExpiry,
       p_qty: qty,
       p_putaway_note: $('inventory-adjust-putaway-note').value.trim() || null,
       p_reason: reason
@@ -7903,7 +7967,7 @@ async function submitInventoryLotEdit(event) {
       p_sku_id: $('inventory-adjust-sku').value,
       p_location_code: normalizeLocation($('inventory-adjust-location').value),
       p_container_no: $('inventory-adjust-container').value.trim(),
-      p_expiry_date: $('inventory-adjust-expiry').value,
+      p_expiry_date: adjustedExpiry,
       p_uom: $('inventory-adjust-uom').value,
       p_qty: qty,
       p_reason: reason
