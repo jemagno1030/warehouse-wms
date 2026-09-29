@@ -274,6 +274,8 @@ const state = {
   stockCardCandidates: [],
   selectedQrLocations: new Set(),
   accountAccessTimer: null,
+  accountAccessLastCheckAt: 0,
+  accountAccessCheckInFlight: false,
   warehouseApproval: null,
   specialPutawayAccessPending: false,
   specialPutawayGateBypass: false,
@@ -1152,6 +1154,11 @@ function setupStaticEvents() {
     if (qr) toggleQrSelection(qr.dataset.qrLocation, qr.checked);
   });
 
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshOwnAccountAccessOnReturn();
+  });
+  window.addEventListener('focus', refreshOwnAccountAccessOnReturn);
+
   window.addEventListener('beforeunload', () => {
     // The server-side two-minute expiry is the safety net when a browser closes abruptly.
     stopHeartbeat(state.pick);
@@ -1240,6 +1247,7 @@ async function handleSession(session) {
   }
 
   applyCurrentProfile(profile);
+  state.accountAccessLastCheckAt = Date.now();
   $('auth-view').classList.add('hidden');
   $('app-view').classList.remove('hidden');
   await loadSystemMode();
@@ -1283,38 +1291,57 @@ function applyCurrentProfile(profile) {
 }
 
 async function refreshOwnAccountAccess() {
+  if (!state.session?.user?.id || !supabase || state.accountAccessCheckInFlight) return;
+
+  state.accountAccessCheckInFlight = true;
+  try {
+    const { data: profile, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', state.session.user.id)
+      .single();
+
+    if (error || !profile) {
+      toast('Your WMS account no longer exists or is no longer accessible.', 'error');
+      stopAccountAccessWatch();
+      await supabase.auth.signOut();
+      return;
+    }
+
+    if (!profile.is_active) {
+      toast('Your account has been kicked out by an administrator.', 'error');
+      stopAccountAccessWatch();
+      await supabase.auth.signOut();
+      return;
+    }
+
+    const roleChanged = state.profile?.role !== profile.role;
+    applyCurrentProfile(profile);
+    if (roleChanged) {
+      state.data.users = [];
+      if (!canOpenScreen(state.currentScreen)) showScreen('dashboard');
+      else if (state.currentScreen === 'users') loadUsers(true);
+    }
+  } finally {
+    state.accountAccessLastCheckAt = Date.now();
+    state.accountAccessCheckInFlight = false;
+  }
+}
+
+function refreshOwnAccountAccessOnReturn() {
   if (!state.session?.user?.id || !supabase) return;
-  const { data: profile, error } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', state.session.user.id)
-    .single();
-  if (error || !profile) {
-    toast('Your WMS account no longer exists or is no longer accessible.', 'error');
-    stopAccountAccessWatch();
-    await supabase.auth.signOut();
-    return;
-  }
+  if (document.visibilityState && document.visibilityState !== 'visible') return;
 
-  if (!profile.is_active) {
-    toast('Your account has been kicked out by an administrator.', 'error');
-    stopAccountAccessWatch();
-    await supabase.auth.signOut();
-    return;
-  }
-
-  const roleChanged = state.profile?.role !== profile.role;
-  applyCurrentProfile(profile);
-  if (roleChanged) {
-    state.data.users = [];
-    if (!canOpenScreen(state.currentScreen)) showScreen('dashboard');
-    else if (state.currentScreen === 'users') loadUsers(true);
-  }
+  // Focus and visibilitychange often fire together. Avoid duplicate profile requests.
+  if (Date.now() - Number(state.accountAccessLastCheckAt || 0) < 5000) return;
+  refreshOwnAccountAccess();
 }
 
 function startAccountAccessWatch() {
   stopAccountAccessWatch();
-  state.accountAccessTimer = window.setInterval(refreshOwnAccountAccess, 15000);
+  // Realtime is the primary account-change signal. This slower timer is only
+  // a fallback in case a Realtime event is missed or the connection is interrupted.
+  state.accountAccessTimer = window.setInterval(refreshOwnAccountAccess, 300000);
 }
 
 function stopAccountAccessWatch() {
