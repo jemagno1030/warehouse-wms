@@ -1619,7 +1619,10 @@
         <label>SKU / Item<select id="inventory-adjust-sku" required></select></label>
         <label>Rack location<select id="inventory-adjust-location" required></select></label>
         <label>Container number<input id="inventory-adjust-container" required /></label>
-        <label>Expiry date<input id="inventory-adjust-expiry" type="date" required /></label>
+        <div>
+          <label>Expiry date<input id="inventory-adjust-expiry" type="date" /></label>
+          <label class="small-note" style="display:flex;align-items:center;gap:7px;margin-top:7px"><input id="inventory-adjust-no-expiry" type="checkbox" style="width:auto" /> No expiry (N/A)</label>
+        </div>
         <label>Stock unit<select id="inventory-adjust-uom" required><option value="CASE">CASE</option><option value="PACK">PACK</option><option value="PIECE">PIECE</option></select></label>
         <label>Quantity — whole number<input id="inventory-adjust-qty" type="number" min="1" step="1" inputmode="numeric" required /></label>
       </div>
@@ -1728,6 +1731,10 @@
   </script>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260822-saved-pick-correction-v2-1"></script>
+  <script type="module" src="app.js?v=20260929-live-true-no-expiry-v1-1b"></script>
+  <script type="module" src="receiving-v1.js?v=20260929-live-receiving-v1-1-no-expiry"></script>
 </body>
 </html>
+
+
+
