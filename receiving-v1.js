@@ -39,6 +39,7 @@ const state = {
   cart: [],
   pendingRows: [],
   reportRows: [],
+  reportEditRow: null,
   selectedReceiptId: null,
   tab: 'ops',
   backloadDuplicate: false,
@@ -98,6 +99,10 @@ function isViewer() {
   return String(state.profile?.role || '').toLowerCase() === 'viewer';
 }
 
+function canManageReceivingReport() {
+  return ['admin', 'owner'].includes(String(state.profile?.role || '').toLowerCase());
+}
+
 function isActiveAccount() {
   return Boolean(state.session && state.profile?.is_active);
 }
@@ -133,8 +138,15 @@ function installStyles() {
     #screen-receiving .rcv-no-expiry input{width:auto;flex:0 0 auto}
     #screen-receiving .rcv-report-summary{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
     #screen-receiving .rcv-summary-chip{border:1px solid #d7dee7;border-radius:999px;padding:5px 10px;background:#fff;font-size:.85rem}
-    #screen-receiving .rcv-test-badge{display:inline-block;border-radius:999px;padding:4px 9px;background:#fff3cd;color:#7a4b00;font-weight:800;font-size:.8rem}
     #screen-receiving .rcv-warning{color:#8a4b00;font-weight:700}
+    #screen-receiving .rcv-report-actions{display:flex;gap:6px;flex-wrap:wrap}
+    #rcv-report-edit-dialog{width:min(920px,94vw);max-height:92vh;border:1px solid #cfd8e3;border-radius:12px;padding:0}
+    #rcv-report-edit-dialog::backdrop{background:rgba(15,23,42,.42)}
+    #rcv-report-edit-dialog .rcv-edit-shell{padding:18px;max-height:88vh;overflow:auto}
+    #rcv-report-edit-dialog .rcv-edit-section{border:1px solid #d7dee7;border-radius:10px;padding:14px;margin:12px 0}
+    #rcv-report-edit-dialog .rcv-edit-section h4{margin:0 0 10px}
+    #rcv-report-edit-dialog .rcv-edit-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:14px}
+    #rcv-report-edit-dialog .rcv-locked{opacity:.65}
     body.receiving-v1-pinned #screen-receiving{display:block!important}
     body.receiving-v1-pinned #app-view .screen:not(#screen-receiving){display:none!important}
     @media(max-width:900px){#screen-receiving .rcv-grid,#screen-receiving .rcv-line-grid{grid-template-columns:1fr}}
@@ -177,10 +189,87 @@ function installScannerDialog() {
   dialog.addEventListener('close', stopCamera);
 }
 
+function installReportEditDialog() {
+  if ($('rcv-report-edit-dialog')) return;
+  const dialog = document.createElement('dialog');
+  dialog.id = 'rcv-report-edit-dialog';
+  dialog.innerHTML = `
+    <form id="rcv-report-edit-form" class="rcv-edit-shell">
+      <div class="card-head">
+        <div>
+          <h3>Edit Receiving record</h3>
+          <p id="rcv-edit-receipt-meta">—</p>
+        </div>
+        <button id="rcv-report-edit-close" class="icon-button" type="button" aria-label="Close">✕</button>
+      </div>
+
+      <div class="rcv-edit-section">
+        <h4>Document record</h4>
+        <p class="small-note">Changes here apply to every item line under the same system Receipt No. The Receipt No. itself remains unchanged.</p>
+        <div class="form-grid two">
+          <label>Receiving type *
+            <select id="rcv-edit-type" required>
+              <option value="REGULAR_DELIVERY">Regular Delivery</option>
+              <option value="BACKLOAD_RETURN">Backload Return</option>
+            </select>
+          </label>
+          <label>Source / Supplier
+            <input id="rcv-edit-source" maxlength="200" autocomplete="off" />
+          </label>
+          <label>Document type
+            <input id="rcv-edit-doc-type" maxlength="100" autocomplete="off" />
+          </label>
+          <label>Document number
+            <input id="rcv-edit-doc-number" maxlength="200" autocomplete="off" />
+          </label>
+        </div>
+        <div id="rcv-edit-backload-fields" class="form-grid two hidden">
+          <label>Intended customer name *
+            <input id="rcv-edit-customer" maxlength="200" autocomplete="off" />
+          </label>
+          <label>Return reason *
+            <textarea id="rcv-edit-return-reason" maxlength="1000" rows="2"></textarea>
+          </label>
+        </div>
+      </div>
+
+      <div id="rcv-edit-line-section" class="rcv-edit-section">
+        <h4>SKU line</h4>
+        <div id="rcv-edit-line-note" class="info-box"></div>
+        <div class="form-grid two">
+          <label>SKU *
+            <select id="rcv-edit-sku-select"></select>
+          </label>
+          <label>Container No. *
+            <input id="rcv-edit-container" maxlength="200" autocomplete="off" />
+          </label>
+        </div>
+        <div class="rcv-line-grid">
+          <div>
+            <label>Expiry date<input id="rcv-edit-expiry" type="date" /></label>
+            <label class="rcv-no-expiry"><input id="rcv-edit-no-expiry" type="checkbox" /> No expiry (N/A)</label>
+          </div>
+          <div class="rcv-qty-grid">
+            <label id="rcv-edit-case-label">CASE qty<input id="rcv-edit-case-qty" type="number" min="0" step="1" inputmode="numeric" /></label>
+            <label id="rcv-edit-pack-label">PACK qty<input id="rcv-edit-pack-qty" type="number" min="0" step="1" inputmode="numeric" /></label>
+            <label id="rcv-edit-piece-label">PIECE qty<input id="rcv-edit-piece-qty" type="number" min="0" step="1" inputmode="numeric" /></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="rcv-edit-actions">
+        <button id="rcv-report-edit-cancel" type="button" class="ghost">Cancel</button>
+        <button id="rcv-report-edit-save" type="submit">Save changes</button>
+      </div>
+    </form>`;
+  document.body.appendChild(dialog);
+}
+
 function installUi() {
   if ($('screen-receiving')) return;
   installStyles();
   installScannerDialog();
+  installReportEditDialog();
 
   const putawayNav = document.querySelector('#main-nav [data-screen="putaway"]');
   if (putawayNav && !$('receiving-v1-nav')) {
@@ -429,6 +518,31 @@ function bindEvents() {
   $('rcv-report-reset')?.addEventListener('click', resetReportFilters);
   $('rcv-report-export')?.addEventListener('click', exportReport);
   $('rcv-report-print')?.addEventListener('click', () => void printReceivingReport());
+  $('rcv-report-table')?.addEventListener('click', (event) => {
+    const editButton = event.target.closest('[data-rcv-report-edit]');
+    if (editButton) {
+      const row = state.reportRows.find((item) => item.receipt_line_id === editButton.dataset.rcvReportEdit);
+      if (row) openReceivingReportEdit(row);
+      return;
+    }
+    const deleteReceiptButton = event.target.closest('[data-rcv-report-delete-receipt]');
+    if (deleteReceiptButton) {
+      const row = state.reportRows.find((item) => item.receipt_id === deleteReceiptButton.dataset.rcvReportDeleteReceipt);
+      if (row) void deleteReceivingReceipt(row);
+      return;
+    }
+
+    const deleteButton = event.target.closest('[data-rcv-report-delete]');
+    if (deleteButton) {
+      const row = state.reportRows.find((item) => item.receipt_line_id === deleteButton.dataset.rcvReportDelete);
+      if (row) void deleteReceivingReportLine(row);
+    }
+  });
+  $('rcv-report-edit-form')?.addEventListener('submit', saveReceivingReportEdit);
+  $('rcv-report-edit-close')?.addEventListener('click', closeReceivingReportEdit);
+  $('rcv-report-edit-cancel')?.addEventListener('click', closeReceivingReportEdit);
+  $('rcv-edit-type')?.addEventListener('change', syncReceivingReportEditType);
+  $('rcv-edit-no-expiry')?.addEventListener('change', syncReceivingReportEditExpiry);
 
   // Receiving V1 is additive and the base app does not know it as a native screen.
   // Clear the Receiving-active marker only when the user explicitly navigates to
@@ -1190,6 +1304,273 @@ async function submitPutaway(event) {
   }
 }
 
+
+function syncReceivingReportEditType() {
+  const backload = $('rcv-edit-type')?.value === 'BACKLOAD_RETURN';
+  $('rcv-edit-backload-fields')?.classList.toggle('hidden', !backload);
+  if ($('rcv-edit-customer')) $('rcv-edit-customer').required = backload;
+  if ($('rcv-edit-return-reason')) $('rcv-edit-return-reason').required = backload;
+  if ($('rcv-edit-doc-type')) $('rcv-edit-doc-type').required = backload;
+  if ($('rcv-edit-doc-number')) $('rcv-edit-doc-number').required = backload;
+}
+
+function syncReceivingReportEditExpiry() {
+  const noExpiry = Boolean($('rcv-edit-no-expiry')?.checked);
+  if ($('rcv-edit-expiry')) {
+    $('rcv-edit-expiry').disabled = noExpiry;
+    if (noExpiry) $('rcv-edit-expiry').value = '';
+  }
+}
+
+function closeReceivingReportEdit() {
+  state.reportEditRow = null;
+  if ($('rcv-report-edit-dialog')?.open) $('rcv-report-edit-dialog').close();
+}
+
+function openReceivingReportEdit(row) {
+  state.reportEditRow = row;
+
+  const lineEditable = row.putaway_status === 'NOT_PUTAWAY' || row.putaway_status === 'PUTAWAY_PARTIAL';
+  const isPartial = row.putaway_status === 'PUTAWAY_PARTIAL';
+
+  $('rcv-edit-receipt-meta').textContent =
+    `${row.receipt_no || 'Receipt'} · line ${row.line_no || '—'} · ${row.putaway_status || ''}`;
+
+  $('rcv-edit-type').value = row.receipt_type || 'REGULAR_DELIVERY';
+  $('rcv-edit-source').value = row.source_name || '';
+  $('rcv-edit-doc-type').value = row.document_type || '';
+  $('rcv-edit-doc-number').value = row.document_number || '';
+  $('rcv-edit-customer').value = row.intended_customer_name || '';
+  $('rcv-edit-return-reason').value = row.return_reason || '';
+  syncReceivingReportEditType();
+
+  const skuSelect = $('rcv-edit-sku-select');
+  skuSelect.innerHTML = (state.skus || []).map((sku) =>
+    `<option value="${escapeHtml(sku.id)}">${escapeHtml(skuLabel(sku))}</option>`
+  ).join('');
+  skuSelect.value = row.sku_id || '';
+
+  $('rcv-edit-container').value = row.container_no || '';
+  const rowHasNoExpiry = isNoExpiryDate(row.expiry_date);
+  $('rcv-edit-expiry').value = rowHasNoExpiry ? '' : String(row.expiry_date || '').slice(0, 10);
+  $('rcv-edit-no-expiry').checked = rowHasNoExpiry;
+  syncReceivingReportEditExpiry();
+
+  const qtyPrefix = isPartial ? 'remaining_' : '';
+  $('rcv-edit-case-qty').value = Number(row[`${qtyPrefix}case_qty`] || 0);
+  $('rcv-edit-pack-qty').value = Number(row[`${qtyPrefix}pack_qty`] || 0);
+  $('rcv-edit-piece-qty').value = Number(row[`${qtyPrefix}piece_qty`] || 0);
+
+  const lineSection = $('rcv-edit-line-section');
+  lineSection.classList.toggle('rcv-locked', !lineEditable);
+  qsa('#rcv-edit-line-section input, #rcv-edit-line-section select').forEach((node) => {
+    node.disabled = !lineEditable || (node.id === 'rcv-edit-expiry' && $('rcv-edit-no-expiry').checked);
+  });
+
+  const caseLabel = $('rcv-edit-case-label');
+  const packLabel = $('rcv-edit-pack-label');
+  const pieceLabel = $('rcv-edit-piece-label');
+  if (caseLabel?.childNodes?.[0]) caseLabel.childNodes[0].nodeValue = isPartial ? 'Remaining CASE qty' : 'Received CASE qty';
+  if (packLabel?.childNodes?.[0]) packLabel.childNodes[0].nodeValue = isPartial ? 'Remaining PACK qty' : 'Received PACK qty';
+  if (pieceLabel?.childNodes?.[0]) pieceLabel.childNodes[0].nodeValue = isPartial ? 'Remaining PIECE qty' : 'Received PIECE qty';
+
+  if (!lineEditable) {
+    $('rcv-edit-line-note').innerHTML =
+      '<strong>SKU line locked.</strong> This line is fully put away. Document/header corrections are still allowed.';
+  } else if (isPartial) {
+    $('rcv-edit-line-note').innerHTML =
+      `<strong>Partial put-away:</strong> already put away is locked at ${escapeHtml(qtyTextByPrefix(row, 'putaway_'))}. ` +
+      'The quantities below are the remaining un-put-away amounts. If SKU / Container / Expiry changes, the completed portion stays as historical record and the corrected remainder becomes a new pending line.';
+  } else {
+    $('rcv-edit-line-note').innerHTML =
+      '<strong>Not yet put away:</strong> SKU identity and received CASE / PACK / PIECE quantities can be corrected directly.';
+  }
+
+  $('rcv-report-edit-dialog').showModal();
+}
+
+function normalizedNullable(value) {
+  const text = String(value ?? '').trim();
+  return text || null;
+}
+
+function sameNullable(a, b) {
+  return normalizedNullable(a) === normalizedNullable(b);
+}
+
+async function saveReceivingReportEdit(event) {
+  event.preventDefault();
+  const row = state.reportEditRow;
+  if (!row) return toast('Receiving report line is no longer selected.', 'error');
+
+  await refreshAccess();
+  if (isViewer()) return toast('Viewer access is read-only.', 'error');
+
+  const type = $('rcv-edit-type').value;
+  const source = $('rcv-edit-source').value.trim();
+  const docType = $('rcv-edit-doc-type').value.trim();
+  const docNumber = $('rcv-edit-doc-number').value.trim();
+  const customer = $('rcv-edit-customer').value.trim();
+  const returnReason = $('rcv-edit-return-reason').value.trim();
+
+  if (type === 'BACKLOAD_RETURN' && (!docType || !docNumber || !customer || !returnReason)) {
+    return toast('Backload requires document type/number, intended customer, and return reason.', 'error');
+  }
+
+  const documentChanged =
+    type !== row.receipt_type
+    || !sameNullable(source, row.source_name)
+    || !sameNullable(docType, row.document_type)
+    || !sameNullable(docNumber, row.document_number)
+    || (type === 'BACKLOAD_RETURN' && (
+      !sameNullable(customer, row.intended_customer_name)
+      || !sameNullable(returnReason, row.return_reason)
+    ))
+    || (type !== 'BACKLOAD_RETURN' && (row.intended_customer_name || row.return_reason));
+
+  const lineEditable = row.putaway_status === 'NOT_PUTAWAY' || row.putaway_status === 'PUTAWAY_PARTIAL';
+  const partial = row.putaway_status === 'PUTAWAY_PARTIAL';
+  const expiry = $('rcv-edit-no-expiry').checked ? null : ($('rcv-edit-expiry').value || null);
+  const skuId = $('rcv-edit-sku-select').value || row.sku_id;
+  const container = $('rcv-edit-container').value.trim();
+  const caseQty = Number($('rcv-edit-case-qty').value || 0);
+  const packQty = Number($('rcv-edit-pack-qty').value || 0);
+  const pieceQty = Number($('rcv-edit-piece-qty').value || 0);
+
+  const currentCase = Number(partial ? row.remaining_case_qty : row.case_qty) || 0;
+  const currentPack = Number(partial ? row.remaining_pack_qty : row.pack_qty) || 0;
+  const currentPiece = Number(partial ? row.remaining_piece_qty : row.piece_qty) || 0;
+
+  const lineChanged = lineEditable && (
+    skuId !== row.sku_id
+    || container !== String(row.container_no || '').trim()
+    || (expiry || null) !== (isNoExpiryDate(row.expiry_date) ? null : String(row.expiry_date || '').slice(0, 10))
+    || caseQty !== currentCase
+    || packQty !== currentPack
+    || pieceQty !== currentPiece
+  );
+
+  if (!documentChanged && !lineChanged) return toast('No Receiving changes were detected.', 'error');
+  if (lineChanged && state.mode !== 'ACTIVE') {
+    return toast('Administrative Pause is active. SKU-line Receiving changes are blocked.', 'error');
+  }
+  if (lineChanged && !skuId) return toast('Select an active STANDARD SKU.', 'error');
+  if (lineChanged && !container) return toast('Container No. is required.', 'error');
+  if (lineChanged && [caseQty, packQty, pieceQty].some((qty) => !Number.isInteger(qty) || qty < 0)) {
+    return toast('CASE, PACK, and PIECE quantities must be whole numbers of zero or more.', 'error');
+  }
+  if (lineChanged && caseQty === 0 && packQty === 0 && pieceQty === 0) {
+    return toast('Keep at least one remaining quantity. Use Delete to remove this item line/remainder.', 'error');
+  }
+
+  const button = $('rcv-report-edit-save');
+  setBusy(button, true, 'Saving…');
+  try {
+    const { data, error } = await supabase.rpc('edit_inbound_receiving_report_row_v1', {
+      p_receipt_line_id: row.receipt_line_id,
+      p_edit_document: documentChanged,
+      p_receipt_type: type,
+      p_source_name: source || null,
+      p_document_type: docType || null,
+      p_document_number: docNumber || null,
+      p_intended_customer_name: type === 'BACKLOAD_RETURN' ? customer : null,
+      p_return_reason: type === 'BACKLOAD_RETURN' ? returnReason : null,
+      p_edit_line: lineChanged,
+      p_sku_id: skuId || row.sku_id,
+      p_container_no: container || row.container_no,
+      p_expiry_date: expiry,
+      p_remaining_piece_qty: pieceQty,
+      p_remaining_pack_qty: packQty,
+      p_remaining_case_qty: caseQty
+    });
+
+    if (error) throw error;
+
+    const result = data?.[0] || {};
+    closeReceivingReportEdit();
+    await Promise.all([loadPending(), loadReport()]);
+
+    const modeText = result.line_result_mode === 'PARTIAL_IDENTITY_SPLIT'
+      ? ' Completed Put-away history was preserved and the corrected remainder was separated.'
+      : '';
+    toast(`Receiving correction saved.${modeText}`, 'success');
+  } catch (error) {
+    toast(friendlyError(error), 'error');
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function deleteReceivingReportLine(row) {
+  await refreshAccess();
+  if (isViewer()) return toast('Viewer access is read-only.', 'error');
+  if (state.mode !== 'ACTIVE') return toast('Administrative Pause is active. Receiving line deletion is blocked.', 'error');
+
+  if (row.putaway_status !== 'NOT_PUTAWAY' && row.putaway_status !== 'PUTAWAY_PARTIAL') {
+    return toast('Only NOT_PUTAWAY and PUTAWAY_PARTIAL lines can be deleted.', 'error');
+  }
+
+  const partial = row.putaway_status === 'PUTAWAY_PARTIAL';
+  const skuText = [row.brand,row.description,row.variant,row.size].filter(Boolean).join(' ');
+  const message = partial
+    ? `DELETE REMAINING RECEIVING LINE\n\n${row.receipt_no} · ${skuText}\n\nRemaining: ${qtyTextByPrefix(row,'remaining_')}\n\nAlready put-away quantities and their transaction history will NOT be deleted. Only the un-put-away remainder will be removed. Continue?`
+    : `DELETE RECEIVING ITEM LINE\n\n${row.receipt_no} · ${skuText}\n\nReceived: ${qtyText(row)}\n\nThis deletes this item line only. The receipt/document record and its other lines are preserved. Continue?`;
+
+  if (!window.confirm(message)) return;
+
+  const { data, error } = await supabase.rpc('delete_inbound_receipt_line_v1', {
+    p_receipt_line_id: row.receipt_line_id
+  });
+  if (error) return toast(friendlyError(error), 'error');
+
+  await Promise.all([loadPending(), loadReport()]);
+  const result = data?.[0] || {};
+  toast(
+    result.result_mode === 'PARTIAL_REMAINING_REMOVED'
+      ? 'Remaining un-put-away quantity deleted. Completed Put-away history was preserved.'
+      : 'Receiving item line deleted. Receipt/document record was preserved.',
+    'success'
+  );
+}
+
+async function deleteReceivingReceipt(row) {
+  await refreshAccess();
+  if (isViewer()) return toast('Viewer access is read-only.', 'error');
+  if (state.mode !== 'ACTIVE') return toast('Administrative Pause is active. Receiving receipt deletion is blocked.', 'error');
+
+  if (row.receipt_status !== 'RECEIVED') {
+    return toast('Only receipts with no Put-away activity can be deleted.', 'error');
+  }
+
+  const receiptMeta = [
+    row.receipt_no,
+    row.source_name,
+    [row.document_type, row.document_number].filter(Boolean).join(' ')
+  ].filter(Boolean).join(' · ');
+
+  const message =
+    `DELETE ENTIRE RECEIVING RECEIPT\n\n${receiptMeta}\n\n` +
+    'This permanently deletes the receipt header and ALL item lines under this Receipt No.\n\n' +
+    'This is allowed only when no line has ever been partially or fully put away. ' +
+    'Inventory will not be changed because there are no Put-away allocations.\n\n' +
+    'The system Receipt No. will not be reused. Continue?';
+
+  if (!window.confirm(message)) return;
+
+  const { data, error } = await supabase.rpc('delete_inbound_receipt_v1', {
+    p_receipt_id: row.receipt_id
+  });
+
+  if (error) return toast(friendlyError(error), 'error');
+
+  await Promise.all([loadPending(), loadReport()]);
+  const result = data?.[0] || {};
+  toast(
+    `Receiving receipt ${result.receipt_no || row.receipt_no || ''} deleted with ${Number(result.deleted_line_count || 0)} item line(s). Inventory was unchanged.`,
+    'success'
+  );
+}
+
 function reportArgs() {
   const receivedFrom = $('rcv-report-received-from')?.value || '';
   const receivedTo = $('rcv-report-received-to')?.value || '';
@@ -1250,16 +1631,24 @@ function renderReport() {
   }
 
   const displayRows = rows.slice(0, 1000);
+  const canManageReport = canManageReceivingReport();
+  const deleteReceiptLineIds = new Set();
+  const seenReceiptIds = new Set();
+  for (const row of displayRows) {
+    if (seenReceiptIds.has(row.receipt_id)) continue;
+    seenReceiptIds.add(row.receipt_id);
+    if (row.receipt_status === 'RECEIVED') deleteReceiptLineIds.add(row.receipt_line_id);
+  }
 
   $('rcv-report-table').innerHTML = `<div class="table-wrap"><table><thead><tr>
-    <th>Receipt</th><th>Type / Status</th><th>Received</th><th>User</th><th>Document / Customer</th>
-    <th>SKU</th><th>Container / Expiry</th><th>Quantity Progress</th><th>Put-away</th><th>Allocation History</th>
+    <th>Receipt</th><th>Type / Status</th><th>Received</th><th>User</th><th>Source / Document / Customer</th>
+    <th>SKU</th><th>Container / Expiry</th><th>Quantity Progress</th><th>Put-away</th><th>Allocation History</th>${canManageReport ? '<th>Actions</th>' : ''}
   </tr></thead><tbody>${displayRows.map((row) => `<tr>
     <td><strong>${escapeHtml(row.receipt_no || '')}</strong></td>
     <td>${escapeHtml(row.receipt_type === 'BACKLOAD_RETURN' ? 'Backload Return' : 'Regular Delivery')}<br><small>${escapeHtml(row.receipt_status || '')}</small></td>
     <td>${escapeHtml(fmtDateTime(row.received_at))}</td>
     <td>${escapeHtml(row.received_by_username || '')}</td>
-    <td>${escapeHtml([row.document_type, row.document_number].filter(Boolean).join(' '))}${row.intended_customer_name ? `<br><small>${escapeHtml(row.intended_customer_name)}</small>` : ''}</td>
+    <td>${row.source_name ? `<strong>${escapeHtml(row.source_name)}</strong><br>` : ''}${escapeHtml([row.document_type, row.document_number].filter(Boolean).join(' '))}${row.intended_customer_name ? `<br><small>${escapeHtml(row.intended_customer_name)}</small>` : ''}</td>
     <td>${escapeHtml([row.brand, row.description, row.variant, row.size].filter(Boolean).join(' '))}</td>
     <td>${escapeHtml(row.container_no || '')}<br><small>${escapeHtml(fmtDate(row.expiry_date))}</small></td>
     <td>
@@ -1269,6 +1658,11 @@ function renderReport() {
     </td>
     <td>${escapeHtml(row.putaway_status || '')}<br><small>${Number(row.allocation_count || 0)} allocation(s)</small></td>
     <td>${allocationHistoryHtml(row)}</td>
+    ${canManageReport ? `<td><div class="rcv-report-actions">
+      <button type="button" class="secondary" data-rcv-report-edit="${escapeHtml(row.receipt_line_id)}">Edit</button>
+      ${(row.putaway_status === 'NOT_PUTAWAY' || row.putaway_status === 'PUTAWAY_PARTIAL') ? `<button type="button" class="danger" data-rcv-report-delete="${escapeHtml(row.receipt_line_id)}">Delete</button>` : ''}
+      ${deleteReceiptLineIds.has(row.receipt_line_id) ? `<button type="button" class="danger" data-rcv-report-delete-receipt="${escapeHtml(row.receipt_id)}">Delete Receipt</button>` : ''}
+    </div></td>` : ''}
   </tr>`).join('')}</tbody></table></div>
   ${rows.length > displayRows.length ? `<div class="small-note">Showing first ${displayRows.length} of ${rows.length} rows. CSV export includes all filtered rows.</div>` : ''}`;
 }
