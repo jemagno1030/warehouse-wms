@@ -1670,7 +1670,7 @@ async function loadScreen(name, force = false) {
 
 async function loadDashboard() {
   ensureDashboardOperationalExceptionPanels();
-  const [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes, pendingReturnsRes, openEmptySoRes, containerPriorityRes] = await Promise.all([
+  const [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes, pendingReturnsRes, openEmptySoRes, containerPriorityRes, receivingPutawayRes] = await Promise.all([
     supabase.from('v_inventory_details').select('*').limit(10000),
     supabase.from('v_location_summary').select('*').limit(5000),
     supabase.from('v_history_details').select('*').order('created_at', { ascending: false }).limit(12),
@@ -1678,9 +1678,10 @@ async function loadDashboard() {
     supabase.rpc('get_dashboard_active_location_locks'),
     supabase.rpc('get_saved_pick_action_queue'),
     supabase.rpc('get_dashboard_open_empty_pick_sales_orders_v1'),
-    supabase.rpc('get_dashboard_container_priority_overrides_v1')
+    supabase.rpc('get_dashboard_container_priority_overrides_v1'),
+    supabase.rpc('get_dashboard_receiving_putaway_summary_v1')
   ]);
-  [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes, pendingReturnsRes, openEmptySoRes, containerPriorityRes].forEach((r) => { if (r.error) throw r.error; });
+  [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes, pendingReturnsRes, openEmptySoRes, containerPriorityRes, receivingPutawayRes].forEach((r) => { if (r.error) throw r.error; });
   const inventory = inventoryRes.data || [];
   const locations = locationRes.data || [];
   const attention = inventory.filter((r) => r.expiry_status !== 'OK');
@@ -1689,11 +1690,25 @@ async function loadDashboard() {
   const occupied = physicalLocations.filter((r) => Number(r.total_piece_qty) > 0 || Number(r.total_pack_qty) > 0 || Number(r.total_case_qty) > 0).length;
   const locked = physicalLocations.filter((r) => r.is_locked).length;
 
+  const receivingPutaway = receivingPutawayRes.data?.[0] || {};
+  const receivingQty = (caseQty, packQty, pieceQty) =>
+    `${Number(caseQty || 0).toLocaleString()} cases · ${Number(packQty || 0).toLocaleString()} packs · ${Number(pieceQty || 0).toLocaleString()} pieces`;
+
   $('dashboard-kpis').innerHTML = [
     ['Stock balances', formatBalances(sumByUom(inventory))],
     ['Occupied rack locations', `${occupied} / ${physicalLocations.length}`],
     ['Active containers', containers.size],
-    ['Expiry attention', attention.length]
+    ['Expiry attention', attention.length],
+    ['Not yet put-away', receivingQty(
+      receivingPutaway.not_putaway_case_qty,
+      receivingPutaway.not_putaway_pack_qty,
+      receivingPutaway.not_putaway_piece_qty
+    )],
+    ['Partial put-away remaining', receivingQty(
+      receivingPutaway.partial_remaining_case_qty,
+      receivingPutaway.partial_remaining_pack_qty,
+      receivingPutaway.partial_remaining_piece_qty
+    )]
   ].map(([label, value]) => `<div class="kpi"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
 
   $('dashboard-expiry').innerHTML = attention.length ? miniTable(attention.slice(0, 6), [
