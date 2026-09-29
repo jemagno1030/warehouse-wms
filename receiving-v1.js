@@ -1,3 +1,6 @@
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+import { BrowserMultiFormatReader, BrowserCodeReader } from 'https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/+esm';
+
 /*
 IFTC WAREHOUSE LOCATOR SYSTEM (JPM)
 Receiving / Delivery & Backload Return V1.1
@@ -147,7 +150,7 @@ function installScannerDialog() {
   dialog.className = 'scanner-dialog';
   dialog.innerHTML = `
     <div class="scanner-head">
-      <div><h3 id="rcv-scanner-title">Scan code</h3><p>Receiving V1 TEST scanner.</p></div>
+      <div><h3 id="rcv-scanner-title">Scan code</h3><p>Receiving V1.1 scanner.</p></div>
       <button id="rcv-scanner-close" class="icon-button" type="button" aria-label="Close">✕</button>
     </div>
     <video id="rcv-scanner-video" playsinline muted></video>
@@ -197,7 +200,7 @@ function installUi() {
     <div class="card">
       <div class="card-head">
         <div>
-          <h3>Receiving / Delivery & Backload Return V1.1 <span class="rcv-test-badge">TEST</span></h3>
+          <h3>Receiving / Delivery & Backload Return V1.1</h3>
           <p>Record inbound documents first. Inventory changes only when received lines are put away through the protected existing Put-away engine.</p>
         </div>
       </div>
@@ -1486,7 +1489,7 @@ async function handleAuth(session) {
 
 async function boot() {
   if (!configReady) {
-    console.error('Receiving V1 Stage 4 refused to load: TEST Supabase identity mismatch.');
+    console.error('Receiving V1.1 refused to load: LIVE Supabase identity mismatch.');
     return;
   }
 
