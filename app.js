@@ -7016,6 +7016,7 @@ function installInventoryBinTagPrintStyle() {
       html, body { background: #fff !important; }
     }
     .inventory-bintag-print {
+      position: relative;
       box-sizing: border-box;
       width: 100%;
       max-width: 8.02in;
@@ -7071,6 +7072,16 @@ function installInventoryBinTagPrintStyle() {
     .bintag-child-table tr { page-break-inside: avoid; }
     .bintag-child-empty { padding: 3mm !important; text-align:center; }
     .bintag-shipper-note { font-size: 7.5pt; padding: 1.5mm 2mm; border-top: .8pt solid #000; }
+    .bintag-print-date {
+      position: absolute;
+      right: 1.5mm;
+      bottom: -4mm;
+      font-size: 8px;
+      font-weight: 400;
+      line-height: 1;
+      white-space: nowrap;
+      color: #000;
+    }
   `;
   document.head.appendChild(style);
   return style;
@@ -7093,6 +7104,7 @@ async function printInventoryBinTag(lotId) {
   const caseFont = inventoryBinTagCodeFontPt(data.caseBarcode);
   const remarksFont = inventoryBinTagRemarksFontPt(data.remarks);
   const childFont = data.childRows.length > 16 ? 6.5 : data.childRows.length > 11 ? 7.5 : data.childRows.length > 7 ? 8 : 9;
+  const printedAt = new Date().toLocaleString();
 
   const printArea = document.createElement('section');
   printArea.id = 'print-area';
@@ -7162,6 +7174,7 @@ async function printInventoryBinTag(lotId) {
     </div>
 
     ${shipperSection}
+    <div class="bintag-print-date">Print date: ${escapeHtml(printedAt)}</div>
   `;
 
   const style = installInventoryBinTagPrintStyle();
