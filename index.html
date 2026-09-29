@@ -1296,7 +1296,7 @@
               <button id="system-history-preview-btn" class="secondary" type="button">Preview records</button>
               <button class="danger" type="submit">Delete selected history</button>
             </div>
-            <p class="hint">If the range contains history for an OPEN Sales Order, deletion is blocked until that Sales Order is finished or cancelled. One new audit event is kept to record the administrative deletion itself.</p>
+            <p class="hint">If the range contains history for an OPEN Sales Order, deletion is blocked until that Sales Order is finished or cancelled. Final deletion also requires a separate active Admin/Owner WMS login confirmation. One new audit event is kept to record the administrative deletion itself.</p>
           </form>
         </div>
       </section>
@@ -1731,7 +1731,7 @@
   </script>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260929-live-bin-tag-print-date-v1"></script>
+  <script type="module" src="app.js?v=20260929-live-history-delete-reauth-v1"></script>
   <script type="module" src="receiving-v1.js?v=20260929-live-receiving-report-received-date-v1"></script>
 </body>
 </html>
