@@ -807,11 +807,20 @@
 
       <section id="screen-picking" class="screen">
         <div class="card form-card">
-          <div class="card-head"><div><h3>Picking session</h3><p>Normal Sales Orders use the existing multi-rack workflow. Sales Order 0 is reserved for reusable Warehouse Stock Adjustment.</p></div><span id="pick-lock-chip" class="status-chip neutral">No location locked</span></div>
+          <div class="card-head">
+            <div><h3>Picking session</h3><p>Normal Sales Orders use the existing multi-rack workflow. Sales Order 0 is reserved for reusable Warehouse Stock Adjustment.</p></div>
+            <div class="button-cluster">
+              <button id="picked-so-report-btn" class="secondary" type="button">Picked Sales Order Report</button>
+              <span id="pick-lock-chip" class="status-chip neutral">No location locked</span>
+            </div>
+          </div>
           <div class="form-grid three">
             <label>Sales order number *<input id="pick-so" required /></label>
+            <label>Customer *<input id="pick-customer" maxlength="200" autocomplete="off" required /></label>
+            <label>PO number<input id="pick-po-number" maxlength="100" autocomplete="off" /></label>
             <label>Source rack / QR *<div class="scan-field"><input id="pick-location" /><button type="button" class="scan-btn" data-scan-target="pick-location" data-scan-kind="location">Scan</button></div></label>
             <div class="field-action"><button id="pick-lock-btn" class="secondary" type="button">Lock source location</button></div>
+
             <label>CASE, PACK, or PIECE barcode *<div class="scan-field with-na"><input id="pick-barcode" name="wms-pick-barcode-entry" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-autocomplete="none" disabled /><button type="button" class="scan-btn" data-scan-target="pick-barcode" disabled>Scan</button><button type="button" class="na-btn" data-na-target="pick-barcode" disabled>N/A</button></div></label>
             <label>Matching expiry / container<select id="pick-lot" disabled><option value="">Scan a barcode first</option></select></label>
             <label>Pick quantity — whole number (<span id="pick-unit-label">matched unit</span>)<input id="pick-qty" type="number" min="1" step="1" inputmode="numeric" disabled /></label>
@@ -1431,6 +1440,29 @@
 
 
 
+  <dialog id="picked-so-report-dialog" class="edit-dialog" style="width:min(1180px,calc(100% - 24px));">
+    <div class="scanner-head">
+      <div>
+        <h3>Picked Sales Order Report</h3>
+        <p>Completed PICK transaction lines for normal Sales Orders. Sales Order 0 warehouse adjustments are excluded.</p>
+      </div>
+      <button id="picked-so-report-close" class="icon-button" type="button">✕</button>
+    </div>
+    <div class="form-grid two">
+      <label>SO number<input id="picked-so-report-so" autocomplete="off" /></label>
+      <label>PO number<input id="picked-so-report-po" autocomplete="off" /></label>
+      <label>Customer name<input id="picked-so-report-customer" autocomplete="off" /></label>
+      <label>SKU<input id="picked-so-report-sku" autocomplete="off" placeholder="Brand, description, variant, size, or barcode" /></label>
+    </div>
+    <div class="button-cluster" style="margin:12px 0">
+      <button id="picked-so-report-apply" class="secondary" type="button">Apply filters</button>
+      <button id="picked-so-report-reset" class="ghost" type="button">Reset filters</button>
+      <button id="picked-so-report-print" class="secondary" type="button">Print Report</button>
+    </div>
+    <div id="picked-so-report-summary" class="info-box">Open the report to load picked Sales Order records.</div>
+    <div id="picked-so-report-table" class="table-wrap" style="max-height:60vh;overflow:auto"></div>
+  </dialog>
+
   <dialog id="shipper-batch-approval-dialog" class="edit-dialog">
     <div class="scanner-head">
       <div><h3>Approve Batch Shipper Put-away</h3><p>Supervisor / Admin / Owner approval. The Picker remains signed in.</p></div>
@@ -1731,7 +1763,7 @@
   </script>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260929-live-dashboard-receiving-kpis-v1"></script>
+  <script type="module" src="app.js?v=20260930-live-picking-customer-po-report-v1"></script>
   <script type="module" src="receiving-v1.js?v=20260929-live-receiving-putaway-controls-v1"></script>
 </body>
 </html>
