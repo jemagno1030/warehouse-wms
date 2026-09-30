@@ -261,6 +261,7 @@ const state = {
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
   pickOrderCorrections: [],
+  pickedSalesOrderReport: { rows: [], total: 0, filters: {}, loaded: false },
   pickRequestedCorrectionCount: 0,
   pickPendingReturnCount: 0,
   pickBlockingPendingReturnCount: 0,
@@ -915,8 +916,14 @@ function setupStaticEvents() {
   });
 
   $('pick-lock-btn').addEventListener('click', lockPickLocation);
+  $('pick-so').addEventListener('input', handlePickSalesOrderInputChange);
   $('pick-so').addEventListener('change', refreshPickSalesOrderStatus);
   $('pick-so').addEventListener('blur', refreshPickSalesOrderStatus);
+  $('picked-so-report-btn').addEventListener('click', openPickedSalesOrderReport);
+  $('picked-so-report-close').addEventListener('click', () => $('picked-so-report-dialog').close());
+  $('picked-so-report-apply').addEventListener('click', () => void loadPickedSalesOrderReport());
+  $('picked-so-report-reset').addEventListener('click', resetPickedSalesOrderReportFilters);
+  $('picked-so-report-print').addEventListener('click', printPickedSalesOrderReport);
   $('pick-so-reopen-request-btn').addEventListener('click', requestReopenCompletedSalesOrder);
   $('pick-barcode').addEventListener('input', () => syncOperationCompleteGuard('pick'));
   $('pick-barcode').addEventListener('change', () => {
@@ -3377,6 +3384,260 @@ async function submitShipperPutawayBatch(payload, approvalToken = null, approval
   $('sp-result').classList.remove('hidden');
 }
 
+function pickedSalesOrderReportFilters() {
+  return {
+    so: $('picked-so-report-so').value.trim(),
+    po: $('picked-so-report-po').value.trim(),
+    customer: $('picked-so-report-customer').value.trim(),
+    sku: $('picked-so-report-sku').value.trim()
+  };
+}
+
+function pickedSalesOrderReportFilterText(filters = {}) {
+  const parts = [];
+  if (filters.so) parts.push(`SO contains "${filters.so}"`);
+  if (filters.po) parts.push(`PO contains "${filters.po}"`);
+  if (filters.customer) parts.push(`Customer contains "${filters.customer}"`);
+  if (filters.sku) parts.push(`SKU contains "${filters.sku}"`);
+  return parts.length ? parts.join(' · ') : 'None — all picked Sales Orders';
+}
+
+function pickedSalesOrderReportSkuText(row) {
+  return [row.brand,row.description,row.variant,row.size].filter(Boolean).join(' ') || '—';
+}
+
+async function openPickedSalesOrderReport() {
+  const dialog = $('picked-so-report-dialog');
+  if (!dialog) return;
+  if (!dialog.open) dialog.showModal();
+  await loadPickedSalesOrderReport();
+}
+
+async function loadPickedSalesOrderReport() {
+  const button = $('picked-so-report-apply');
+  const filters = pickedSalesOrderReportFilters();
+  const pageSize = 500;
+  let offset = 0;
+  let total = 0;
+  const rows = [];
+
+  setBusy(button, true, 'Loading…');
+  try {
+    while (true) {
+      const { data, error } = await supabase.rpc('get_picked_sales_order_report_v1', {
+        p_so: filters.so || null,
+        p_po_number: filters.po || null,
+        p_customer_name: filters.customer || null,
+        p_sku: filters.sku || null,
+        p_limit: pageSize,
+        p_offset: offset
+      });
+      if (error) throw error;
+
+      const batch = data || [];
+      if (!batch.length) break;
+
+      if (!total) total = Number(batch[0].total_count || 0);
+      rows.push(...batch);
+      if (rows.length >= total || batch.length < pageSize) break;
+      offset += batch.length;
+    }
+
+    state.pickedSalesOrderReport = {
+      rows,
+      total: total || rows.length,
+      filters: { ...filters },
+      loaded: true
+    };
+    renderPickedSalesOrderReport();
+  } catch (error) {
+    state.pickedSalesOrderReport = { rows: [], total: 0, filters: { ...filters }, loaded: false };
+    $('picked-so-report-summary').textContent = `Report could not be loaded: ${friendlyError(error)}`;
+    $('picked-so-report-table').innerHTML = emptyState('Picked Sales Order Report is unavailable.');
+    toast(friendlyError(error), 'error');
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function renderPickedSalesOrderReport() {
+  const report = state.pickedSalesOrderReport || { rows: [], total: 0, filters: {} };
+  const rows = report.rows || [];
+  $('picked-so-report-summary').innerHTML =
+    `<strong>${Number(report.total || rows.length).toLocaleString()} picked line(s)</strong> · ` +
+    `Filters: ${escapeHtml(pickedSalesOrderReportFilterText(report.filters))}`;
+
+  if (!rows.length) {
+    $('picked-so-report-table').innerHTML = emptyState('No picked Sales Order records match the current filters.');
+    return;
+  }
+
+  $('picked-so-report-table').innerHTML = `
+    <table>
+      <thead><tr>
+        <th>SO</th><th>PO</th><th>Customer</th><th>Picked</th><th>Transaction</th>
+        <th>Picker</th><th>Rack</th><th>SKU</th><th>Container</th><th>Expiry</th><th>UOM</th><th>Qty</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((row) => `<tr>
+          <td><strong>${escapeHtml(row.sales_order || '—')}</strong></td>
+          <td>${escapeHtml(row.po_number || '—')}</td>
+          <td>${escapeHtml(row.customer_name || '—')}</td>
+          <td>${escapeHtml(fmtDateTime(row.picked_at))}</td>
+          <td>${escapeHtml(row.transaction_no || '—')}</td>
+          <td>${escapeHtml(row.picker_username || '—')}</td>
+          <td>${escapeHtml(row.location_code || '—')}</td>
+          <td>${escapeHtml(pickedSalesOrderReportSkuText(row))}</td>
+          <td>${escapeHtml(row.container_no || '—')}</td>
+          <td>${escapeHtml(fmtDate(row.expiry_date))}</td>
+          <td>${escapeHtml(row.uom || '—')}</td>
+          <td>${escapeHtml(fmtQty(row.picked_qty))}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+function resetPickedSalesOrderReportFilters() {
+  ['picked-so-report-so','picked-so-report-po','picked-so-report-customer','picked-so-report-sku']
+    .forEach((id) => { $(id).value = ''; });
+  void loadPickedSalesOrderReport();
+}
+
+function printPickedSalesOrderReport() {
+  const report = state.pickedSalesOrderReport;
+  const rows = report?.rows || [];
+  if (!report?.loaded) return toast('Load the Picked Sales Order Report first.', 'error');
+  if (!rows.length) return toast('No picked Sales Order records match the current filters.', 'error');
+
+  const existing = $('picked-so-report-print-style');
+  if (existing) existing.remove();
+
+  const style = document.createElement('style');
+  style.id = 'picked-so-report-print-style';
+  style.textContent = `
+    @page { size: Letter landscape; margin: 0.30in; }
+    @media print {
+      body > *:not(#print-area) { display:none !important; }
+      #print-area { display:block !important; }
+      html,body { background:#fff !important; color:#000 !important; }
+    }
+    #print-area.picked-so-print {
+      font-family:Arial,Helvetica,sans-serif;
+      color:#000;
+      background:#fff;
+      font-size:7.2pt;
+    }
+    #print-area.picked-so-print * { box-sizing:border-box; color:#000; }
+    #print-area.picked-so-print h1 { margin:0 0 2mm; font-size:15pt; text-align:center; }
+    #print-area.picked-so-print h2 { margin:0 0 4mm; font-size:11pt; text-align:center; }
+    #print-area.picked-so-print .report-meta {
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:1.5mm 7mm;
+      margin-bottom:4mm;
+      line-height:1.2;
+    }
+    #print-area.picked-so-print table {
+      width:100%;
+      border-collapse:collapse;
+      table-layout:fixed;
+    }
+    #print-area.picked-so-print thead { display:table-header-group; }
+    #print-area.picked-so-print tr {
+      break-inside:avoid;
+      page-break-inside:avoid;
+    }
+    #print-area.picked-so-print th,
+    #print-area.picked-so-print td {
+      border:1px solid #000;
+      padding:1.6mm 1.2mm;
+      vertical-align:top;
+      white-space:normal !important;
+      overflow:hidden;
+      overflow-wrap:anywhere !important;
+      word-break:break-word;
+      line-height:1.18;
+      height:auto !important;
+    }
+    #print-area.picked-so-print th {
+      font-size:7pt;
+      text-align:left;
+      background:#eee !important;
+      font-weight:800;
+      -webkit-print-color-adjust:exact;
+      print-color-adjust:exact;
+    }
+    #print-area.picked-so-print td { min-height:8mm; }
+    #print-area.picked-so-print .c-so{width:8%}
+    #print-area.picked-so-print .c-po{width:8%}
+    #print-area.picked-so-print .c-customer{width:13%}
+    #print-area.picked-so-print .c-picked{width:10%}
+    #print-area.picked-so-print .c-tx{width:9%}
+    #print-area.picked-so-print .c-rack{width:5%}
+    #print-area.picked-so-print .c-sku{width:22%}
+    #print-area.picked-so-print .c-container{width:8%}
+    #print-area.picked-so-print .c-expiry{width:7%}
+    #print-area.picked-so-print .c-uom{width:5%}
+    #print-area.picked-so-print .c-qty{width:5%;text-align:right}
+    #print-area.picked-so-print .report-footer {
+      margin-top:3mm;
+      font-size:7pt;
+      line-height:1.2;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const printArea = document.createElement('section');
+  printArea.id = 'print-area';
+  printArea.className = 'picked-so-print';
+  const generatedAt = new Date().toLocaleString();
+
+  printArea.innerHTML = `
+    <h1>IFTC WAREHOUSE LOCATOR SYSTEM (JPM)</h1>
+    <h2>PICKED SALES ORDER REPORT</h2>
+    <div class="report-meta">
+      <div><strong>Generated:</strong> ${escapeHtml(generatedAt)}</div>
+      <div><strong>Report lines:</strong> ${rows.length.toLocaleString()}</div>
+      <div><strong>Filters:</strong> ${escapeHtml(pickedSalesOrderReportFilterText(report.filters))}</div>
+      <div><strong>Scope:</strong> Completed PICK lines for normal Sales Orders; SO 0 excluded.</div>
+    </div>
+    <table>
+      <thead><tr>
+        <th class="c-so">SO</th><th class="c-po">PO</th><th class="c-customer">Customer</th>
+        <th class="c-picked">Picked</th><th class="c-tx">Transaction</th><th class="c-rack">Rack</th>
+        <th class="c-sku">SKU</th><th class="c-container">Container</th><th class="c-expiry">Expiry</th>
+        <th class="c-uom">UOM</th><th class="c-qty">Qty</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((row) => `<tr>
+          <td class="c-so"><strong>${escapeHtml(row.sales_order || '—')}</strong></td>
+          <td class="c-po">${escapeHtml(row.po_number || '—')}</td>
+          <td class="c-customer">${escapeHtml(row.customer_name || '—')}</td>
+          <td class="c-picked">${escapeHtml(fmtDateTime(row.picked_at))}</td>
+          <td class="c-tx">${escapeHtml(row.transaction_no || '—')}</td>
+          <td class="c-rack">${escapeHtml(row.location_code || '—')}</td>
+          <td class="c-sku">${escapeHtml(pickedSalesOrderReportSkuText(row))}</td>
+          <td class="c-container">${escapeHtml(row.container_no || '—')}</td>
+          <td class="c-expiry">${escapeHtml(fmtDate(row.expiry_date))}</td>
+          <td class="c-uom">${escapeHtml(row.uom || '—')}</td>
+          <td class="c-qty">${escapeHtml(fmtQty(row.picked_qty))}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+    <div class="report-footer"><strong>Read-only report.</strong> Printing does not modify Sales Orders, Picking history, or inventory.</div>
+  `;
+
+  document.body.appendChild(printArea);
+  try {
+    window.print();
+  } finally {
+    setTimeout(() => {
+      printArea.remove();
+      style.remove();
+    }, 1000);
+  }
+}
+
 async function lockPickLocation() {
   const so = normalizePickSalesOrderInput();
   const location = normalizeLocation($('pick-location').value);
@@ -3398,7 +3659,20 @@ async function lockPickLocation() {
     if (!reopened) return;
   }
 
-  const locked = await acquireOperationLock('pick', location, 'PICK', so);
+  const customerName = $('pick-customer').value.trim();
+  const poNumber = $('pick-po-number').value.trim();
+
+  if (!customerName) {
+    $('pick-customer').focus();
+    return toast('Customer is required for a normal Sales Order.', 'error');
+  }
+  if (customerName.length > 200) return toast('Customer is limited to 200 characters.', 'error');
+  if (poNumber.length > 100) return toast('PO number is limited to 100 characters.', 'error');
+
+  const locked = await acquireOperationLock('pick', location, 'PICK', so, {
+    customerName,
+    poNumber
+  });
   if (locked) {
     $('pick-so-override').checked = false;
     $('pick-so-override-reason').value = '';
@@ -3539,13 +3813,26 @@ async function acquireOperationLock(operation, location, type, salesOrder, optio
   const opState = state[operation];
   const button = operation === 'pick' ? $('pick-lock-btn') : $('tr-lock-btn');
   setBusy(button, true, 'Locking…');
-  const { data, error } = await supabase.rpc('acquire_location_lock', {
-    p_location_code: location,
-    p_operation: type,
-    p_sales_order: salesOrder,
-    p_override_completed: false,
-    p_override_reason: null
-  });
+
+  const rpcName = operation === 'pick'
+    ? 'acquire_pick_location_lock_customer_po_v1'
+    : 'acquire_location_lock';
+  const rpcArgs = operation === 'pick'
+    ? {
+        p_location_code: location,
+        p_sales_order: salesOrder,
+        p_customer_name: options.customerName || null,
+        p_po_number: options.poNumber || null
+      }
+    : {
+        p_location_code: location,
+        p_operation: type,
+        p_sales_order: salesOrder,
+        p_override_completed: false,
+        p_override_reason: null
+      };
+
+  const { data, error } = await supabase.rpc(rpcName, rpcArgs);
   setBusy(button, false);
   if (error) {
     const message = friendlyError(error);
@@ -3555,6 +3842,9 @@ async function acquireOperationLock(operation, location, type, salesOrder, optio
       $('pick-so-override-reason').focus();
       toast('This Sales Order is completed. Enter a reopening reason, then click Request Supervisor/Admin/Owner approval.', 'error');
       return false;
+    }
+    if (message.includes('PICK_SALES_ORDER_DETAILS_MISMATCH')) {
+      await refreshPickSalesOrderStatus();
     }
     toast(message, 'error');
     return false;
@@ -3571,6 +3861,7 @@ async function acquireOperationLock(operation, location, type, salesOrder, optio
   toast(`${opState.locationCode} locked for your ${type.toLowerCase()} session.`, 'success');
   return true;
 }
+
 
 function startHeartbeat(opState) {
   stopHeartbeat(opState);
@@ -5251,6 +5542,7 @@ function updatePickSalesOrderControls() {
       }
     }
   }
+  syncPickSalesOrderDetailsControls();
 }
 
 function syncPickOverrideControls() {
@@ -5294,7 +5586,12 @@ async function refreshPickSalesOrderStatus() {
   state.pickBlockingPendingReturnCount = (so && !isStockAdjustmentSalesOrder(so)) ? -1 : 0;
 
   if (!so) {
-    state.pickOrder = { salesOrder: null, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
+    state.pickOrder = {
+      salesOrder: null, status: null, pickCount: 0, openedBy: null,
+      isCurrentOwner: false, customerName: null, poNumber: null
+    };
+    $('pick-customer').value = '';
+    $('pick-po-number').value = '';
     box.innerHTML = '<strong>Sales order status:</strong> enter a sales order number. A completed Sales Order requires Supervisor/Admin/Owner login-password approval before reuse.';
     syncPickOverrideControls();
     updatePickSalesOrderControls();
@@ -5303,7 +5600,13 @@ async function refreshPickSalesOrderStatus() {
   }
 
   if (isStockAdjustmentSalesOrder(so)) {
-    state.pickOrder = { salesOrder: '0', status: 'ADJUSTMENT', pickCount: 0, openedBy: state.profile?.username || null, isCurrentOwner: true };
+    state.pickOrder = {
+      salesOrder: '0', status: 'ADJUSTMENT', pickCount: 0,
+      openedBy: state.profile?.username || null, isCurrentOwner: true,
+      customerName: null, poNumber: null
+    };
+    $('pick-customer').value = '';
+    $('pick-po-number').value = '';
     box.innerHTML = `<strong>Warehouse Stock Adjustment:</strong> Sales Order <strong>0</strong> is a reusable adjustment code and may be used indefinitely. Each completed rack is saved directly as a PICK transaction under SO 0. It does not become a completed Sales Order and does not require <strong>Finish Sales Order</strong>.`;
     syncPickOverrideControls();
     updatePickSalesOrderControls();
@@ -5311,13 +5614,16 @@ async function refreshPickSalesOrderStatus() {
     return true;
   }
 
-  const { data, error } = await supabase.rpc('get_pick_sales_order_status_continuation_v1', { p_sales_order: so });
+  const { data, error } = await supabase.rpc('get_pick_sales_order_status_customer_po_v1', { p_sales_order: so });
 
   // Ignore an older lookup if the user has already entered another sales order.
   if (requestNo !== state.pickOrderLookupSequence || normalizePickSalesOrder($('pick-so').value) !== so) return false;
 
   if (error) {
-    state.pickOrder = { salesOrder: so, status: null, pickCount: 0, openedBy: null, isCurrentOwner: false };
+    state.pickOrder = {
+      salesOrder: so, status: null, pickCount: 0, openedBy: null,
+      isCurrentOwner: false, customerName: null, poNumber: null
+    };
     box.innerHTML = `<strong>Sales order status:</strong> ${escapeHtml(friendlyError(error))}`;
     syncPickOverrideControls();
     resetPickCorrectionReporting();
@@ -5328,8 +5634,11 @@ async function refreshPickSalesOrderStatus() {
 
   const row = data?.[0];
   if (!row?.order_exists) {
-    state.pickOrder = { salesOrder: so, status: 'NEW', pickCount: 0, openedBy: null, isCurrentOwner: false };
-    box.innerHTML = `<strong>Sales order status:</strong> New sales order <strong>${escapeHtml(so)}</strong>. It will open when the first source rack is locked.`;
+    state.pickOrder = {
+      salesOrder: so, status: 'NEW', pickCount: 0, openedBy: null,
+      isCurrentOwner: false, customerName: null, poNumber: null
+    };
+    box.innerHTML = `<strong>Sales order status:</strong> New sales order <strong>${escapeHtml(so)}</strong>. Customer is required; PO number is optional. The order will open when the first source rack is locked.`;
   } else {
     state.pickOrder = {
       salesOrder: row.order_number,
@@ -5341,13 +5650,22 @@ async function refreshPickSalesOrderStatus() {
       lastCompletedAt: row.last_completed_at || row.completed_at || null,
       reopenPeriodStart: row.reopen_period_start || null,
       reopenAllowedThisMonth: Boolean(row.reopen_allowed_this_month),
-      isReopenedCycle: Boolean(row.is_reopened_cycle)
+      isReopenedCycle: Boolean(row.is_reopened_cycle),
+      customerName: row.customer_name || null,
+      poNumber: row.po_number || null
     };
+    if (row.customer_name) $('pick-customer').value = row.customer_name;
+    if (row.customer_name) $('pick-po-number').value = row.po_number || '';
+
+    const detailsText = row.customer_name
+      ? ` · Customer: ${escapeHtml(row.customer_name)}${row.po_number ? ` · PO: ${escapeHtml(row.po_number)}` : ''}`
+      : ' · Customer details are not yet stored for this legacy Sales Order. Enter Customer before locking the next rack.';
+
     if (row.order_status === 'COMPLETED') {
       if (row.reopen_allowed_this_month === false) {
-        box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was previously completed ${row.last_completed_at || row.completed_at ? `on ${escapeHtml(fmtDateTime(row.last_completed_at || row.completed_at))}` : ''}. <strong>Opening this sales order is only valid within the month of previous completion. Prepare another SO or do necessary warehouse adjustment as an alternative</strong>`;
+        box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was previously completed ${row.last_completed_at || row.completed_at ? `on ${escapeHtml(fmtDateTime(row.last_completed_at || row.completed_at))}` : ''}. <strong>Opening this sales order is only valid within the month of previous completion. Prepare another SO or do necessary warehouse adjustment as an alternative</strong>${detailsText}`;
       } else {
-        box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was completed ${row.last_completed_at || row.completed_at ? `on ${escapeHtml(fmtDateTime(row.last_completed_at || row.completed_at))}` : ''}. Reopening is valid only within its protected completion month and still requires a currently active Supervisor, Admin, or Owner to approve with their normal WMS login password.`;
+        box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> was completed ${row.last_completed_at || row.completed_at ? `on ${escapeHtml(fmtDateTime(row.last_completed_at || row.completed_at))}` : ''}. Reopening is valid only within its protected completion month and still requires a currently active Supervisor, Admin, or Owner to approve with their normal WMS login password.${detailsText}`;
       }
     } else {
       const lockMessage = row.is_current_owner
@@ -5356,7 +5674,7 @@ async function refreshPickSalesOrderStatus() {
       const continuationMessage = row.is_reopened_cycle
         ? ` · Reopened continuation: ${Number(row.total_pick_transaction_count || 0).toLocaleString()} total historical/current rack pick(s) remain readable; only ${Number(row.pick_transaction_count || 0).toLocaleString()} pick(s) belong to this open cycle.`
         : '';
-      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> is OPEN by ${escapeHtml(row.opened_by_username || 'a user')} · ${Number(row.pick_transaction_count || 0).toLocaleString()} completed rack pick(s) in the current cycle.${continuationMessage} Continue to another rack or finish the sales order.${lockMessage}`;
+      box.innerHTML = `<strong>Sales order status:</strong> <strong>${escapeHtml(row.order_number)}</strong> is OPEN by ${escapeHtml(row.opened_by_username || 'a user')} · ${Number(row.pick_transaction_count || 0).toLocaleString()} completed rack pick(s) in the current cycle.${continuationMessage} Continue to another rack or finish the sales order.${lockMessage}${detailsText}`;
     }
   }
 
@@ -5364,6 +5682,59 @@ async function refreshPickSalesOrderStatus() {
   updatePickSalesOrderControls();
   await loadPickSalesOrderSummary();
   return true;
+}
+
+function handlePickSalesOrderInputChange() {
+  if (state.pick.lockToken) return;
+  const typed = normalizePickSalesOrder($('pick-so')?.value || '');
+  const loaded = normalizePickSalesOrder(state.pickOrder?.salesOrder || '');
+  if (typed === loaded) return;
+
+  $('pick-customer').value = '';
+  $('pick-po-number').value = '';
+  state.pickOrder = {
+    salesOrder: typed || null,
+    status: typed ? null : null,
+    pickCount: 0,
+    openedBy: null,
+    isCurrentOwner: false,
+    customerName: null,
+    poNumber: null
+  };
+  syncPickSalesOrderDetailsControls();
+}
+
+function syncPickSalesOrderDetailsControls() {
+  const customer = $('pick-customer');
+  const po = $('pick-po-number');
+  if (!customer || !po) return;
+
+  const so = normalizePickSalesOrder($('pick-so')?.value || '');
+  const adjustmentMode = isStockAdjustmentSalesOrder(so);
+  const savedCustomer = String(state.pickOrder?.customerName || '').trim();
+  const savedPo = String(state.pickOrder?.poNumber || '').trim();
+
+  customer.required = !adjustmentMode;
+  if (adjustmentMode) {
+    customer.value = '';
+    po.value = '';
+    customer.disabled = true;
+    po.disabled = true;
+    customer.title = 'Customer is not used for Sales Order 0 Warehouse Stock Adjustment.';
+    po.title = 'PO number is not used for Sales Order 0 Warehouse Stock Adjustment.';
+    return;
+  }
+
+  if (savedCustomer) {
+    customer.value = savedCustomer;
+    po.value = savedPo;
+  }
+
+  const lockedMetadata = Boolean(savedCustomer) || Boolean(state.pick.lockToken);
+  customer.disabled = lockedMetadata;
+  po.disabled = lockedMetadata;
+  customer.title = savedCustomer ? 'Customer is saved with this Sales Order.' : '';
+  po.title = savedCustomer ? 'PO number is saved with this Sales Order.' : '';
 }
 
 async function exitStockAdjustmentMode() {
