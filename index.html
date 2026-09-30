@@ -811,6 +811,7 @@
             <div><h3>Picking session</h3><p>Normal Sales Orders use the existing multi-rack workflow. Sales Order 0 is reserved for reusable Warehouse Stock Adjustment.</p></div>
             <div class="button-cluster">
               <button id="picked-so-report-btn" class="secondary" type="button">Picked Sales Order Report</button>
+              <button id="so0-adjustment-report-btn" class="secondary" type="button">SO-0 Adjustment Report</button>
               <span id="pick-lock-chip" class="status-chip neutral">No location locked</span>
             </div>
           </div>
@@ -1483,6 +1484,49 @@
     </div>
   </dialog>
 
+  <dialog id="so0-adjustment-report-dialog" class="edit-dialog" style="width:min(1180px,calc(100% - 24px));">
+    <div class="scanner-head">
+      <div>
+        <h3>SO-0 Warehouse Stock Adjustment Report</h3>
+        <p>Completed Sales Order 0 PICK lines showing stock adjusted out of warehouse inventory.</p>
+      </div>
+      <button id="so0-adjustment-report-close" class="icon-button" type="button">✕</button>
+    </div>
+    <div class="form-grid two">
+      <label>SKU<input id="so0-adjustment-report-sku" autocomplete="off" placeholder="Brand, description, variant, size, or barcode" /></label>
+      <label>Picker name<input id="so0-adjustment-report-picker" autocomplete="off" /></label>
+      <label>Date from<input id="so0-adjustment-report-date-from" type="date" /></label>
+      <label>Date to<input id="so0-adjustment-report-date-to" type="date" /></label>
+      <label>Reason made<input id="so0-adjustment-report-reason" autocomplete="off" placeholder="Search adjustment reason / remarks" /></label>
+      <label>Sort by
+        <select id="so0-adjustment-report-sort">
+          <option value="transaction_date">Transaction date</option>
+          <option value="sku">SKU</option>
+          <option value="picker">Picker name</option>
+          <option value="reason">Reason made</option>
+        </select>
+      </label>
+      <label>Sort order
+        <select id="so0-adjustment-report-sort-direction">
+          <option value="desc">Descending</option>
+          <option value="asc">Ascending</option>
+        </select>
+      </label>
+    </div>
+    <div class="button-cluster" style="margin:12px 0">
+      <button id="so0-adjustment-report-apply" class="secondary" type="button">Apply filters</button>
+      <button id="so0-adjustment-report-reset" class="ghost" type="button">Reset filters</button>
+      <button id="so0-adjustment-report-print" class="secondary" type="button">Print Report</button>
+    </div>
+    <div id="so0-adjustment-report-summary" class="info-box">Open the report to load Sales Order 0 stock adjustment records.</div>
+    <div id="so0-adjustment-report-table" class="table-wrap" style="max-height:60vh;overflow:auto"></div>
+    <div class="button-cluster" style="margin:10px 0 0">
+      <button id="so0-adjustment-report-prev" class="ghost" type="button">Previous</button>
+      <span id="so0-adjustment-report-page" class="status-chip neutral">Page 1</span>
+      <button id="so0-adjustment-report-next" class="ghost" type="button">Next</button>
+    </div>
+  </dialog>
+
   <dialog id="shipper-batch-approval-dialog" class="edit-dialog">
     <div class="scanner-head">
       <div><h3>Approve Batch Shipper Put-away</h3><p>Supervisor / Admin / Owner approval. The Picker remains signed in.</p></div>
@@ -1783,7 +1827,7 @@
   </script>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260930-live-picked-so-sorting-pagination-v1"></script>
+  <script type="module" src="app.js?v=20260930-live-so0-adjustment-report-v1"></script>
   <script type="module" src="receiving-v1.js?v=20260929-live-receiving-putaway-controls-v1"></script>
 </body>
 </html>
