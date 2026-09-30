@@ -528,7 +528,7 @@ function installUomConversionUi() {
   screen.innerHTML = `
     <div class="card">
       <div class="card-head"><div><h3>UOM Conversion — Break / Repack</h3><p>STANDARD loose stock only. Container and expiry stay with the stock. Output may remain in the same rack or be relocated to another physical rack.</p></div></div>
-      <div class="info-box"><strong>BREAK</strong> converts larger packaging to smaller packaging and may record a shortage/damage variance. <strong>REPACK</strong> converts smaller packaging to larger packaging and requires an exact complete quantity.</div>
+      <div class="info-box"><strong>BREAK / REPACK quantity integrity rule:</strong> conversion must produce the exact configured equivalent quantity. Example: if 1 CASE = 12 PIECES, breaking 1 CASE creates exactly 12 PIECES. Damaged, defective, or short items must be removed separately through <strong>Picking → Sales Order 0</strong> for proper monitoring and audit.</div>
       <form id="uomc-form" class="stack">
         <div class="form-grid two">
           <label>Source rack *<div class="scan-field"><input id="uomc-source-rack" autocomplete="off" placeholder="Scan or enter rack" required /><button type="button" class="scan-btn" data-scan-target="uomc-source-rack" data-scan-kind="location">Scan</button></div></label>
@@ -540,7 +540,7 @@ function installUomConversionUi() {
         <div class="form-grid three">
           <label>Source quantity *<input id="uomc-source-qty" type="number" min="1" step="1" inputmode="numeric" required /></label>
           <label>Convert to *<select id="uomc-target-uom" required><option value="">Select target UOM</option></select></label>
-          <label>Actual output quantity *<input id="uomc-actual-output" type="number" min="1" step="1" inputmode="numeric" required /></label>
+          <label>Exact output quantity *<input id="uomc-actual-output" type="number" min="1" step="1" inputmode="numeric" required readonly /></label>
         </div>
         <div id="uomc-preview" class="info-box">Select a configured source lot and target UOM.</div>
         <label><input id="uomc-relocate" type="checkbox" /> Relocate converted output to another rack</label>
@@ -555,8 +555,6 @@ function installUomConversionUi() {
             <option>Make available for pack picking</option>
             <option>Repacked to pack</option>
             <option>Repacked to case</option>
-            <option>Damaged contents</option>
-            <option>Short contents</option>
             <option>Repacking</option>
             <option value="OTHER">Other</option>
           </select></label>
@@ -591,32 +589,6 @@ function installUomConversionUi() {
     </form>`;
   document.body.appendChild(dialog);
 
-  const varianceDialog = document.createElement('dialog');
-  varianceDialog.id = 'uomc-variance-dialog';
-  varianceDialog.className = 'edit-dialog';
-  varianceDialog.innerHTML = `
-    <div class="scanner-head">
-      <div>
-        <h3>BREAK Variance Detected</h3>
-        <p>The recovered quantity is lower than the configured expected output.</p>
-      </div>
-      <button id="uomc-variance-close" class="icon-button" type="button">✕</button>
-    </div>
-    <form id="uomc-variance-form" class="stack">
-      <div id="uomc-variance-summary" class="info-box"></div>
-      <div class="info-box">
-        Verify the physical quantity before continuing. A separate variance reason is required so an accidental quantity entry cannot be completed as a shortage.
-      </div>
-      <label>Variance reason / explanation *
-        <textarea id="uomc-variance-reason" maxlength="240" rows="3" required
-          placeholder="Example: 1 piece damaged and not recoverable during case break"></textarea>
-      </label>
-      <div class="button-cluster">
-        <button type="submit" class="primary">CONFIRM VARIANCE & COMPLETE</button>
-        <button id="uomc-variance-cancel" type="button" class="ghost">Cancel</button>
-      </div>
-    </form>`;
-  document.body.appendChild(varianceDialog);
 
   ['uomc-source-rack','uomc-destination-rack'].forEach((id) => {
     const input=$(id); if (!input) return;
@@ -730,24 +702,45 @@ function selectUomConversionLot() {
 
 function syncUomConversionPreview() {
   const lot=state.uomConversion.selectedLot, target=String($('uomc-target-uom')?.value||'').toUpperCase();
-  if (!lot||!target) { if ($('uomc-preview')) $('uomc-preview').textContent='Select a configured source lot and target UOM.'; return; }
+  const output=$('uomc-actual-output');
+
+  if (!lot||!target) {
+    if ($('uomc-preview')) $('uomc-preview').textContent='Select a configured source lot and target UOM.';
+    if (output) { output.value=''; output.readOnly=true; delete output.dataset.expected; }
+    return;
+  }
+
   const source=String(lot.source_uom).toUpperCase(), sourceFactor=uomFactor(lot,source), targetFactor=uomFactor(lot,target);
   const sourceQty=Number($('uomc-source-qty').value||0);
-  if (!Number.isInteger(sourceQty)||sourceQty<1||!sourceFactor||!targetFactor) { $('uomc-preview').textContent='Enter a whole source quantity.'; return; }
-  const base=sourceQty*sourceFactor, isBreak=sourceFactor>targetFactor;
-  if (!isBreak && base%targetFactor!==0) {
-    $('uomc-preview').innerHTML=`<strong>REPACK</strong><br>Selected ${sourceQty} ${escapeHtml(source)} cannot make a complete ${escapeHtml(target)}. Increase the source quantity.`;
-    $('uomc-actual-output').value=''; $('uomc-actual-output').readOnly=true; return;
+
+  if (!Number.isInteger(sourceQty)||sourceQty<1||!sourceFactor||!targetFactor) {
+    $('uomc-preview').textContent='Enter a whole source quantity.';
+    if (output) { output.value=''; output.readOnly=true; delete output.dataset.expected; }
+    return;
   }
+
+  const base=sourceQty*sourceFactor, isBreak=sourceFactor>targetFactor;
+
+  if (base%targetFactor!==0) {
+    $('uomc-preview').innerHTML=`<strong>${isBreak?'BREAK':'REPACK'}</strong><br>Selected ${sourceQty} ${escapeHtml(source)} cannot produce a whole ${escapeHtml(target)} quantity under the configured conversion ratio.`;
+    if (output) { output.value=''; output.readOnly=true; delete output.dataset.expected; }
+    return;
+  }
+
   const expected=base/targetFactor;
-  if (!Number.isInteger(expected)) { $('uomc-preview').textContent='Configured ratio does not produce a whole target quantity.'; return; }
-  if (isBreak) {
-    $('uomc-actual-output').readOnly=false;
-    if (!$('uomc-actual-output').value || Number($('uomc-actual-output').dataset.expected||0)!==expected) $('uomc-actual-output').value=String(expected);
-  } else { $('uomc-actual-output').readOnly=true; $('uomc-actual-output').value=String(expected); }
-  $('uomc-actual-output').dataset.expected=String(expected);
-  const actual=Number($('uomc-actual-output').value||0), variance=isBreak&&Number.isInteger(actual)?expected-actual:0;
-  $('uomc-preview').innerHTML=`<strong>${isBreak?'BREAK':'REPACK'} ${escapeHtml(source)} → ${escapeHtml(target)}</strong><br>Expected output: <strong>${fmtQtyUom(expected,target)}</strong><br>Actual output: <strong>${Number.isFinite(actual)?fmtQtyUom(actual,target):'—'}</strong><br>Variance: <strong>${isBreak&&Number.isFinite(variance)?`${fmtQty(variance)} ${escapeHtml(target)}`:'0'}</strong>`;
+  if (!Number.isInteger(expected)||expected<1) {
+    $('uomc-preview').textContent='Configured ratio does not produce a whole target quantity.';
+    if (output) { output.value=''; output.readOnly=true; delete output.dataset.expected; }
+    return;
+  }
+
+  if (output) {
+    output.readOnly=true;
+    output.value=String(expected);
+    output.dataset.expected=String(expected);
+  }
+
+  $('uomc-preview').innerHTML=`<strong>${isBreak?'BREAK':'REPACK'} ${escapeHtml(source)} → ${escapeHtml(target)}</strong><br>Required exact output: <strong>${fmtQtyUom(expected,target)}</strong><br><small>No shortage/damage variance is allowed here. Use Sales Order 0 separately for defective, damaged, or missing stock.</small>`;
 }
 
 function syncUomConversionRelocation() {
@@ -758,95 +751,74 @@ function syncUomConversionReason() {
   const other=$('uomc-reason')?.value==='OTHER'; $('uomc-other-reason-wrap')?.classList.toggle('hidden',!other); if ($('uomc-other-reason')) $('uomc-other-reason').required=other;
 }
 
-function requestUomVarianceConfirmation({lot,target,sourceQty,expected,actual,variance,reason,destination}) {
-  const dialog=$('uomc-variance-dialog'), form=$('uomc-variance-form'), reasonInput=$('uomc-variance-reason');
-  const summary=$('uomc-variance-summary'), closeBtn=$('uomc-variance-close'), cancelBtn=$('uomc-variance-cancel');
-  if (!dialog||!form||!reasonInput||!summary) return Promise.resolve(null);
-
-  summary.innerHTML=`
-    <strong>BREAK ${escapeHtml(lot.source_uom)} → ${escapeHtml(target)}</strong><br>
-    SKU: ${escapeHtml(lot.sku_name)}<br>
-    Source rack: ${escapeHtml(lot.location_code)} · Destination rack: ${escapeHtml(destination)}<br>
-    Source quantity: <strong>${fmtQtyUom(sourceQty,lot.source_uom)}</strong><br>
-    Expected recovered quantity: <strong>${fmtQtyUom(expected,target)}</strong><br>
-    Actual recovered quantity: <strong>${fmtQtyUom(actual,target)}</strong><br>
-    Shortage / variance: <strong>${fmtQtyUom(variance,target)}</strong><br>
-    Original reason: ${escapeHtml(reason)}
-  `;
-  reasonInput.value='';
-
-  return new Promise((resolve)=>{
-    let settled=false;
-    const cleanup=()=>{
-      form.removeEventListener('submit',onSubmit);
-      closeBtn?.removeEventListener('click',onCancelClick);
-      cancelBtn?.removeEventListener('click',onCancelClick);
-      dialog.removeEventListener('cancel',onDialogCancel);
-    };
-    const finish=(value)=>{
-      if (settled) return;
-      settled=true;
-      cleanup();
-      if (dialog.open) dialog.close();
-      resolve(value);
-    };
-    const onSubmit=(event)=>{
-      event.preventDefault();
-      const varianceReason=reasonInput.value.trim();
-      if (!varianceReason) return toast('Enter a variance reason / explanation before confirming the shortage.','error');
-      finish(varianceReason);
-    };
-    const onCancelClick=()=>finish(null);
-    const onDialogCancel=(event)=>{ event.preventDefault(); finish(null); };
-
-    form.addEventListener('submit',onSubmit);
-    closeBtn?.addEventListener('click',onCancelClick);
-    cancelBtn?.addEventListener('click',onCancelClick);
-    dialog.addEventListener('cancel',onDialogCancel);
-    dialog.showModal();
-    window.setTimeout(()=>reasonInput.focus(),0);
-  });
-}
 
 async function submitUomConversion(event) {
   event.preventDefault();
-  const lot=state.uomConversion.selectedLot; if (!lot) return toast('Select a source lot.','error');
+
+  const lot=state.uomConversion.selectedLot;
+  if (!lot) return toast('Select a source lot.','error');
   if (lot.is_releasable===false) return toast('Source lot is ON HOLD and cannot be converted.','error');
+
   const target=String($('uomc-target-uom').value||'').toUpperCase();
-  const sourceQty=Number($('uomc-source-qty').value), actual=Number($('uomc-actual-output').value);
-  if (!target||!Number.isInteger(sourceQty)||sourceQty<1||!Number.isInteger(actual)||actual<1) return toast('Enter valid whole source and output quantities.','error');
+  const sourceQty=Number($('uomc-source-qty').value);
+  const actual=Number($('uomc-actual-output').value);
+
+  if (!target||!Number.isInteger(sourceQty)||sourceQty<1||!Number.isInteger(actual)||actual<1) {
+    return toast('Enter a valid whole source quantity and select the target UOM.','error');
+  }
   if (sourceQty>Number(lot.qty)) return toast('Source quantity exceeds the available lot balance.','error');
-  const reasonChoice=$('uomc-reason').value, reason=reasonChoice==='OTHER'?$('uomc-other-reason').value.trim():reasonChoice;
+
+  const reasonChoice=$('uomc-reason').value;
+  const reason=reasonChoice==='OTHER'?$('uomc-other-reason').value.trim():reasonChoice;
   if (!reason) return toast('Select or enter a reason.','error');
+
   const destination=$('uomc-relocate').checked?normalizeLocation($('uomc-destination-rack').value):lot.location_code;
   if (!destination) return toast('Enter a destination rack.','error');
-  syncUomConversionPreview();
-  const sourceFactor=uomFactor(lot,lot.source_uom), targetFactor=uomFactor(lot,target), isBreak=sourceFactor>targetFactor;
-  const expected=(sourceQty*sourceFactor)/targetFactor;
-  if (!Number.isInteger(expected)) return toast('Configured conversion does not produce whole target units.','error');
-  if (!isBreak && actual!==expected) return toast(`REPACK must create exactly ${expected} ${target}.`,'error');
-  if (isBreak && actual>expected) return toast('Actual recovered quantity cannot exceed expected quantity in V1.','error');
-  const variance=isBreak?expected-actual:0;
 
-  let varianceReason='';
-  if (variance>0) {
-    varianceReason=await requestUomVarianceConfirmation({lot,target,sourceQty,expected,actual,variance,reason,destination});
-    if (!varianceReason) return;
+  syncUomConversionPreview();
+
+  const sourceFactor=uomFactor(lot,lot.source_uom);
+  const targetFactor=uomFactor(lot,target);
+  const base=sourceQty*sourceFactor;
+
+  if (!sourceFactor||!targetFactor||base%targetFactor!==0) {
+    return toast('Configured conversion does not produce whole target units.','error');
   }
 
-  const confirmed=window.confirm(`${isBreak?'BREAK':'REPACK'} ${lot.source_uom} → ${target}\n\nSKU: ${lot.sku_name}\nSource rack: ${lot.location_code}\nDestination rack: ${destination}\nContainer: ${lot.container_no}\nExpiry: ${fmtDate(lot.expiry_date)}\n\nSource: ${sourceQty} ${lot.source_uom}\nExpected: ${expected} ${target}\nActual: ${actual} ${target}\nVariance: ${variance} ${target}\n\nReason: ${reason}${varianceReason?`\nVariance reason: ${varianceReason}`:''}\n\nThis will update inventory atomically. Continue?`);
+  const expected=base/targetFactor;
+  if (!Number.isInteger(expected)||actual!==expected) {
+    return toast(`BREAK / REPACK must create exactly ${expected} ${target}. Defective or short items must be adjusted separately through Sales Order 0.`,'error');
+  }
+
+  const isBreak=sourceFactor>targetFactor;
+  const confirmed=window.confirm(`${isBreak?'BREAK':'REPACK'} ${lot.source_uom} → ${target}\n\nSKU: ${lot.sku_name}\nSource rack: ${lot.location_code}\nDestination rack: ${destination}\nContainer: ${lot.container_no}\nExpiry: ${fmtDate(lot.expiry_date)}\n\nSource: ${sourceQty} ${lot.source_uom}\nExact output: ${expected} ${target}\n\nReason: ${reason}\n\nThis conversion must remain quantity-equivalent. Defective/short items are handled separately through Sales Order 0.\n\nThis will update inventory atomically. Continue?`);
   if (!confirmed) return;
-  const button=event.submitter; setBusy(button,true,'Converting…');
+
+  const button=event.submitter;
+  setBusy(button,true,'Converting…');
+
   try {
-    const {data,error}=await supabase.rpc('complete_uom_conversion_v1_confirmed',{
-      p_source_lot_id:lot.lot_id,p_target_uom:target,p_source_qty:sourceQty,p_actual_output_qty:actual,
-      p_destination_location_code:destination,p_reason:reason,p_variance_reason:varianceReason||null
+    const {data,error}=await supabase.rpc('complete_uom_conversion_v1',{
+      p_source_lot_id:lot.lot_id,
+      p_target_uom:target,
+      p_source_qty:sourceQty,
+      p_actual_output_qty:expected,
+      p_destination_location_code:destination,
+      p_reason:reason
     });
     if (error) return toast(friendlyError(error),'error');
-    const result=data?.[0]||{}; invalidateReports();
-    toast(`${result.operation||'UOM conversion'} completed${result.transaction_no?` · ${result.transaction_no}`:''}. ${sourceQty} ${lot.source_uom} → ${actual} ${target}${variance?` · variance ${variance}`:''}.`,'success');
-    const rack=$('uomc-source-rack').value; resetUomConversionForm(); $('uomc-source-rack').value=rack; await loadUomConversionSourceLots();
-  } finally { setBusy(button,false); }
+
+    const result=data?.[0]||{};
+    invalidateReports();
+    toast(`${result.operation||'UOM conversion'} completed${result.transaction_no?` · ${result.transaction_no}`:''}. ${sourceQty} ${lot.source_uom} → ${expected} ${target}.`,'success');
+
+    const rack=$('uomc-source-rack').value;
+    resetUomConversionForm();
+    $('uomc-source-rack').value=rack;
+    await loadUomConversionSourceLots();
+  } finally {
+    setBusy(button,false);
+  }
 }
 
 function setupStaticEvents() {
@@ -883,7 +855,6 @@ function setupStaticEvents() {
   $('uomc-source-lot')?.addEventListener('change', selectUomConversionLot);
   $('uomc-target-uom')?.addEventListener('change', syncUomConversionPreview);
   $('uomc-source-qty')?.addEventListener('input', syncUomConversionPreview);
-  $('uomc-actual-output')?.addEventListener('input', syncUomConversionPreview);
   $('uomc-relocate')?.addEventListener('change', syncUomConversionRelocation);
   $('uomc-reason')?.addEventListener('change', syncUomConversionReason);
   $('uomc-form')?.addEventListener('submit', submitUomConversion);
