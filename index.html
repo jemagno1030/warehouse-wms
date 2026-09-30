@@ -1453,6 +1453,21 @@
       <label>PO number<input id="picked-so-report-po" autocomplete="off" /></label>
       <label>Customer name<input id="picked-so-report-customer" autocomplete="off" /></label>
       <label>SKU<input id="picked-so-report-sku" autocomplete="off" placeholder="Brand, description, variant, size, or barcode" /></label>
+      <label>Sort by
+        <select id="picked-so-report-sort">
+          <option value="picked">Picked date/time</option>
+          <option value="so">SO #</option>
+          <option value="po">PO #</option>
+          <option value="customer">Customer</option>
+          <option value="sku">SKU</option>
+        </select>
+      </label>
+      <label>Sort order
+        <select id="picked-so-report-sort-direction">
+          <option value="desc">Descending</option>
+          <option value="asc">Ascending</option>
+        </select>
+      </label>
     </div>
     <div class="button-cluster" style="margin:12px 0">
       <button id="picked-so-report-apply" class="secondary" type="button">Apply filters</button>
@@ -1461,6 +1476,11 @@
     </div>
     <div id="picked-so-report-summary" class="info-box">Open the report to load picked Sales Order records.</div>
     <div id="picked-so-report-table" class="table-wrap" style="max-height:60vh;overflow:auto"></div>
+    <div class="button-cluster" style="margin:10px 0 0">
+      <button id="picked-so-report-prev" class="ghost" type="button">Previous</button>
+      <span id="picked-so-report-page" class="status-chip neutral">Page 1</span>
+      <button id="picked-so-report-next" class="ghost" type="button">Next</button>
+    </div>
   </dialog>
 
   <dialog id="shipper-batch-approval-dialog" class="edit-dialog">
@@ -1763,7 +1783,7 @@
   </script>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260930-live-picking-customer-po-report-v1"></script>
+  <script type="module" src="app.js?v=20260930-live-picked-so-sorting-pagination-v1"></script>
   <script type="module" src="receiving-v1.js?v=20260929-live-receiving-putaway-controls-v1"></script>
 </body>
 </html>
