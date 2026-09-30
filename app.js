@@ -271,6 +271,16 @@ const state = {
     pageSize: 250,
     loaded: false
   },
+  so0AdjustmentReport: {
+    rows: [],
+    total: 0,
+    filters: {},
+    sortBy: 'transaction_date',
+    sortDirection: 'desc',
+    page: 1,
+    pageSize: 250,
+    loaded: false
+  },
   pickRequestedCorrectionCount: 0,
   pickPendingReturnCount: 0,
   pickBlockingPendingReturnCount: 0,
@@ -937,6 +947,15 @@ function setupStaticEvents() {
   $('picked-so-report-next').addEventListener('click', () => void changePickedSalesOrderReportPage(1));
   $('picked-so-report-sort').addEventListener('change', () => void loadPickedSalesOrderReport(1));
   $('picked-so-report-sort-direction').addEventListener('change', () => void loadPickedSalesOrderReport(1));
+  $('so0-adjustment-report-btn').addEventListener('click', openSo0AdjustmentReport);
+  $('so0-adjustment-report-close').addEventListener('click', () => $('so0-adjustment-report-dialog').close());
+  $('so0-adjustment-report-apply').addEventListener('click', () => void loadSo0AdjustmentReport(1));
+  $('so0-adjustment-report-reset').addEventListener('click', resetSo0AdjustmentReportFilters);
+  $('so0-adjustment-report-print').addEventListener('click', () => void printSo0AdjustmentReport());
+  $('so0-adjustment-report-prev').addEventListener('click', () => void changeSo0AdjustmentReportPage(-1));
+  $('so0-adjustment-report-next').addEventListener('click', () => void changeSo0AdjustmentReportPage(1));
+  $('so0-adjustment-report-sort').addEventListener('change', () => void loadSo0AdjustmentReport(1));
+  $('so0-adjustment-report-sort-direction').addEventListener('change', () => void loadSo0AdjustmentReport(1));
   $('pick-so-reopen-request-btn').addEventListener('click', requestReopenCompletedSalesOrder);
   $('pick-barcode').addEventListener('input', () => syncOperationCompleteGuard('pick'));
   $('pick-barcode').addEventListener('change', () => {
@@ -3752,6 +3771,371 @@ async function printPickedSalesOrderReport() {
       </tbody>
     </table>
     <div class="report-footer"><strong>Read-only report.</strong> Printing does not modify Sales Orders, Picking history, or inventory.</div>
+  `;
+
+  document.body.appendChild(printArea);
+  try {
+    window.print();
+  } finally {
+    setTimeout(() => {
+      printArea.remove();
+      style.remove();
+    }, 1000);
+  }
+}
+
+function so0AdjustmentReportFilters() {
+  return {
+    sku: $('so0-adjustment-report-sku').value.trim(),
+    dateFrom: $('so0-adjustment-report-date-from').value,
+    dateTo: $('so0-adjustment-report-date-to').value,
+    picker: $('so0-adjustment-report-picker').value.trim(),
+    reason: $('so0-adjustment-report-reason').value.trim()
+  };
+}
+
+function so0AdjustmentReportSort() {
+  const sortBy = String($('so0-adjustment-report-sort')?.value || 'transaction_date').toLowerCase();
+  const sortDirection = String($('so0-adjustment-report-sort-direction')?.value || 'desc').toLowerCase();
+  return {
+    sortBy: ['transaction_date','sku','picker','reason'].includes(sortBy) ? sortBy : 'transaction_date',
+    sortDirection: sortDirection === 'asc' ? 'asc' : 'desc'
+  };
+}
+
+function so0AdjustmentReportFilterText(filters = {}) {
+  const parts = [];
+  if (filters.sku) parts.push(`SKU contains "${filters.sku}"`);
+  if (filters.dateFrom) parts.push(`Date from ${filters.dateFrom}`);
+  if (filters.dateTo) parts.push(`Date to ${filters.dateTo}`);
+  if (filters.picker) parts.push(`Picker contains "${filters.picker}"`);
+  if (filters.reason) parts.push(`Reason contains "${filters.reason}"`);
+  return parts.length ? parts.join(' · ') : 'None — all completed Sales Order 0 adjustments';
+}
+
+function so0AdjustmentReportSortText(sortBy = 'transaction_date', sortDirection = 'desc') {
+  const labels = {
+    transaction_date: 'Transaction date',
+    sku: 'SKU',
+    picker: 'Picker name',
+    reason: 'Reason made'
+  };
+  return `${labels[sortBy] || labels.transaction_date} · ${sortDirection === 'asc' ? 'Ascending' : 'Descending'}`;
+}
+
+function so0AdjustmentReportRpcArgs(filters, sortBy, sortDirection, limit, offset) {
+  return {
+    p_sku: filters.sku || null,
+    p_date_from: filters.dateFrom || null,
+    p_date_to: filters.dateTo || null,
+    p_picker: filters.picker || null,
+    p_reason: filters.reason || null,
+    p_sort_by: sortBy,
+    p_sort_direction: sortDirection,
+    p_limit: limit,
+    p_offset: offset
+  };
+}
+
+async function fetchSo0AdjustmentReportBatch(filters, sortBy, sortDirection, limit, offset) {
+  const { data, error } = await supabase.rpc(
+    'get_so0_adjustment_report_v1',
+    so0AdjustmentReportRpcArgs(filters, sortBy, sortDirection, limit, offset)
+  );
+  if (error) throw error;
+  return data || [];
+}
+
+async function openSo0AdjustmentReport() {
+  const dialog = $('so0-adjustment-report-dialog');
+  if (!dialog) return;
+  if (!dialog.open) dialog.showModal();
+  await loadSo0AdjustmentReport(1);
+}
+
+async function loadSo0AdjustmentReport(page = 1) {
+  const button = $('so0-adjustment-report-apply');
+  const filters = so0AdjustmentReportFilters();
+  const { sortBy, sortDirection } = so0AdjustmentReportSort();
+  const pageSize = 250;
+  const requestedPage = Math.max(1, Number(page || 1));
+  const offset = (requestedPage - 1) * pageSize;
+
+  setBusy(button, true, 'Loading…');
+  try {
+    const rows = await fetchSo0AdjustmentReportBatch(
+      filters, sortBy, sortDirection, pageSize, offset
+    );
+    const total = rows.length ? Number(rows[0].total_count || 0) : 0;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const resolvedPage = Math.min(requestedPage, totalPages);
+
+    if (requestedPage > totalPages && total > 0) {
+      return await loadSo0AdjustmentReport(totalPages);
+    }
+
+    state.so0AdjustmentReport = {
+      rows,
+      total,
+      filters: { ...filters },
+      sortBy,
+      sortDirection,
+      page: resolvedPage,
+      pageSize,
+      loaded: true
+    };
+    renderSo0AdjustmentReport();
+  } catch (error) {
+    state.so0AdjustmentReport = {
+      rows: [],
+      total: 0,
+      filters: { ...filters },
+      sortBy,
+      sortDirection,
+      page: 1,
+      pageSize,
+      loaded: false
+    };
+    $('so0-adjustment-report-summary').textContent = `Report could not be loaded: ${friendlyError(error)}`;
+    $('so0-adjustment-report-table').innerHTML = emptyState('SO-0 Adjustment Report is unavailable.');
+    $('so0-adjustment-report-page').textContent = 'Page —';
+    $('so0-adjustment-report-prev').disabled = true;
+    $('so0-adjustment-report-next').disabled = true;
+    toast(friendlyError(error), 'error');
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function renderSo0AdjustmentReport() {
+  const report = state.so0AdjustmentReport || {
+    rows: [], total: 0, filters: {}, sortBy: 'transaction_date',
+    sortDirection: 'desc', page: 1, pageSize: 250
+  };
+  const rows = report.rows || [];
+  const pageSize = Number(report.pageSize || 250);
+  const page = Math.max(1, Number(report.page || 1));
+  const total = Number(report.total || 0);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const startLine = total ? ((page - 1) * pageSize) + 1 : 0;
+  const endLine = total ? Math.min(startLine + rows.length - 1, total) : 0;
+
+  $('so0-adjustment-report-summary').innerHTML =
+    `<strong>${total.toLocaleString()} adjustment line(s)</strong> · ` +
+    `Showing ${startLine.toLocaleString()}–${endLine.toLocaleString()} · ` +
+    `Filters: ${escapeHtml(so0AdjustmentReportFilterText(report.filters))} · ` +
+    `Sort: ${escapeHtml(so0AdjustmentReportSortText(report.sortBy, report.sortDirection))}`;
+
+  $('so0-adjustment-report-page').textContent = `Page ${page.toLocaleString()} of ${totalPages.toLocaleString()}`;
+  $('so0-adjustment-report-prev').disabled = page <= 1 || !total;
+  $('so0-adjustment-report-next').disabled = page >= totalPages || !total;
+
+  if (!rows.length) {
+    $('so0-adjustment-report-table').innerHTML = emptyState('No completed Sales Order 0 adjustment records match the current filters.');
+    return;
+  }
+
+  $('so0-adjustment-report-table').innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Transaction Date</th><th>Transaction</th><th>Picker</th><th>Rack</th><th>SKU</th>
+        <th>Container</th><th>Expiry</th><th>UOM</th><th>Qty Out</th><th>Reason Made</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((row) => `<tr>
+          <td>${escapeHtml(fmtDateTime(row.transaction_at))}</td>
+          <td>${escapeHtml(row.transaction_no || '—')}</td>
+          <td>${escapeHtml(row.picker_username || '—')}</td>
+          <td>${escapeHtml(row.location_code || '—')}</td>
+          <td>${escapeHtml(pickedSalesOrderReportSkuText(row))}</td>
+          <td>${escapeHtml(row.container_no || '—')}</td>
+          <td>${escapeHtml(fmtDate(row.expiry_date))}</td>
+          <td>${escapeHtml(row.uom || '—')}</td>
+          <td>${escapeHtml(fmtQty(row.adjusted_qty))}</td>
+          <td>${escapeHtml(row.adjustment_reason || '—')}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+async function changeSo0AdjustmentReportPage(delta) {
+  const report = state.so0AdjustmentReport;
+  if (!report?.loaded) return;
+  const totalPages = Math.max(1, Math.ceil(Number(report.total || 0) / Number(report.pageSize || 250)));
+  const nextPage = Math.min(totalPages, Math.max(1, Number(report.page || 1) + Number(delta || 0)));
+  if (nextPage === report.page) return;
+  await loadSo0AdjustmentReport(nextPage);
+}
+
+function resetSo0AdjustmentReportFilters() {
+  [
+    'so0-adjustment-report-sku',
+    'so0-adjustment-report-date-from',
+    'so0-adjustment-report-date-to',
+    'so0-adjustment-report-picker',
+    'so0-adjustment-report-reason'
+  ].forEach((id) => { $(id).value = ''; });
+  void loadSo0AdjustmentReport(1);
+}
+
+async function fetchAllSo0AdjustmentReportRows(filters, sortBy, sortDirection) {
+  const pageSize = 1000;
+  let offset = 0;
+  let total = 0;
+  const rows = [];
+
+  while (true) {
+    const batch = await fetchSo0AdjustmentReportBatch(
+      filters, sortBy, sortDirection, pageSize, offset
+    );
+    if (!batch.length) break;
+
+    if (!total) total = Number(batch[0].total_count || 0);
+    rows.push(...batch);
+
+    if (rows.length >= total || batch.length < pageSize) break;
+    offset += batch.length;
+  }
+
+  return rows;
+}
+
+async function printSo0AdjustmentReport() {
+  const report = state.so0AdjustmentReport;
+  if (!report?.loaded) return toast('Load the SO-0 Adjustment Report first.', 'error');
+
+  const printButton = $('so0-adjustment-report-print');
+  setBusy(printButton, true, 'Preparing print…');
+
+  let rows = [];
+  try {
+    rows = await fetchAllSo0AdjustmentReportRows(
+      report.filters || {},
+      report.sortBy || 'transaction_date',
+      report.sortDirection || 'desc'
+    );
+  } catch (error) {
+    setBusy(printButton, false);
+    return toast(`Print report could not be prepared: ${friendlyError(error)}`, 'error');
+  }
+  setBusy(printButton, false);
+
+  if (!rows.length) return toast('No completed Sales Order 0 adjustment records match the current filters.', 'error');
+
+  const existing = $('so0-adjustment-report-print-style');
+  if (existing) existing.remove();
+
+  const style = document.createElement('style');
+  style.id = 'so0-adjustment-report-print-style';
+  style.textContent = `
+    @page { size: Letter landscape; margin: 0.30in; }
+    @media print {
+      body > *:not(#print-area) { display:none !important; }
+      #print-area { display:block !important; }
+      html,body { background:#fff !important; color:#000 !important; }
+    }
+    #print-area.so0-adjustment-print {
+      font-family:Arial,Helvetica,sans-serif;
+      color:#000;
+      background:#fff;
+      font-size:7.2pt;
+    }
+    #print-area.so0-adjustment-print * { box-sizing:border-box; color:#000; }
+    #print-area.so0-adjustment-print h1 { margin:0 0 2mm; font-size:15pt; text-align:center; }
+    #print-area.so0-adjustment-print h2 { margin:0 0 4mm; font-size:11pt; text-align:center; }
+    #print-area.so0-adjustment-print .report-meta {
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:1.5mm 7mm;
+      margin-bottom:4mm;
+      line-height:1.2;
+    }
+    #print-area.so0-adjustment-print table {
+      width:100%;
+      border-collapse:collapse;
+      table-layout:fixed;
+    }
+    #print-area.so0-adjustment-print thead { display:table-header-group; }
+    #print-area.so0-adjustment-print tr {
+      break-inside:avoid;
+      page-break-inside:avoid;
+    }
+    #print-area.so0-adjustment-print th,
+    #print-area.so0-adjustment-print td {
+      border:1px solid #000;
+      padding:1.6mm 1.2mm;
+      vertical-align:top;
+      white-space:normal !important;
+      overflow:hidden;
+      overflow-wrap:anywhere !important;
+      word-break:break-word;
+      line-height:1.18;
+      height:auto !important;
+    }
+    #print-area.so0-adjustment-print th {
+      font-size:7pt;
+      text-align:left;
+      background:#eee !important;
+      font-weight:800;
+      -webkit-print-color-adjust:exact;
+      print-color-adjust:exact;
+    }
+    #print-area.so0-adjustment-print td { min-height:8mm; }
+    #print-area.so0-adjustment-print .c-date{width:10%}
+    #print-area.so0-adjustment-print .c-tx{width:9%}
+    #print-area.so0-adjustment-print .c-picker{width:8%}
+    #print-area.so0-adjustment-print .c-rack{width:5%}
+    #print-area.so0-adjustment-print .c-sku{width:22%}
+    #print-area.so0-adjustment-print .c-container{width:8%}
+    #print-area.so0-adjustment-print .c-expiry{width:7%}
+    #print-area.so0-adjustment-print .c-uom{width:5%}
+    #print-area.so0-adjustment-print .c-qty{width:5%;text-align:right}
+    #print-area.so0-adjustment-print .c-reason{width:21%}
+    #print-area.so0-adjustment-print .report-footer {
+      margin-top:3mm;
+      font-size:7pt;
+      line-height:1.2;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const printArea = document.createElement('section');
+  printArea.id = 'print-area';
+  printArea.className = 'so0-adjustment-print';
+  const generatedAt = new Date().toLocaleString();
+
+  printArea.innerHTML = `
+    <h1>IFTC WAREHOUSE LOCATOR SYSTEM (JPM)</h1>
+    <h2>SO-0 WAREHOUSE STOCK ADJUSTMENT REPORT</h2>
+    <div class="report-meta">
+      <div><strong>Generated:</strong> ${escapeHtml(generatedAt)}</div>
+      <div><strong>Report lines:</strong> ${rows.length.toLocaleString()}</div>
+      <div><strong>Filters:</strong> ${escapeHtml(so0AdjustmentReportFilterText(report.filters))}</div>
+      <div><strong>Sort:</strong> ${escapeHtml(so0AdjustmentReportSortText(report.sortBy, report.sortDirection))}</div>
+      <div><strong>Scope:</strong> Completed PICK lines under Sales Order 0 representing stock adjusted out of warehouse inventory.</div>
+    </div>
+    <table>
+      <thead><tr>
+        <th class="c-date">Transaction Date</th><th class="c-tx">Transaction</th><th class="c-picker">Picker</th>
+        <th class="c-rack">Rack</th><th class="c-sku">SKU</th><th class="c-container">Container</th>
+        <th class="c-expiry">Expiry</th><th class="c-uom">UOM</th><th class="c-qty">Qty Out</th><th class="c-reason">Reason Made</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((row) => `<tr>
+          <td class="c-date">${escapeHtml(fmtDateTime(row.transaction_at))}</td>
+          <td class="c-tx">${escapeHtml(row.transaction_no || '—')}</td>
+          <td class="c-picker">${escapeHtml(row.picker_username || '—')}</td>
+          <td class="c-rack">${escapeHtml(row.location_code || '—')}</td>
+          <td class="c-sku">${escapeHtml(pickedSalesOrderReportSkuText(row))}</td>
+          <td class="c-container">${escapeHtml(row.container_no || '—')}</td>
+          <td class="c-expiry">${escapeHtml(fmtDate(row.expiry_date))}</td>
+          <td class="c-uom">${escapeHtml(row.uom || '—')}</td>
+          <td class="c-qty">${escapeHtml(fmtQty(row.adjusted_qty))}</td>
+          <td class="c-reason">${escapeHtml(row.adjustment_reason || '—')}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+    <div class="report-footer"><strong>Read-only report.</strong> Printing does not modify inventory, Picking history, or audit records.</div>
   `;
 
   document.body.appendChild(printArea);
