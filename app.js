@@ -261,7 +261,16 @@ const state = {
   pickOrderLookupSequence: 0,
   pickOrderSummary: [],
   pickOrderCorrections: [],
-  pickedSalesOrderReport: { rows: [], total: 0, filters: {}, loaded: false },
+  pickedSalesOrderReport: {
+    rows: [],
+    total: 0,
+    filters: {},
+    sortBy: 'picked',
+    sortDirection: 'desc',
+    page: 1,
+    pageSize: 250,
+    loaded: false
+  },
   pickRequestedCorrectionCount: 0,
   pickPendingReturnCount: 0,
   pickBlockingPendingReturnCount: 0,
@@ -921,9 +930,13 @@ function setupStaticEvents() {
   $('pick-so').addEventListener('blur', refreshPickSalesOrderStatus);
   $('picked-so-report-btn').addEventListener('click', openPickedSalesOrderReport);
   $('picked-so-report-close').addEventListener('click', () => $('picked-so-report-dialog').close());
-  $('picked-so-report-apply').addEventListener('click', () => void loadPickedSalesOrderReport());
+  $('picked-so-report-apply').addEventListener('click', () => void loadPickedSalesOrderReport(1));
   $('picked-so-report-reset').addEventListener('click', resetPickedSalesOrderReportFilters);
-  $('picked-so-report-print').addEventListener('click', printPickedSalesOrderReport);
+  $('picked-so-report-print').addEventListener('click', () => void printPickedSalesOrderReport());
+  $('picked-so-report-prev').addEventListener('click', () => void changePickedSalesOrderReportPage(-1));
+  $('picked-so-report-next').addEventListener('click', () => void changePickedSalesOrderReportPage(1));
+  $('picked-so-report-sort').addEventListener('change', () => void loadPickedSalesOrderReport(1));
+  $('picked-so-report-sort-direction').addEventListener('change', () => void loadPickedSalesOrderReport(1));
   $('pick-so-reopen-request-btn').addEventListener('click', requestReopenCompletedSalesOrder);
   $('pick-barcode').addEventListener('input', () => syncOperationCompleteGuard('pick'));
   $('pick-barcode').addEventListener('change', () => {
@@ -3393,6 +3406,15 @@ function pickedSalesOrderReportFilters() {
   };
 }
 
+function pickedSalesOrderReportSort() {
+  const sortBy = String($('picked-so-report-sort')?.value || 'picked').toLowerCase();
+  const sortDirection = String($('picked-so-report-sort-direction')?.value || 'desc').toLowerCase();
+  return {
+    sortBy: ['picked','so','po','customer','sku'].includes(sortBy) ? sortBy : 'picked',
+    sortDirection: sortDirection === 'asc' ? 'asc' : 'desc'
+  };
+}
+
 function pickedSalesOrderReportFilterText(filters = {}) {
   const parts = [];
   if (filters.so) parts.push(`SO contains "${filters.so}"`);
@@ -3402,58 +3424,99 @@ function pickedSalesOrderReportFilterText(filters = {}) {
   return parts.length ? parts.join(' · ') : 'None — all picked Sales Orders';
 }
 
+function pickedSalesOrderReportSortText(sortBy = 'picked', sortDirection = 'desc') {
+  const labels = {
+    picked: 'Picked date/time',
+    so: 'SO #',
+    po: 'PO #',
+    customer: 'Customer',
+    sku: 'SKU'
+  };
+  return `${labels[sortBy] || labels.picked} · ${sortDirection === 'asc' ? 'Ascending' : 'Descending'}`;
+}
+
 function pickedSalesOrderReportSkuText(row) {
   return [row.brand,row.description,row.variant,row.size].filter(Boolean).join(' ') || '—';
+}
+
+function pickedSalesOrderReportRpcArgs(filters, sortBy, sortDirection, limit, offset) {
+  return {
+    p_so: filters.so || null,
+    p_po_number: filters.po || null,
+    p_customer_name: filters.customer || null,
+    p_sku: filters.sku || null,
+    p_sort_by: sortBy,
+    p_sort_direction: sortDirection,
+    p_limit: limit,
+    p_offset: offset
+  };
+}
+
+async function fetchPickedSalesOrderReportBatch(filters, sortBy, sortDirection, limit, offset) {
+  const { data, error } = await supabase.rpc(
+    'get_picked_sales_order_report_v2',
+    pickedSalesOrderReportRpcArgs(filters, sortBy, sortDirection, limit, offset)
+  );
+  if (error) throw error;
+  return data || [];
 }
 
 async function openPickedSalesOrderReport() {
   const dialog = $('picked-so-report-dialog');
   if (!dialog) return;
   if (!dialog.open) dialog.showModal();
-  await loadPickedSalesOrderReport();
+  await loadPickedSalesOrderReport(1);
 }
 
-async function loadPickedSalesOrderReport() {
+async function loadPickedSalesOrderReport(page = 1) {
   const button = $('picked-so-report-apply');
   const filters = pickedSalesOrderReportFilters();
-  const pageSize = 500;
-  let offset = 0;
-  let total = 0;
-  const rows = [];
+  const { sortBy, sortDirection } = pickedSalesOrderReportSort();
+  const pageSize = 250;
+  const requestedPage = Math.max(1, Number(page || 1));
+  const offset = (requestedPage - 1) * pageSize;
 
   setBusy(button, true, 'Loading…');
   try {
-    while (true) {
-      const { data, error } = await supabase.rpc('get_picked_sales_order_report_v1', {
-        p_so: filters.so || null,
-        p_po_number: filters.po || null,
-        p_customer_name: filters.customer || null,
-        p_sku: filters.sku || null,
-        p_limit: pageSize,
-        p_offset: offset
-      });
-      if (error) throw error;
+    const rows = await fetchPickedSalesOrderReportBatch(
+      filters, sortBy, sortDirection, pageSize, offset
+    );
+    const total = rows.length ? Number(rows[0].total_count || 0) : 0;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const resolvedPage = Math.min(requestedPage, totalPages);
 
-      const batch = data || [];
-      if (!batch.length) break;
-
-      if (!total) total = Number(batch[0].total_count || 0);
-      rows.push(...batch);
-      if (rows.length >= total || batch.length < pageSize) break;
-      offset += batch.length;
+    // A filter can reduce the result below the currently requested page.
+    if (requestedPage > totalPages && total > 0) {
+      return await loadPickedSalesOrderReport(totalPages);
     }
 
     state.pickedSalesOrderReport = {
       rows,
-      total: total || rows.length,
+      total,
       filters: { ...filters },
+      sortBy,
+      sortDirection,
+      page: resolvedPage,
+      pageSize,
       loaded: true
     };
     renderPickedSalesOrderReport();
   } catch (error) {
-    state.pickedSalesOrderReport = { rows: [], total: 0, filters: { ...filters }, loaded: false };
+    state.pickedSalesOrderReport = {
+      rows: [],
+      total: 0,
+      filters: { ...filters },
+      sortBy,
+      sortDirection,
+      page: 1,
+      pageSize,
+      loaded: false
+    };
     $('picked-so-report-summary').textContent = `Report could not be loaded: ${friendlyError(error)}`;
     $('picked-so-report-table').innerHTML = emptyState('Picked Sales Order Report is unavailable.');
+    $('picked-so-report-page').textContent = 'Page —';
+    $('picked-so-report-prev').disabled = true;
+    $('picked-so-report-next').disabled = true;
     toast(friendlyError(error), 'error');
   } finally {
     setBusy(button, false);
@@ -3461,11 +3524,27 @@ async function loadPickedSalesOrderReport() {
 }
 
 function renderPickedSalesOrderReport() {
-  const report = state.pickedSalesOrderReport || { rows: [], total: 0, filters: {} };
+  const report = state.pickedSalesOrderReport || {
+    rows: [], total: 0, filters: {}, sortBy: 'picked',
+    sortDirection: 'desc', page: 1, pageSize: 250
+  };
   const rows = report.rows || [];
+  const pageSize = Number(report.pageSize || 250);
+  const page = Math.max(1, Number(report.page || 1));
+  const total = Number(report.total || 0);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const startLine = total ? ((page - 1) * pageSize) + 1 : 0;
+  const endLine = total ? Math.min(startLine + rows.length - 1, total) : 0;
+
   $('picked-so-report-summary').innerHTML =
-    `<strong>${Number(report.total || rows.length).toLocaleString()} picked line(s)</strong> · ` +
-    `Filters: ${escapeHtml(pickedSalesOrderReportFilterText(report.filters))}`;
+    `<strong>${total.toLocaleString()} picked line(s)</strong> · ` +
+    `Showing ${startLine.toLocaleString()}–${endLine.toLocaleString()} · ` +
+    `Filters: ${escapeHtml(pickedSalesOrderReportFilterText(report.filters))} · ` +
+    `Sort: ${escapeHtml(pickedSalesOrderReportSortText(report.sortBy, report.sortDirection))}`;
+
+  $('picked-so-report-page').textContent = `Page ${page.toLocaleString()} of ${totalPages.toLocaleString()}`;
+  $('picked-so-report-prev').disabled = page <= 1 || !total;
+  $('picked-so-report-next').disabled = page >= totalPages || !total;
 
   if (!rows.length) {
     $('picked-so-report-table').innerHTML = emptyState('No picked Sales Order records match the current filters.');
@@ -3497,16 +3576,63 @@ function renderPickedSalesOrderReport() {
     </table>`;
 }
 
+async function changePickedSalesOrderReportPage(delta) {
+  const report = state.pickedSalesOrderReport;
+  if (!report?.loaded) return;
+  const totalPages = Math.max(1, Math.ceil(Number(report.total || 0) / Number(report.pageSize || 250)));
+  const nextPage = Math.min(totalPages, Math.max(1, Number(report.page || 1) + Number(delta || 0)));
+  if (nextPage === report.page) return;
+  await loadPickedSalesOrderReport(nextPage);
+}
+
 function resetPickedSalesOrderReportFilters() {
   ['picked-so-report-so','picked-so-report-po','picked-so-report-customer','picked-so-report-sku']
     .forEach((id) => { $(id).value = ''; });
-  void loadPickedSalesOrderReport();
+  void loadPickedSalesOrderReport(1);
 }
 
-function printPickedSalesOrderReport() {
+async function fetchAllPickedSalesOrderReportRows(filters, sortBy, sortDirection) {
+  const pageSize = 1000;
+  let offset = 0;
+  let total = 0;
+  const rows = [];
+
+  while (true) {
+    const batch = await fetchPickedSalesOrderReportBatch(
+      filters, sortBy, sortDirection, pageSize, offset
+    );
+    if (!batch.length) break;
+
+    if (!total) total = Number(batch[0].total_count || 0);
+    rows.push(...batch);
+
+    if (rows.length >= total || batch.length < pageSize) break;
+    offset += batch.length;
+  }
+
+  return rows;
+}
+
+async function printPickedSalesOrderReport() {
   const report = state.pickedSalesOrderReport;
-  const rows = report?.rows || [];
   if (!report?.loaded) return toast('Load the Picked Sales Order Report first.', 'error');
+
+  const printButton = $('picked-so-report-print');
+  setBusy(printButton, true, 'Preparing print…');
+
+  let rows = [];
+  try {
+    rows = await fetchAllPickedSalesOrderReportRows(
+      report.filters || {},
+      report.sortBy || 'picked',
+      report.sortDirection || 'desc'
+    );
+  } catch (error) {
+    setBusy(printButton, false);
+    return toast(`Print report could not be prepared: ${friendlyError(error)}`, 'error');
+  }
+  setBusy(printButton, false);
+
   if (!rows.length) return toast('No picked Sales Order records match the current filters.', 'error');
 
   const existing = $('picked-so-report-print-style');
@@ -3599,6 +3725,7 @@ function printPickedSalesOrderReport() {
       <div><strong>Generated:</strong> ${escapeHtml(generatedAt)}</div>
       <div><strong>Report lines:</strong> ${rows.length.toLocaleString()}</div>
       <div><strong>Filters:</strong> ${escapeHtml(pickedSalesOrderReportFilterText(report.filters))}</div>
+      <div><strong>Sort:</strong> ${escapeHtml(pickedSalesOrderReportSortText(report.sortBy, report.sortDirection))}</div>
       <div><strong>Scope:</strong> Completed PICK lines for normal Sales Orders; SO 0 excluded.</div>
     </div>
     <table>
