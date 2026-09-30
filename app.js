@@ -296,6 +296,11 @@ const state = {
     auditActions: [],
     auditActionsLoaded: false
   },
+  inventorySnapshot: {
+    rows: [],
+    loaded: false,
+    promise: null
+  },
   pickRequestedCorrectionCount: 0,
   pickPendingReturnCount: 0,
   pickBlockingPendingReturnCount: 0,
@@ -2111,6 +2116,9 @@ function uniqueBy(rows, keyFn) {
 }
 
 function invalidateReports() {
+  state.inventorySnapshot.rows = [];
+  state.inventorySnapshot.loaded = false;
+  state.inventorySnapshot.promise = null;
   state.data.inventory = [];
   state.data.physicalCount = [];
   state.data.physicalCountRaw = [];
@@ -6802,6 +6810,57 @@ function physicalCountSkuSearchText(row) {
   ].join(' ').toLowerCase();
 }
 
+async function fetchCompleteInventorySnapshot() {
+  const { data, error } = await supabase.rpc('get_inventory_snapshot_v1');
+  if (error) throw error;
+
+  const result = data?.[0] || {};
+  const rows = Array.isArray(result.snapshot_rows) ? result.snapshot_rows : [];
+
+  if (Number(result.row_count || 0) !== rows.length) {
+    throw new Error('Inventory snapshot row count mismatch. Refresh and try again.');
+  }
+
+  return rows;
+}
+
+async function loadSharedInventorySnapshot(force = false) {
+  if (!force && state.inventorySnapshot.loaded) {
+    return state.inventorySnapshot.rows;
+  }
+
+  if (state.inventorySnapshot.promise) {
+    return state.inventorySnapshot.promise;
+  }
+
+  const promise = (async () => {
+    const rows = await fetchCompleteInventorySnapshot();
+
+    state.inventorySnapshot.rows = rows;
+    state.inventorySnapshot.loaded = true;
+
+    // The snapshot is the common source for Inventory and Physical Count.
+    // A fresh snapshot invalidates only those two derived render caches.
+    state.data.inventory = [];
+    state.data.physicalCount = [];
+    state.data.physicalCountRaw = [];
+    state.data.physicalCountFiltered = [];
+    state.data.physicalCountDetailedShipperFiltered = [];
+
+    return rows;
+  })();
+
+  state.inventorySnapshot.promise = promise;
+
+  try {
+    return await promise;
+  } finally {
+    if (state.inventorySnapshot.promise === promise) {
+      state.inventorySnapshot.promise = null;
+    }
+  }
+}
+
 function aggregatePhysicalCountRows(rows) {
   const grouped = new Map();
 
@@ -6847,31 +6906,11 @@ async function loadPhysicalCount(force = false) {
     return renderPhysicalCount();
   }
 
-  const pageSize = 1000;
-  const rows = [];
-  let offset = 0;
-
-  while (true) {
-    const { data, error } = await supabase
-      .from('v_inventory_search')
-      .select('*')
-      .order('location_sort_order', { ascending: true, nullsFirst: false })
-      .order('location_code')
-      .order('sku_name')
-      .range(offset, offset + pageSize - 1);
-
-    if (error) throw error;
-
-    const page = data || [];
-    rows.push(...page);
-
-    if (page.length < pageSize) break;
-    offset += pageSize;
-  }
-
+  const rows = await loadSharedInventorySnapshot(force);
   state.data.physicalCountRaw = rows.filter((row) => Number(row.qty || 0) > 0);
   state.data.physicalCount = aggregatePhysicalCountRows(rows);
   renderPhysicalCount();
+
   if (!$('physical-count-detailed-shipper-panel').classList.contains('hidden')) {
     renderPhysicalCountDetailedShipperView();
   }
@@ -7467,31 +7506,7 @@ function printPhysicalCount() {
 async function loadInventory(force = false) {
   if (!force && state.data.inventory.length) return renderInventory();
 
-  // Load the complete Inventory dataset in the same safe paged manner used by
-  // Physical Count. A single large .limit(...) request can still be capped by
-  // the Supabase/PostgREST API row limit and silently omit later inventory rows.
-  const pageSize = 1000;
-  const rows = [];
-  let offset = 0;
-
-  while (true) {
-    const { data, error } = await supabase
-      .from('v_inventory_search')
-      .select('*')
-      .order('location_sort_order', { ascending: true, nullsFirst: false })
-      .order('location_code')
-      .order('sku_name')
-      .range(offset, offset + pageSize - 1);
-
-    if (error) throw error;
-
-    const page = data || [];
-    rows.push(...page);
-
-    if (page.length < pageSize) break;
-    offset += pageSize;
-  }
-
+  const rows = await loadSharedInventorySnapshot(force);
   state.data.inventory = rows;
   renderInventory();
 }
