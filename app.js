@@ -1098,6 +1098,9 @@ function setupStaticEvents() {
   });
   $('system-history-preview-btn').addEventListener('click', previewSystemHistoryDelete);
   $('system-history-delete-form').addEventListener('submit', deleteSystemHistoryRange);
+  document.querySelectorAll('[data-history-retention-months]').forEach((button) => {
+    button.addEventListener('click', () => changeHistoryRetention(Number(button.dataset.historyRetentionMonths), button));
+  });
 
   $('scanner-close').addEventListener('click', closeScanner);
   $('camera-start').addEventListener('click', startCamera);
@@ -1808,9 +1811,9 @@ function ensureDashboardOperationalExceptionPanels() {
       <div class="card-head">
         <div>
           <h3>Container priority overrides</h3>
-          <p>Confirmed later-container selections where an earlier eligible shipment container existed at the same FEFO expiry. Latest retained 90-day events are shown first.</p>
+          <p>Confirmed later-container selections where an earlier eligible shipment container existed at the same FEFO expiry. Latest retained events are shown first.</p>
         </div>
-        <span id="dashboard-container-priority-overrides-count" class="pill">0 / 90 days</span>
+        <span id="dashboard-container-priority-overrides-count" class="pill">0 retained</span>
       </div>
       <div id="dashboard-container-priority-overrides" class="table-wrap"></div>
     </article>`;
@@ -1868,9 +1871,9 @@ function renderDashboardContainerPriorityOverrides(rows) {
   if (!container || !count) return;
 
   const total = Number(rows[0]?.total_retained_override_count || 0);
-  count.textContent = `${total.toLocaleString()} / 90 days`;
+  count.textContent = `${total.toLocaleString()} retained`;
   if (!rows.length) {
-    container.innerHTML = emptyState('No container-priority override has been recorded in the retained 90-day window.');
+    container.innerHTML = emptyState('No container-priority override has been recorded in retained history.');
     return;
   }
 
@@ -11055,7 +11058,7 @@ async function loadSystemManager(force = false) {
   const button = $('system-manager-refresh-btn');
   if (force) setBusy(button, true, 'Refreshing…');
 
-  const { data, error } = await supabase.rpc('system_manager_usage_snapshot');
+  const { data, error } = await supabase.rpc('system_manager_usage_snapshot_v2');
   if (force) setBusy(button, false);
   if (error) throw error;
 
@@ -11097,12 +11100,20 @@ async function loadSystemManager(force = false) {
     )
   ].join('');
 
+  const retentionMonths = Number(row.retention_months || 3);
+  state.historyRetention = {
+    months: retentionMonths,
+    cutoffDate: row.retention_cutoff_date || ''
+  };
+  renderHistoryRetentionButtons(retentionMonths);
+
   $('system-manager-checked-at').textContent = `Checked: ${fmtDateTime(row.checked_at)} · Values refresh whenever System Manager is opened or Refresh usage is pressed.`;
   $('system-manager-retention-status').innerHTML = `
-    <strong>Automatic retention:</strong> ${row.retention_job_active ? 'Enabled' : 'Not active'} · ${Number(row.retention_days || 90)} days<br>
+    <strong>Automatic retention:</strong> ${row.retention_job_active ? 'Enabled' : 'Not active'} · ${retentionMonths} month${retentionMonths === 1 ? '' : 's'}<br>
+    <strong>Oldest retained month begins:</strong> ${escapeHtml(row.retention_cutoff_date || '—')} · current partial month is also retained<br>
     <strong>Transaction history rows:</strong> ${Number(row.transaction_history_count || 0).toLocaleString()} · Oldest: ${escapeHtml(fmtDateTime(row.oldest_transaction_at))}<br>
     <strong>System audit rows:</strong> ${Number(row.audit_history_count || 0).toLocaleString()} · Oldest: ${escapeHtml(fmtDateTime(row.oldest_audit_at))}<br>
-    <small>Automatic cleanup runs daily. History belonging to an OPEN Sales Order is protected until that Sales Order is closed.</small>`;
+    <small>Automatic cleanup checks every Monday at approximately 02:15 Asia/Manila. Transaction history belonging to an OPEN Sales Order remains protected until that Sales Order is closed.</small>`;
 }
 
 async function getSystemHistoryPreview() {
@@ -11118,6 +11129,120 @@ async function getSystemHistoryPreview() {
   });
   if (error) throw error;
   return data?.[0] || {};
+}
+
+function renderHistoryRetentionButtons(currentMonths) {
+  document.querySelectorAll('[data-history-retention-months]').forEach((button) => {
+    const months = Number(button.dataset.historyRetentionMonths || 0);
+    const selected = months === Number(currentMonths);
+    button.classList.toggle('primary', selected);
+    button.classList.toggle('secondary', !selected);
+    button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    button.disabled = selected;
+  });
+}
+
+async function loadHistoryRetentionPolicy(force = false) {
+  if (!force && state.historyRetention?.months && state.historyRetention?.cutoffDate) {
+    return state.historyRetention;
+  }
+  const { data, error } = await supabase.rpc('get_history_retention_policy_v1');
+  if (error) throw error;
+  const row = data?.[0] || {};
+  state.historyRetention = {
+    months: Number(row.retention_months || 3),
+    cutoffDate: row.cutoff_date || ''
+  };
+  return state.historyRetention;
+}
+
+async function changeHistoryRetention(targetMonths, button = null) {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+  if (![3,6,9,12].includes(Number(targetMonths))) return toast('Invalid History Retention selection.', 'error');
+
+  setBusy(button, true, 'Checking…');
+  const { data: previewData, error: previewError } = await supabase.rpc('preview_history_retention_change_v1', {
+    p_target_months: Number(targetMonths)
+  });
+  setBusy(button, false);
+  if (previewError) return toast(friendlyError(previewError), 'error');
+
+  const preview = previewData?.[0] || {};
+  const currentMonths = Number(preview.current_months || state.historyRetention?.months || 3);
+  if (currentMonths === Number(targetMonths)) {
+    renderHistoryRetentionButtons(currentMonths);
+    return toast(`History Retention is already set to ${currentMonths} months.`, 'info');
+  }
+
+  const shorter = Boolean(preview.will_shorten);
+  const cutoff = preview.cutoff_date || '—';
+  const deleteSummary =
+    `${Number(preview.transaction_count || 0).toLocaleString()} transaction(s), ` +
+    `${Number(preview.transaction_line_count || 0).toLocaleString()} transaction line(s), ` +
+    `${Number(preview.audit_event_count || 0).toLocaleString()} audit event(s), and ` +
+    `${Number(preview.non_fefo_event_count || 0).toLocaleString()} Non-FEFO detail row(s)`;
+
+  const message = shorter
+    ? `CHANGE HISTORY RETENTION\n\nCurrent: ${currentMonths} months\nNew: ${targetMonths} months\n\nThis shortens the retention window. Records before ${cutoff} (Asia/Manila month boundary) that are eligible for retention cleanup will be deleted immediately after authorization.\n\nEstimated deletion: ${deleteSummary}.\n\nThe current partial month is not counted. OPEN Sales Order transaction history remains protected. Deleted records cannot be restored by selecting a longer retention later.\n\nContinue?`
+    : `CHANGE HISTORY RETENTION\n\nCurrent: ${currentMonths} months\nNew: ${targetMonths} months\n\nThis extends the future retention window. No history will be deleted by this change. Records that were already deleted under a shorter retention period cannot be restored.\n\nThe weekly cleanup will use the new month-based setting every Monday.\n\nContinue?`;
+
+  if (!window.confirm(message)) return;
+
+  const approval = await requestWarehouseApproval({
+    title: 'Confirm History Retention change',
+    contextHtml: `
+      <strong>Changing History Retention requires WMS credential confirmation.</strong><br><br>
+      Current setting: <strong>${escapeHtml(String(currentMonths))} months</strong><br>
+      New setting: <strong>${escapeHtml(String(targetMonths))} months</strong><br>
+      ${shorter ? `Records before <strong>${escapeHtml(String(cutoff))}</strong> will be removed immediately if eligible.<br>Estimated deletion: <strong>${escapeHtml(deleteSummary)}</strong><br>` : 'No history will be deleted by this extension.<br>'}
+      <br>Enter the WMS login email and password of an active <strong>Admin or Owner</strong> to authorize this exact retention change.
+    `,
+    rpcName: 'approve_history_retention_change_v1',
+    rpcArgs: {
+      p_requested_by: state.session.user.id,
+      p_target_months: Number(targetMonths)
+    },
+    confirmLabel: 'CONFIRM CHANGE',
+    credentialRoleLabel: 'Admin/Owner'
+  });
+  if (!approval?.approval_token) return;
+
+  setBusy(button, true, 'Applying…');
+  const { data, error } = await supabase.rpc('set_history_retention_v1', {
+    p_target_months: Number(targetMonths),
+    p_approval_token: approval.approval_token
+  });
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  const result = data?.[0] || {};
+  state.historyRetention = {
+    months: Number(result.retention_months || targetMonths),
+    cutoffDate: result.cutoff_date || cutoff
+  };
+  state.data.history = [];
+  state.data.audit = [];
+  state.data.auditFiltered = [];
+  state.data.nonFefo = [];
+  state.historyVNext.loaded = false;
+  state.historyVNext.auditLoaded = false;
+  state.historyVNext.auditActionsLoaded = false;
+  state.data.containers = [];
+
+  await loadSystemManager(true);
+
+  const deleted = Number(result.deleted_transactions || 0) +
+    Number(result.deleted_audit_events || 0);
+  toast(
+    shorter
+      ? `History Retention changed to ${targetMonths} months. Older eligible history was cleaned up immediately.`
+      : `History Retention changed to ${targetMonths} months. No history was deleted.`,
+    'success'
+  );
+
+  if (deleted > 0 && state.historyVNext.activeTab === 'audit') {
+    void loadAuditHistoryTab(true);
+  }
 }
 
 async function previewSystemHistoryDelete() {
@@ -11569,6 +11694,11 @@ async function loadAuditHistoryPage(page = 1) {
 }
 
 async function loadAuditHistoryTab(force = false) {
+  try {
+    await loadHistoryRetentionPolicy(force);
+  } catch (error) {
+    console.warn('History Retention policy unavailable:', error);
+  }
   ensureAuditCoverageDefaults();
   const filters = auditHistoryFilters();
   const sameFilters = auditHistoryFiltersEqual(filters, state.historyVNext.auditFilters);
@@ -11610,16 +11740,17 @@ function auditCoverageBounds() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const earliest = new Date(today);
-  earliest.setDate(earliest.getDate() - 89); // today + previous 89 dates = 90 calendar days
+  const fallbackMonths = Number(state.historyRetention?.months || 3);
+  const fallback = new Date(today.getFullYear(), today.getMonth() - fallbackMonths, 1);
+  const minDate = state.historyRetention?.cutoffDate || localDateKey(fallback);
 
   const endExclusive = new Date(today);
   endExclusive.setDate(endExclusive.getDate() + 1);
 
   return {
-    minDate: localDateKey(earliest),
+    minDate,
     maxDate: localDateKey(today),
-    fromIso: earliest.toISOString(),
+    fromIso: new Date(`${minDate}T00:00:00+08:00`).toISOString(),
     toIsoExclusive: endExclusive.toISOString()
   };
 }
