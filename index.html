@@ -1289,9 +1289,15 @@
 
         <div class="content-grid two">
           <article class="card">
-            <div class="card-head"><div><h3>90-day history retention</h3><p>Automatic cleanup of Transaction History and System Audit Events.</p></div></div>
+            <div class="card-head"><div><h3>History Retention</h3><p>Choose how many completed calendar months of Transaction History and System Audit Events are retained.</p></div></div>
+            <div class="button-cluster" style="margin:0 0 12px">
+              <button class="secondary" type="button" data-history-retention-months="3">3-months</button>
+              <button class="secondary" type="button" data-history-retention-months="6">6-months</button>
+              <button class="secondary" type="button" data-history-retention-months="9">9-months</button>
+              <button class="secondary" type="button" data-history-retention-months="12">12-months</button>
+            </div>
             <div id="system-manager-retention-status" class="info-box">Loading retention status…</div>
-            <p class="hint">Records aged 90 days or more are removed automatically. Transaction lines and Non-FEFO detail records tied to deleted transactions are removed with them. Current inventory balances are not deleted.</p>
+            <p class="hint">The current partial month is not counted. Example: on August 15, a 3-month setting retains May, June, July, plus August-to-date. Shortening the setting immediately removes older eligible history after confirmation and Admin/Owner WMS credential approval. The automatic retention check runs every Monday. Current inventory balances are not deleted.</p>
           </article>
 
           <form id="system-history-delete-form" class="card form-card">
@@ -1332,7 +1338,7 @@
           </div>
 
           <div id="history-audit-panel" class="history-tab-panel hidden" role="tabpanel" aria-labelledby="history-tab-audit">
-            <div class="card-head audit-head"><div><h3>System audit events</h3><p>Up to the last 90 calendar days of retained audit events, with detailed report filters</p></div><button class="secondary export-btn" data-export="audit">Export filtered audit CSV</button></div>
+            <div class="card-head audit-head"><div><h3>System audit events</h3><p>Retained audit events within the selected History Retention policy, with detailed report filters</p></div><button class="secondary export-btn" data-export="audit">Export filtered audit CSV</button></div>
 
             <div class="form-grid two">
               <label>Action
@@ -1838,7 +1844,7 @@
   </script>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260930-live-break-repack-exact-output-v1"></script>
+  <script type="module" src="app.js?v=20260930-live-history-retention-v1"></script>
   <script type="module" src="receiving-v1.js?v=20260929-live-receiving-putaway-controls-v1"></script>
 </body>
 </html>
