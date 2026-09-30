@@ -1745,33 +1745,32 @@ async function loadScreen(name, force = false) {
 
 async function loadDashboard() {
   ensureDashboardOperationalExceptionPanels();
-  const [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes, pendingReturnsRes, openEmptySoRes, containerPriorityRes, receivingPutawayRes] = await Promise.all([
-    supabase.from('v_inventory_details').select('*').limit(10000),
-    supabase.from('v_location_summary').select('*').limit(5000),
-    supabase.from('v_history_details').select('*').order('created_at', { ascending: false }).limit(12),
-    supabase.rpc('get_dashboard_pending_pick_sales_orders'),
-    supabase.rpc('get_dashboard_active_location_locks'),
-    supabase.rpc('get_saved_pick_action_queue'),
-    supabase.rpc('get_dashboard_open_empty_pick_sales_orders_v1'),
-    supabase.rpc('get_dashboard_container_priority_overrides_v1'),
-    supabase.rpc('get_dashboard_receiving_putaway_summary_v1')
-  ]);
-  [inventoryRes, locationRes, historyRes, pendingSoRes, activeLocksRes, pendingReturnsRes, openEmptySoRes, containerPriorityRes, receivingPutawayRes].forEach((r) => { if (r.error) throw r.error; });
-  const inventory = inventoryRes.data || [];
-  const locations = locationRes.data || [];
+
+  const { data, error } = await supabase.rpc('get_dashboard_snapshot_v1');
+  if (error) throw error;
+
+  const snapshot = data?.[0] || {};
+  const inventory = Array.isArray(snapshot.inventory_rows) ? snapshot.inventory_rows : [];
+  const historyRows = Array.isArray(snapshot.recent_history_rows) ? snapshot.recent_history_rows : [];
+  const pendingSalesOrders = Array.isArray(snapshot.pending_sales_orders) ? snapshot.pending_sales_orders : [];
+  const activeLocks = Array.isArray(snapshot.active_locks) ? snapshot.active_locks : [];
+  const pendingPickReturns = Array.isArray(snapshot.pending_pick_returns) ? snapshot.pending_pick_returns : [];
+  const openEmptySalesOrders = Array.isArray(snapshot.open_empty_sales_orders) ? snapshot.open_empty_sales_orders : [];
+  const containerPriorityOverrides = Array.isArray(snapshot.container_priority_overrides) ? snapshot.container_priority_overrides : [];
+
   const attention = inventory.filter((r) => r.expiry_status !== 'OK');
   const containers = new Set(inventory.map((r) => r.container_no));
-  const physicalLocations = locations.filter((r) => !r.is_pending);
-  const occupied = physicalLocations.filter((r) => Number(r.total_piece_qty) > 0 || Number(r.total_pack_qty) > 0 || Number(r.total_case_qty) > 0).length;
-  const locked = physicalLocations.filter((r) => r.is_locked).length;
+  const physicalLocationCount = Number(snapshot.physical_location_count || 0);
+  const occupied = Number(snapshot.occupied_location_count || 0);
+  const locked = Number(snapshot.locked_location_count || 0);
 
-  const receivingPutaway = receivingPutawayRes.data?.[0] || {};
+  const receivingPutaway = snapshot.receiving_putaway || {};
   const receivingQty = (caseQty, packQty, pieceQty) =>
     `${Number(caseQty || 0).toLocaleString()} cases · ${Number(packQty || 0).toLocaleString()} packs · ${Number(pieceQty || 0).toLocaleString()} pieces`;
 
   $('dashboard-kpis').innerHTML = [
     ['Stock balances', formatBalances(sumByUom(inventory))],
-    ['Occupied rack locations', `${occupied} / ${physicalLocations.length}`],
+    ['Occupied rack locations', `${occupied} / ${physicalLocationCount}`],
     ['Active containers', containers.size],
     ['Expiry attention', attention.length],
     ['Not yet put-away', receivingQty(
@@ -1793,7 +1792,7 @@ async function loadDashboard() {
     ['Location', (r) => escapeHtml(r.location_code)]
   ]) : emptyState('No expired or near-expiry stock.');
 
-  const distinctHistory = uniqueBy(historyRes.data || [], (r) => r.transaction_id).slice(0, 6);
+  const distinctHistory = uniqueBy(historyRows, (r) => r.transaction_id).slice(0, 6);
   $('dashboard-history').innerHTML = distinctHistory.length ? miniTable(distinctHistory, [
     ['Transaction', (r) => escapeHtml(r.tx_no)],
     ['Action', (r) => escapeHtml(r.transaction_type)],
@@ -1801,12 +1800,12 @@ async function loadDashboard() {
     ['Time', (r) => fmtDateTime(r.created_at)]
   ]) : emptyState('No transactions yet.');
 
-  renderDashboardPendingSalesOrders(pendingSoRes.data || []);
-  renderDashboardOpenEmptySalesOrders(openEmptySoRes.data || []);
-  renderDashboardContainerPriorityOverrides(containerPriorityRes.data || []);
-  state.dashboardPendingPickReturns = pendingReturnsRes.data || [];
+  renderDashboardPendingSalesOrders(pendingSalesOrders);
+  renderDashboardOpenEmptySalesOrders(openEmptySalesOrders);
+  renderDashboardContainerPriorityOverrides(containerPriorityOverrides);
+  state.dashboardPendingPickReturns = pendingPickReturns;
   renderDashboardPendingPickReturns(state.dashboardPendingPickReturns);
-  renderDashboardActiveLocks(activeLocksRes.data || []);
+  renderDashboardActiveLocks(activeLocks);
   renderDashboardConsolidation(inventory);
 
   if (locked) toast(`${locked} location${locked === 1 ? '' : 's'} currently locked for active work.`);
