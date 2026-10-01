@@ -643,12 +643,20 @@ async function submitUomConfig(event) {
   const reason=$('uom-config-reason').value.trim(); if (!reason) return toast('Enter a reason for the setup/change.','error');
   setBusy(button,true,'Saving…');
   try {
+    const skuId=$('uom-config-sku-id').value;
     const {error}=await supabase.rpc('admin_set_sku_uom_conversion_config_v1',{
-      p_sku_id:$('uom-config-sku-id').value,p_case_enabled:caseOn,p_pieces_per_case:caseFactor,
+      p_sku_id:skuId,p_case_enabled:caseOn,p_pieces_per_case:caseFactor,
       p_pack_enabled:packOn,p_pieces_per_pack:packFactor,p_piece_enabled:pieceOn,p_reason:reason
     });
     if (error) return toast(friendlyError(error),'error');
-    $('uom-config-dialog').close(); state.uomConversion.sourceLots=[]; toast('UOM conversion setup saved.','success');
+
+    const masterRow=state.data.skuMaster.find((row)=>row.id===skuId);
+    if (masterRow) masterRow.has_uom_setup=Boolean(caseOn||packOn||pieceOn);
+
+    $('uom-config-dialog').close();
+    state.uomConversion.sourceLots=[];
+    renderSkuMaster();
+    toast('UOM conversion setup saved.','success');
   } finally { setBusy(button,false); }
 }
 
@@ -10259,7 +10267,8 @@ async function submitSkuMasterCreate(event) {
 async function loadSkuMaster(force = false) {
   if (!isSupervisor()) return;
   if (!force && state.data.skuMaster.length) return renderSkuMaster();
-  const { data, error } = await supabase
+
+  const masterPromise = supabase
     .from('v_sku_master')
     .select('*')
     .order('brand')
@@ -10267,8 +10276,25 @@ async function loadSkuMaster(force = false) {
     .order('variant')
     .order('size')
     .limit(10000);
-  if (error) throw error;
-  state.data.skuMaster = data || [];
+
+  const statusPromise = isAdminOrOwner()
+    ? supabase.rpc('get_sku_uom_setup_status_v1')
+    : Promise.resolve({ data: [], error: null });
+
+  const [masterResult, statusResult] = await Promise.all([masterPromise, statusPromise]);
+  if (masterResult.error) throw masterResult.error;
+  if (statusResult.error) throw statusResult.error;
+
+  const configuredSkuIds = new Set(
+    (statusResult.data || [])
+      .filter((row) => Boolean(row.has_uom_setup))
+      .map((row) => row.sku_id)
+  );
+
+  state.data.skuMaster = (masterResult.data || []).map((row) => ({
+    ...row,
+    has_uom_setup: configuredSkuIds.has(row.id)
+  }));
   renderSkuMaster();
 }
 
@@ -10302,7 +10328,7 @@ function renderSkuMaster() {
     <td>${escapeHtml(r.piece_barcode)}</td>
     <td>${escapeHtml(r.created_by_username || '—')}</td>
     <td>${fmtDateTime(r.created_at)}</td>
-    ${isAdminOrOwner() ? `<td><div class="button-cluster"><button class="link-btn" type="button" data-sku-master-edit="${escapeHtml(r.id)}">Edit</button>${String(r.sku_type || 'STANDARD').toUpperCase() === 'STANDARD' ? `<button class="link-btn" type="button" data-uom-config="${escapeHtml(r.id)}">UOM Setup</button>` : ''}<button class="danger ghost" type="button" data-sku-master-delete="${escapeHtml(r.id)}">Delete</button></div></td>` : ''}
+    ${isAdminOrOwner() ? `<td><div class="button-cluster"><button class="link-btn" type="button" data-sku-master-edit="${escapeHtml(r.id)}">Edit</button>${String(r.sku_type || 'STANDARD').toUpperCase() === 'STANDARD' ? `<button class="link-btn${r.has_uom_setup ? ' uom-setup-configured' : ''}" type="button" data-uom-config="${escapeHtml(r.id)}">UOM Setup</button>` : ''}<button class="danger ghost" type="button" data-sku-master-delete="${escapeHtml(r.id)}">Delete</button></div></td>` : ''}
   </tr>`).join('')}</tbody></table>` : emptyState('No matching SKU master records.');
   $('sku-master-count').textContent = `${rows.length.toLocaleString()} of ${state.data.skuMaster.length.toLocaleString()} SKU record(s) shown${barcodeLessOnly ? ' · Barcode-less only' : ''}`;
 }
