@@ -65,6 +65,30 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .status-chip.active { color: #16603f; background: #e4f5ed; }
 .status-chip.hold { color: #8f2d24; background: #fde9e7; }
 .status-chip.neutral { background: #e9eef2; color: #53616e; }
+.usage-monitor-card { border-left-width: 6px; }
+.usage-monitor-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+.usage-monitor-card progress { width:100%; margin-top:10px; height:10px; }
+.usage-main-value { margin:10px 0 2px; }
+.usage-main-value strong { color:#243444; }
+.usage-percent { font-size:.78rem; font-weight:750; margin-bottom:2px; }
+.usage-status-normal { border-left-color:#2f855a; background:#fbfffc; }
+.usage-status-watch { border-left-color:#d69e2e; background:#fffdf7; }
+.usage-status-high { border-left-color:#dd6b20; background:#fffaf6; }
+.usage-status-critical { border-left-color:#c53030; background:#fff8f8; }
+.usage-status-neutral { border-left-color:#a0aec0; }
+.usage-status-normal .usage-status-chip { color:#16603f; background:#e4f5ed; }
+.usage-status-watch .usage-status-chip { color:#76520a; background:#fff4c6; }
+.usage-status-high .usage-status-chip { color:#8a3d00; background:#ffeadb; }
+.usage-status-critical .usage-status-chip { color:#8f2d24; background:#fde9e7; }
+.usage-status-normal progress { accent-color:#2f855a; }
+.usage-status-watch progress { accent-color:#d69e2e; }
+.usage-status-high progress { accent-color:#dd6b20; }
+.usage-status-critical progress { accent-color:#c53030; }
+.usage-reading-freshness { margin-top:10px; }
+.usage-reading-freshness.fresh { color:#2f6f4f; }
+.usage-reading-freshness.recent { color:#53616e; }
+.usage-reading-freshness.aging { color:#9a6700; font-weight:700; }
+.usage-reading-freshness.stale { color:#9b2c2c; font-weight:800; }
 .hold-banner { margin: 16px 24px 0; border: 1px solid #efb8b2; background: var(--soft-danger); padding: 12px 16px; border-radius: 10px; color: #7b251d; }
 .screen { display: none; padding: 22px 24px 36px; }
 .screen.active { display: block; }
