@@ -1093,7 +1093,10 @@ function setupStaticEvents() {
   $('full-reset-close').addEventListener('click', () => $('full-reset-dialog').close());
   $('full-reset-form').addEventListener('submit', submitFullReset);
   $('system-manager-refresh-btn').addEventListener('click', () => loadSystemManager(true));
-  $('system-manager-usage-link').addEventListener('click', copySupabaseUsageLink);
+  $('system-manager-usage-link').addEventListener('click', openSupabaseUsageLink);
+  $('system-manager-usage-update-btn').addEventListener('click', openSupabaseUsageReadingDialog);
+  $('system-usage-reading-close').addEventListener('click', () => $('system-usage-reading-dialog').close());
+  $('system-usage-reading-form').addEventListener('submit', submitSupabaseUsageReading);
   $('system-history-preview-btn').addEventListener('click', previewSystemHistoryDelete);
   $('system-history-delete-form').addEventListener('submit', deleteSystemHistoryRange);
   document.querySelectorAll('[data-history-retention-months]').forEach((button) => {
@@ -11051,49 +11054,116 @@ function usageRow(label, valueText, limitText, percent, note = '') {
   </div>`;
 }
 
-function platformUsageRow(label, limitText, note = '') {
-  return `<div class="card" style="padding:16px">
-    <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+const SUPABASE_EGRESS_LIMIT_GB = 5;
+const SUPABASE_CACHED_EGRESS_LIMIT_GB = 5;
+const SUPABASE_LOGS_INGEST_LIMIT_GB = 5;
+const SUPABASE_LOGS_QUERY_LIMIT_GB = 1000;
+
+function fmtUsageGb(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  const digits = n < 1 ? 3 : n < 100 ? 2 : 1;
+  return n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: digits });
+}
+
+function manualUsageStatus(percent) {
+  const p = Number(percent || 0);
+  if (p >= 90) return { label: 'CRITICAL', className: 'critical' };
+  if (p >= 80) return { label: 'HIGH', className: 'high' };
+  if (p >= 60) return { label: 'WATCH', className: 'watch' };
+  return { label: 'NORMAL', className: 'normal' };
+}
+
+function manualUsageFreshness(recordedAt) {
+  const stamp = recordedAt ? new Date(recordedAt).getTime() : NaN;
+  if (!Number.isFinite(stamp)) return { label: 'NO READING', className: 'stale', ageHours: null };
+  const ageHours = Math.max(0, (Date.now() - stamp) / 3600000);
+  if (ageHours > 72) return { label: 'STALE — update now', className: 'stale', ageHours };
+  if (ageHours > 48) return { label: 'AGING — update soon', className: 'aging', ageHours };
+  if (ageHours > 24) return { label: 'Recent reading', className: 'recent', ageHours };
+  return { label: 'Fresh reading', className: 'fresh', ageHours };
+}
+
+function fmtReadingAge(ageHours) {
+  if (!Number.isFinite(ageHours)) return '—';
+  if (ageHours < 1) return `${Math.max(1, Math.round(ageHours * 60))} min ago`;
+  if (ageHours < 48) return `${Math.round(ageHours)} hr ago`;
+  return `${(ageHours / 24).toFixed(1)} days ago`;
+}
+
+function manualUsageCard(label, field, limitGb, readings = []) {
+  const fieldReadings = (readings || []).filter((reading) => reading?.[field] !== null && reading?.[field] !== undefined);
+  const latest = fieldReadings[0] || null;
+  if (!latest) {
+    return `<div class="card usage-monitor-card usage-status-neutral" style="padding:16px">
+      <div class="usage-monitor-head">
+        <strong>${escapeHtml(label)}</strong>
+        <span class="status-chip neutral">CHECK SUPABASE</span>
+      </div>
+      <p class="usage-main-value"><strong>No reading saved</strong> / ${escapeHtml(fmtUsageGb(limitGb))} GB</p>
+      <progress max="100" value="0"></progress>
+      <p class="small-note" style="margin-bottom:0">Open Supabase Usage, enter the current value with <strong>UPDATE USAGE READING</strong>, and this card will begin showing percentage, trend, run rate, freshness, and color-coded warnings.</p>
+    </div>`;
+  }
+
+  const value = Number(latest[field] || 0);
+  const rawPercent = limitGb > 0 ? (value / limitGb) * 100 : 0;
+  const displayPercent = Math.max(0, Math.min(100, rawPercent));
+  const status = manualUsageStatus(rawPercent);
+  const freshness = manualUsageFreshness(latest.recorded_at);
+  const previous = fieldReadings?.[1] || null;
+  let trendText = 'Save another reading later to calculate change and 30-day run rate.';
+
+  if (previous) {
+    const previousValue = Number(previous[field] || 0);
+    const elapsedHours = Math.max(
+      0,
+      (new Date(latest.recorded_at).getTime() - new Date(previous.recorded_at).getTime()) / 3600000
+    );
+
+    if (value < previousValue) {
+      trendText = 'Billing-cycle reset detected because the current reading is lower than the previous reading. Trend starts again from this reading.';
+    } else {
+      const delta = value - previousValue;
+      if (elapsedHours >= 1) {
+        const days = elapsedHours / 24;
+        const perDay = days > 0 ? delta / days : 0;
+        const runRate30 = perDay * 30;
+        let allowanceText = '';
+        if (perDay > 0 && value < limitGb) {
+          const daysToAllowance = (limitGb - value) / perDay;
+          allowanceText = ` · At this rate: ~${daysToAllowance.toFixed(daysToAllowance < 10 ? 1 : 0)} day(s) to allowance`;
+        } else if (value >= limitGb) {
+          allowanceText = ' · Allowance reached/exceeded';
+        }
+        trendText = `Change: +${fmtUsageGb(delta)} GB in ${days.toFixed(days < 2 ? 1 : 0)} day(s) · Avg: ${fmtUsageGb(perDay)} GB/day · 30-day run rate: ${fmtUsageGb(runRate30)} GB${allowanceText}`;
+      } else {
+        trendText = `Change: +${fmtUsageGb(delta)} GB. The last two readings are less than 1 hour apart, so the WMS is waiting for a wider interval before calculating a daily run rate.`;
+      }
+    }
+  }
+
+  const recorder = latest.recorded_by_username ? ` · entered by ${latest.recorded_by_username}` : '';
+  return `<div class="card usage-monitor-card usage-status-${status.className}" style="padding:16px">
+    <div class="usage-monitor-head">
       <strong>${escapeHtml(label)}</strong>
-      <span class="status-chip neutral">CHECK SUPABASE</span>
+      <span class="status-chip usage-status-chip">${status.label}</span>
     </div>
-    <p style="margin:10px 0 0"><strong>Free allowance:</strong> ${escapeHtml(limitText)}</p>
-    ${note ? `<p class="small-note" style="margin-bottom:0">${escapeHtml(note)}</p>` : ''}
+    <p class="usage-main-value"><strong>${escapeHtml(fmtUsageGb(value))} GB</strong> / ${escapeHtml(fmtUsageGb(limitGb))} GB</p>
+    <div class="usage-percent">${rawPercent.toLocaleString(undefined,{maximumFractionDigits:1})}% used</div>
+    <progress max="100" value="${displayPercent}"></progress>
+    <p class="small-note usage-reading-freshness ${freshness.className}">Last reading: ${escapeHtml(fmtDateTime(latest.recorded_at))}${escapeHtml(recorder)} · ${escapeHtml(fmtReadingAge(freshness.ageHours))} · ${escapeHtml(freshness.label)}</p>
+    <p class="small-note" style="margin-bottom:0">${escapeHtml(trendText)}</p>
   </div>`;
 }
 
-async function copySupabaseUsageLink() {
-  if (!isOwner()) return toast('Owner access is required for the Supabase Usage link.', 'error');
-
-  const url = 'https://supabase.com/dashboard/org/_/usage';
-  try {
-    await navigator.clipboard.writeText(url);
-    toast('Supabase Usage link copied. Open it only in your own private/incognito browser profile. The WMS did not open or access your Supabase account.', 'success');
-  } catch (_) {
-    window.prompt(
-      'For account safety, the WMS will not open Supabase automatically. Copy this link and open it only in your own private/incognito browser profile:',
-      url
-    );
-  }
+async function loadManualSupabaseUsageReadings() {
+  const { data, error } = await supabase.rpc('get_supabase_usage_manual_readings_v2', { p_limit: 32 });
+  if (error) throw error;
+  return Array.isArray(data) ? data : [];
 }
 
-async function loadSystemManager(force = false) {
-  if (!isAdminOrOwner()) return;
-
-  const usageLinkButton = $('system-manager-usage-link');
-  if (usageLinkButton) {
-    usageLinkButton.classList.toggle('hidden', !isOwner());
-    usageLinkButton.disabled = !isOwner();
-  }
-
-  const button = $('system-manager-refresh-btn');
-  if (force) setBusy(button, true, 'Refreshing…');
-
-  const { data, error } = await supabase.rpc('system_manager_usage_snapshot_v2');
-  if (force) setBusy(button, false);
-  if (error) throw error;
-
-  const row = data?.[0] || {};
+function renderSystemManagerUsageGrid(row, readings = []) {
   const databaseBytes = Number(row.database_bytes || 0);
   const storageBytes = Number(row.storage_bytes || 0);
   const databaseLimit = Number(row.database_limit_bytes || (500 * 1024 * 1024));
@@ -11101,22 +11171,29 @@ async function loadSystemManager(force = false) {
   const mauLimit = Number(row.mau_limit || 50000);
 
   $('system-manager-usage-grid').innerHTML = [
-    usageRow(
-      'Egress',
-      'Supabase Usage page',
-      '5 GB',
-      0,
-      'Exact billing-cycle Egress is platform analytics and is not safely exposed to this browser-only WMS.'
+    manualUsageCard(
+      'Egress (uncached)',
+      'egress_gb',
+      SUPABASE_EGRESS_LIMIT_GB,
+      readings
     ),
-    platformUsageRow(
+    manualUsageCard(
+      'Cached Egress',
+      'cached_egress_gb',
+      SUPABASE_CACHED_EGRESS_LIMIT_GB,
+      readings
+    ),
+    manualUsageCard(
       'Logs Ingest',
-      '1 GB / billing cycle',
-      'No log query or Management API call is made by this card. Check the exact billing-cycle value in Supabase Usage. Guide: NORMAL <60%, WATCH 60–79%, HIGH 80–89%, CRITICAL ≥90%.'
+      'logs_ingest_gb',
+      SUPABASE_LOGS_INGEST_LIMIT_GB,
+      readings
     ),
-    platformUsageRow(
+    manualUsageCard(
       'Logs Query',
-      '100 GB query allowance',
-      'No Logs Explorer or Management API query is run by this card, so monitoring it does not consume Logs Query allowance. The Free allowance is 100× the included 1 GB Logs Ingest allowance. Guide: NORMAL <60%, WATCH 60–79%, HIGH 80–89%, CRITICAL ≥90%.'
+      'logs_query_gb',
+      SUPABASE_LOGS_QUERY_LIMIT_GB,
+      readings
     ),
     usageRow(
       'Database size',
@@ -11140,6 +11217,101 @@ async function loadSystemManager(force = false) {
       'Exact current size recorded for objects in Supabase Storage.'
     )
   ].join('');
+}
+
+function openSupabaseUsageLink() {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+  window.open('https://supabase.com/dashboard/org/_/usage', '_blank', 'noopener,noreferrer');
+}
+
+function openSupabaseUsageReadingDialog() {
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+  const readings = state.supabaseUsageReadings || [];
+  const latestValue = (field) => {
+    const row = readings.find((reading) => reading?.[field] !== null && reading?.[field] !== undefined);
+    return row ? Number(row[field]) : '';
+  };
+  const latestUncachedEgress = latestValue('egress_gb');
+  const latestCachedEgress = latestValue('cached_egress_gb');
+  $('system-usage-reading-egress').value = latestUncachedEgress === '' || latestCachedEgress === ''
+    ? ''
+    : Number(latestUncachedEgress) + Number(latestCachedEgress);
+  $('system-usage-reading-cached-egress').value = latestCachedEgress;
+  $('system-usage-reading-ingest').value = latestValue('logs_ingest_gb');
+  $('system-usage-reading-query').value = latestValue('logs_query_gb');
+  $('system-usage-reading-dialog').showModal();
+}
+
+async function submitSupabaseUsageReading(event) {
+  event.preventDefault();
+  if (!isAdminOrOwner()) return toast('Admin or Owner access is required.', 'error');
+
+  const totalEgress = Number($('system-usage-reading-egress').value);
+  const cachedEgress = Number($('system-usage-reading-cached-egress').value);
+  const ingest = Number($('system-usage-reading-ingest').value);
+  const query = Number($('system-usage-reading-query').value);
+  if (
+    !Number.isFinite(totalEgress) || totalEgress < 0
+    || !Number.isFinite(cachedEgress) || cachedEgress < 0
+    || !Number.isFinite(ingest) || ingest < 0
+    || !Number.isFinite(query) || query < 0
+  ) {
+    return toast('Enter valid non-negative GB values for Total Egress, Cached Egress, Logs Ingest, and Logs Query.', 'error');
+  }
+  if (cachedEgress > totalEgress) {
+    return toast('Cached Egress cannot be greater than Total Egress. Check the Supabase Usage values.', 'error');
+  }
+  const egress = totalEgress - cachedEgress;
+
+  const button = $('system-usage-reading-save');
+  setBusy(button, true, 'Saving…');
+  const { error } = await supabase.rpc('save_supabase_usage_manual_reading_v2', {
+    p_egress_gb: egress,
+    p_cached_egress_gb: cachedEgress,
+    p_logs_ingest_gb: ingest,
+    p_logs_query_gb: query
+  });
+  setBusy(button, false);
+  if (error) return toast(friendlyError(error), 'error');
+
+  $('system-usage-reading-dialog').close();
+
+  try {
+    const readings = await loadManualSupabaseUsageReadings();
+    state.supabaseUsageReadings = readings;
+    if (state.systemManagerUsageSnapshot) {
+      renderSystemManagerUsageGrid(state.systemManagerUsageSnapshot, readings);
+    }
+  } catch (readError) {
+    toast(friendlyError(readError), 'error');
+  }
+
+  toast('Supabase usage reading saved. Monitoring cards updated.', 'success');
+}
+
+async function loadSystemManager(force = false) {
+  if (!isAdminOrOwner()) return;
+
+  const button = $('system-manager-refresh-btn');
+  if (force) setBusy(button, true, 'Refreshing…');
+
+  const { data, error } = await supabase.rpc('system_manager_usage_snapshot_v2');
+  if (error) {
+    if (force) setBusy(button, false);
+    throw error;
+  }
+
+  const row = data?.[0] || {};
+  state.systemManagerUsageSnapshot = row;
+
+  let readings = [];
+  try {
+    readings = await loadManualSupabaseUsageReadings();
+  } catch (readError) {
+    toast(`Usage-reading history could not be loaded: ${friendlyError(readError)}`, 'error');
+  }
+  state.supabaseUsageReadings = readings;
+  renderSystemManagerUsageGrid(row, readings);
 
   const retentionMonths = Number(row.retention_months || 3);
   state.historyRetention = {
@@ -11148,28 +11320,15 @@ async function loadSystemManager(force = false) {
   };
   renderHistoryRetentionButtons(retentionMonths);
 
-  $('system-manager-checked-at').textContent = `Checked: ${fmtDateTime(row.checked_at)} · Values refresh whenever System Manager is opened or Refresh usage is pressed.`;
+  $('system-manager-checked-at').textContent = `Project metrics checked: ${fmtDateTime(row.checked_at)} · Egress and Logs cards use the latest manually saved Supabase Usage reading. Recommended update: once daily; 48+ hours is aging and 72+ hours is stale.`;
   $('system-manager-retention-status').innerHTML = `
     <strong>Automatic retention:</strong> ${row.retention_job_active ? 'Enabled' : 'Not active'} · ${retentionMonths} month${retentionMonths === 1 ? '' : 's'}<br>
     <strong>Oldest retained month begins:</strong> ${escapeHtml(row.retention_cutoff_date || '—')} · current partial month is also retained<br>
     <strong>Transaction history rows:</strong> ${Number(row.transaction_history_count || 0).toLocaleString()} · Oldest: ${escapeHtml(fmtDateTime(row.oldest_transaction_at))}<br>
     <strong>System audit rows:</strong> ${Number(row.audit_history_count || 0).toLocaleString()} · Oldest: ${escapeHtml(fmtDateTime(row.oldest_audit_at))}<br>
     <small>Automatic cleanup checks every Monday at approximately 02:15 Asia/Manila. Transaction history belonging to an OPEN Sales Order remains protected until that Sales Order is closed.</small>`;
-}
 
-async function getSystemHistoryPreview() {
-  if (!isAdminOrOwner()) throw new Error('Admin or Owner access is required.');
-  const start = $('system-history-start').value;
-  const end = $('system-history-end').value;
-  if (!start || !end) throw new Error('Select both a start date and an end date.');
-  if (end < start) throw new Error('End date cannot be earlier than start date.');
-
-  const { data, error } = await supabase.rpc('admin_preview_history_delete', {
-    p_start_date: start,
-    p_end_date: end
-  });
-  if (error) throw error;
-  return data?.[0] || {};
+  if (force) setBusy(button, false);
 }
 
 function renderHistoryRetentionButtons(currentMonths) {
