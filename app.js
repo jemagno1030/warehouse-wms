@@ -1093,9 +1093,7 @@ function setupStaticEvents() {
   $('full-reset-close').addEventListener('click', () => $('full-reset-dialog').close());
   $('full-reset-form').addEventListener('submit', submitFullReset);
   $('system-manager-refresh-btn').addEventListener('click', () => loadSystemManager(true));
-  $('system-manager-usage-link').addEventListener('click', () => {
-    window.open('https://supabase.com/dashboard/org/_/usage', '_blank', 'noopener,noreferrer');
-  });
+  $('system-manager-usage-link').addEventListener('click', copySupabaseUsageLink);
   $('system-history-preview-btn').addEventListener('click', previewSystemHistoryDelete);
   $('system-history-delete-form').addEventListener('submit', deleteSystemHistoryRange);
   document.querySelectorAll('[data-history-retention-months]').forEach((button) => {
@@ -11053,8 +11051,41 @@ function usageRow(label, valueText, limitText, percent, note = '') {
   </div>`;
 }
 
+function platformUsageRow(label, limitText, note = '') {
+  return `<div class="card" style="padding:16px">
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+      <strong>${escapeHtml(label)}</strong>
+      <span class="status-chip neutral">CHECK SUPABASE</span>
+    </div>
+    <p style="margin:10px 0 0"><strong>Free allowance:</strong> ${escapeHtml(limitText)}</p>
+    ${note ? `<p class="small-note" style="margin-bottom:0">${escapeHtml(note)}</p>` : ''}
+  </div>`;
+}
+
+async function copySupabaseUsageLink() {
+  if (!isOwner()) return toast('Owner access is required for the Supabase Usage link.', 'error');
+
+  const url = 'https://supabase.com/dashboard/org/_/usage';
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('Supabase Usage link copied. Open it only in your own private/incognito browser profile. The WMS did not open or access your Supabase account.', 'success');
+  } catch (_) {
+    window.prompt(
+      'For account safety, the WMS will not open Supabase automatically. Copy this link and open it only in your own private/incognito browser profile:',
+      url
+    );
+  }
+}
+
 async function loadSystemManager(force = false) {
   if (!isAdminOrOwner()) return;
+
+  const usageLinkButton = $('system-manager-usage-link');
+  if (usageLinkButton) {
+    usageLinkButton.classList.toggle('hidden', !isOwner());
+    usageLinkButton.disabled = !isOwner();
+  }
+
   const button = $('system-manager-refresh-btn');
   if (force) setBusy(button, true, 'Refreshing…');
 
@@ -11076,6 +11107,16 @@ async function loadSystemManager(force = false) {
       '5 GB',
       0,
       'Exact billing-cycle Egress is platform analytics and is not safely exposed to this browser-only WMS.'
+    ),
+    platformUsageRow(
+      'Logs Ingest',
+      '1 GB / billing cycle',
+      'No log query or Management API call is made by this card. Check the exact billing-cycle value in Supabase Usage. Guide: NORMAL <60%, WATCH 60–79%, HIGH 80–89%, CRITICAL ≥90%.'
+    ),
+    platformUsageRow(
+      'Logs Query',
+      '100 GB query allowance',
+      'No Logs Explorer or Management API query is run by this card, so monitoring it does not consume Logs Query allowance. The Free allowance is 100× the included 1 GB Logs Ingest allowance. Guide: NORMAL <60%, WATCH 60–79%, HIGH 80–89%, CRITICAL ≥90%.'
     ),
     usageRow(
       'Database size',
