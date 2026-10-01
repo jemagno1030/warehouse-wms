@@ -129,6 +129,9 @@ th { color: #566573; font-size: .75rem; text-transform: uppercase; letter-spacin
 td.wrap { white-space: normal; min-width: 180px; }
 .empty-state { color: var(--muted); padding: 24px 8px; text-align: center; }
 .link-btn { border: 0; background: transparent; color: var(--brand-2); font-weight: 750; }
+.link-btn.uom-setup-configured { color: #176344; font-weight: 800; }
+.link-btn.uom-setup-configured:hover,
+.link-btn.uom-setup-configured:focus { color: #0f5132; text-decoration: underline; }
 .filters { display: flex; gap: 10px; margin-bottom: 14px; }
 .filters.grid { display: grid; grid-template-columns: 1fr 220px; }
 .pill { display: inline-flex; border-radius: 999px; padding: 4px 8px; font-size: .72rem; font-weight: 750; background: #edf1f4; }
