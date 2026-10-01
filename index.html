@@ -1278,13 +1278,14 @@
             <button id="system-manager-refresh-btn" class="secondary" type="button">Refresh usage</button>
           </div>
           <div class="info-box">
-            <strong>Important:</strong> Database size and File Storage are read directly from this project when this module is accessed. Supabase's exact billing-cycle <strong>Egress</strong> and <strong>MAU</strong> are platform analytics and are not safely available to a static GitHub Pages app without secret management credentials, so this WMS does not fake those figures. Use the official Usage button for the authoritative numbers.
+            <strong>Important:</strong> Database size and File Storage are read directly from this project when this module is accessed. Supabase's exact billing-cycle <strong>Egress</strong>, <strong>MAU</strong>, <strong>Logs Ingest</strong>, and <strong>Logs Query</strong> are platform analytics and are not safely available to this browser-only WMS without secret management credentials. The WMS does not query Supabase logs to estimate these values because doing so would itself consume Logs Query allowance.
           </div>
           <p id="system-manager-checked-at" class="small-note">Not checked yet.</p>
           <div id="system-manager-usage-grid" class="kpi-grid"></div>
           <div class="form-actions">
-            <button id="system-manager-usage-link" class="secondary" type="button">Open exact Supabase Usage</button>
+            <button id="system-manager-usage-link" class="secondary hidden" type="button">Copy Supabase Usage link</button>
           </div>
+          <p class="hint">Account safety: this action is Owner-only and does not open Supabase automatically. It only copies the official Usage URL so you can open it in your own private/incognito browser profile. This prevents the WMS button from exposing an already-signed-in Supabase session to another WMS user.</p>
         </article>
 
         <div class="content-grid two">
@@ -1844,7 +1845,7 @@
   </script>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20260930-live-history-retention-v1"></script>
+  <script type="module" src="app.js?v=20261001-live-supabase-logs-usage-v1"></script>
   <script type="module" src="receiving-v1.js?v=20260929-live-receiving-putaway-controls-v1"></script>
 </body>
 </html>
