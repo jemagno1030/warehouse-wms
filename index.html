@@ -8,7 +8,7 @@
   <title>Warehouse Control System v1</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=20261001-live-supabase-usage-phase15-v1" />
   <style>
     .dot.low-volume { background: #0b84a5; }
     .rack-cell.low-volume { border-left-color: #0b84a5; background: #eef9fc; }
@@ -1278,14 +1278,15 @@
             <button id="system-manager-refresh-btn" class="secondary" type="button">Refresh usage</button>
           </div>
           <div class="info-box">
-            <strong>Important:</strong> Database size and File Storage are read directly from this project when this module is accessed. Supabase's exact billing-cycle <strong>Egress</strong>, <strong>MAU</strong>, <strong>Logs Ingest</strong>, and <strong>Logs Query</strong> are platform analytics and are not safely available to this browser-only WMS without secret management credentials. The WMS does not query Supabase logs to estimate these values because doing so would itself consume Logs Query allowance.
+            <strong>Usage monitoring:</strong> Supabase's current Free reference allowances are <strong>5 GB Egress (uncached)</strong>, <strong>5 GB Cached Egress</strong>, <strong>5 GB Logs Ingest</strong>, and <strong>1,000 GB Logs Query</strong>. These cards use readings manually entered by an Admin/Owner from the official Supabase Usage page. The WMS does <strong>not</strong> query Logs Explorer or the Management API to estimate them.
           </div>
           <p id="system-manager-checked-at" class="small-note">Not checked yet.</p>
           <div id="system-manager-usage-grid" class="kpi-grid"></div>
           <div class="form-actions">
-            <button id="system-manager-usage-link" class="secondary hidden" type="button">Copy Supabase Usage link</button>
+            <button id="system-manager-usage-update-btn" class="primary" type="button">UPDATE USAGE READING</button>
+            <button id="system-manager-usage-link" class="secondary" type="button">OPEN SUPABASE LINK</button>
           </div>
-          <p class="hint">Account safety: this action is Owner-only and does not open Supabase automatically. It only copies the official Usage URL so you can open it in your own private/incognito browser profile. This prevents the WMS button from exposing an already-signed-in Supabase session to another WMS user.</p>
+          <p class="hint"><strong>Recommended:</strong> update the reading about once per day during normal use. A reading older than 48 hours is marked aging; older than 72 hours is marked stale. OPEN SUPABASE LINK is available to Admin/Owner and opens Supabase in the browser's current Supabase session, so sign out of Supabase when finished on a shared computer.</p>
         </article>
 
         <div class="content-grid two">
@@ -1647,6 +1648,41 @@
     </form>
   </dialog>
 
+  <dialog id="system-usage-reading-dialog" class="edit-dialog">
+    <div class="scanner-head">
+      <div><h3>Update Supabase Usage Reading</h3><p>Admin / Owner · manual platform reading only.</p></div>
+      <button id="system-usage-reading-close" class="icon-button" type="button">✕</button>
+    </div>
+    <form id="system-usage-reading-form" class="stack">
+      <div class="info-box">
+        Open <strong>Supabase → Usage</strong> and enter the current actual values shown there. Save the values in <strong>GB</strong>. The WMS will calculate percentage, status color, change, daily rate, 30-day run rate, and reading freshness.
+      </div>
+      <div class="form-grid two">
+        <label>Total Egress shown by Supabase (GB) *
+          <input id="system-usage-reading-egress" type="number" min="0" step="0.001" inputmode="decimal" required />
+          <span class="small-note">Enter Supabase's Total Egress value. The WMS subtracts Cached Egress automatically.</span>
+        </label>
+        <label>Cached Egress used (GB) *
+          <input id="system-usage-reading-cached-egress" type="number" min="0" step="0.001" inputmode="decimal" required />
+          <span class="small-note">Reference allowance: 5 GB</span>
+        </label>
+        <label>Logs Ingest used (GB) *
+          <input id="system-usage-reading-ingest" type="number" min="0" step="0.001" inputmode="decimal" required />
+          <span class="small-note">Reference allowance: 5 GB</span>
+        </label>
+        <label>Logs Query used (GB) *
+          <input id="system-usage-reading-query" type="number" min="0" step="0.001" inputmode="decimal" required />
+          <span class="small-note">Reference allowance: 1,000 GB</span>
+        </label>
+      </div>
+      <div class="warning-box">
+        Enter usage values in GB, not percentages. Supabase's <strong>Total Egress includes Cached Egress</strong>. Enter Total Egress and Cached Egress exactly as shown; the WMS calculates uncached Egress automatically and compares uncached and cached usage against their separate 5 GB quotas.
+      </div>
+      <button id="system-usage-reading-save" class="primary" type="submit">SAVE USAGE READING</button>
+      <p class="small-note">Only four usage numbers, the save time, and the WMS user who entered them are stored. No Supabase logs are queried by this action.</p>
+    </form>
+  </dialog>
+
   <dialog id="full-reset-dialog" class="edit-dialog">
     <div class="scanner-head">
       <div><h3>FULL WMS DATA RESET</h3><p>Owner-only permanent reset. Review the live counts before continuing.</p></div>
@@ -1845,7 +1881,7 @@
   </script>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20261001-live-supabase-logs-usage-v1"></script>
+  <script type="module" src="app.js?v=20261001-live-supabase-usage-phase15-v1"></script>
   <script type="module" src="receiving-v1.js?v=20260929-live-receiving-putaway-controls-v1"></script>
 </body>
 </html>
