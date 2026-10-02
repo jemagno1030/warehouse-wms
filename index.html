@@ -811,6 +811,7 @@
             <div><h3>Picking session</h3><p>Normal Sales Orders use the existing multi-rack workflow. Sales Order 0 is reserved for reusable Warehouse Stock Adjustment.</p></div>
             <div class="button-cluster">
               <button id="picked-so-report-btn" class="secondary" type="button">Picked Sales Order Report</button>
+              <button id="picked-so-adjusted-report-btn" class="secondary" type="button">Picked Sales Order Report (Adjusted)</button>
               <button id="so0-adjustment-report-btn" class="secondary" type="button">SO-0 Adjustment Report</button>
               <span id="pick-lock-chip" class="status-chip neutral">No location locked</span>
             </div>
@@ -1503,6 +1504,53 @@
     </div>
   </dialog>
 
+  <dialog id="picked-so-adjusted-report-dialog" class="edit-dialog" style="width:min(1240px,calc(100% - 24px));">
+    <div class="scanner-head">
+      <div>
+        <h3>Picked Sales Order Report (Adjusted)</h3>
+        <p>Completed PICK transaction lines for normal Sales Orders after completed Saved Pick corrections. Adjusted Qty matches the correction-aware Picking / Stock Adjustment summary. Sales Order 0 is excluded.</p>
+      </div>
+      <button id="picked-so-adjusted-report-close" class="icon-button" type="button">✕</button>
+    </div>
+    <div class="form-grid two">
+      <label>SO number<input id="picked-so-adjusted-report-so" autocomplete="off" /></label>
+      <label>PO number<input id="picked-so-adjusted-report-po" autocomplete="off" /></label>
+      <label>Customer name<input id="picked-so-adjusted-report-customer" autocomplete="off" /></label>
+      <label>SKU<input id="picked-so-adjusted-report-sku" autocomplete="off" placeholder="Brand, description, variant, size, or barcode" /></label>
+      <label>Sort by
+        <select id="picked-so-adjusted-report-sort">
+          <option value="picked">Picked date/time</option>
+          <option value="so">SO #</option>
+          <option value="po">PO #</option>
+          <option value="customer">Customer</option>
+          <option value="sku">SKU</option>
+        </select>
+      </label>
+      <label>Sort order
+        <select id="picked-so-adjusted-report-sort-direction">
+          <option value="desc">Descending</option>
+          <option value="asc">Ascending</option>
+        </select>
+      </label>
+    </div>
+    <div class="button-cluster" style="margin:12px 0">
+      <button id="picked-so-adjusted-report-apply" class="secondary" type="button">Apply filters</button>
+      <button id="picked-so-adjusted-report-reset" class="ghost" type="button">Reset filters</button>
+      <button id="picked-so-adjusted-report-print" class="secondary" type="button">Print Report</button>
+    </div>
+    <div class="info-box" style="margin-bottom:10px">
+      <strong>Adjusted Qty = Original Picked Qty − Completed Correction Qty.</strong>
+      Requested, rejected, or approved-but-still-pending physical returns are not deducted until the correction is COMPLETED, matching the Picking / Stock Adjustment summary.
+    </div>
+    <div id="picked-so-adjusted-report-summary" class="info-box">Open the report to load adjusted picked Sales Order records.</div>
+    <div id="picked-so-adjusted-report-table" class="table-wrap" style="max-height:60vh;overflow:auto"></div>
+    <div class="button-cluster" style="margin:10px 0 0">
+      <button id="picked-so-adjusted-report-prev" class="ghost" type="button">Previous</button>
+      <span id="picked-so-adjusted-report-page" class="status-chip neutral">Page 1</span>
+      <button id="picked-so-adjusted-report-next" class="ghost" type="button">Next</button>
+    </div>
+  </dialog>
+
   <dialog id="so0-adjustment-report-dialog" class="edit-dialog" style="width:min(1180px,calc(100% - 24px));">
     <div class="scanner-head">
       <div>
@@ -1881,7 +1929,7 @@
   </script>
 
   <script src="config.js"></script>
-  <script type="module" src="app.js?v=20261001-live-sku-uom-setup-cue-v1"></script>
+  <script type="module" src="app.js?v=20261002-picked-so-adjusted-report-v1"></script>
   <script type="module" src="receiving-v1.js?v=20260929-live-receiving-putaway-controls-v1"></script>
 </body>
 </html>
