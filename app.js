@@ -271,6 +271,16 @@ const state = {
     pageSize: 250,
     loaded: false
   },
+  pickedSalesOrderAdjustedReport: {
+    rows: [],
+    total: 0,
+    filters: {},
+    sortBy: 'picked',
+    sortDirection: 'desc',
+    page: 1,
+    pageSize: 250,
+    loaded: false
+  },
   so0AdjustmentReport: {
     rows: [],
     total: 0,
@@ -946,6 +956,15 @@ function setupStaticEvents() {
   $('picked-so-report-next').addEventListener('click', () => void changePickedSalesOrderReportPage(1));
   $('picked-so-report-sort').addEventListener('change', () => void loadPickedSalesOrderReport(1));
   $('picked-so-report-sort-direction').addEventListener('change', () => void loadPickedSalesOrderReport(1));
+  $('picked-so-adjusted-report-btn').addEventListener('click', openPickedSalesOrderAdjustedReport);
+  $('picked-so-adjusted-report-close').addEventListener('click', () => $('picked-so-adjusted-report-dialog').close());
+  $('picked-so-adjusted-report-apply').addEventListener('click', () => void loadPickedSalesOrderAdjustedReport(1));
+  $('picked-so-adjusted-report-reset').addEventListener('click', resetPickedSalesOrderAdjustedReportFilters);
+  $('picked-so-adjusted-report-print').addEventListener('click', () => void printPickedSalesOrderAdjustedReport());
+  $('picked-so-adjusted-report-prev').addEventListener('click', () => void changePickedSalesOrderAdjustedReportPage(-1));
+  $('picked-so-adjusted-report-next').addEventListener('click', () => void changePickedSalesOrderAdjustedReportPage(1));
+  $('picked-so-adjusted-report-sort').addEventListener('change', () => void loadPickedSalesOrderAdjustedReport(1));
+  $('picked-so-adjusted-report-sort-direction').addEventListener('change', () => void loadPickedSalesOrderAdjustedReport(1));
   $('so0-adjustment-report-btn').addEventListener('click', openSo0AdjustmentReport);
   $('so0-adjustment-report-close').addEventListener('click', () => $('so0-adjustment-report-dialog').close());
   $('so0-adjustment-report-apply').addEventListener('click', () => void loadSo0AdjustmentReport(1));
@@ -3812,6 +3831,347 @@ async function printPickedSalesOrderReport() {
     }, 1000);
   }
 }
+
+function pickedSalesOrderAdjustedReportFilters() {
+  return {
+    so: $('picked-so-adjusted-report-so').value.trim(),
+    po: $('picked-so-adjusted-report-po').value.trim(),
+    customer: $('picked-so-adjusted-report-customer').value.trim(),
+    sku: $('picked-so-adjusted-report-sku').value.trim()
+  };
+}
+
+function pickedSalesOrderAdjustedReportSort() {
+  const sortBy = String($('picked-so-adjusted-report-sort')?.value || 'picked').toLowerCase();
+  const sortDirection = String($('picked-so-adjusted-report-sort-direction')?.value || 'desc').toLowerCase();
+  return {
+    sortBy: ['picked','so','po','customer','sku'].includes(sortBy) ? sortBy : 'picked',
+    sortDirection: sortDirection === 'asc' ? 'asc' : 'desc'
+  };
+}
+
+async function fetchPickedSalesOrderAdjustedReportBatch(filters, sortBy, sortDirection, limit, offset) {
+  const { data, error } = await supabase.rpc(
+    'get_picked_sales_order_adjusted_report_v1',
+    pickedSalesOrderReportRpcArgs(filters, sortBy, sortDirection, limit, offset)
+  );
+  if (error) throw error;
+  return data || [];
+}
+
+async function openPickedSalesOrderAdjustedReport() {
+  const dialog = $('picked-so-adjusted-report-dialog');
+  if (!dialog) return;
+  if (!dialog.open) dialog.showModal();
+  await loadPickedSalesOrderAdjustedReport(1);
+}
+
+async function loadPickedSalesOrderAdjustedReport(page = 1) {
+  const button = $('picked-so-adjusted-report-apply');
+  const filters = pickedSalesOrderAdjustedReportFilters();
+  const { sortBy, sortDirection } = pickedSalesOrderAdjustedReportSort();
+  const pageSize = 250;
+  const requestedPage = Math.max(1, Number(page || 1));
+  const offset = (requestedPage - 1) * pageSize;
+
+  setBusy(button, true, 'Loading…');
+  try {
+    const rows = await fetchPickedSalesOrderAdjustedReportBatch(
+      filters, sortBy, sortDirection, pageSize, offset
+    );
+    const total = rows.length ? Number(rows[0].total_count || 0) : 0;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const resolvedPage = Math.min(requestedPage, totalPages);
+
+    if (requestedPage > totalPages && total > 0) {
+      return await loadPickedSalesOrderAdjustedReport(totalPages);
+    }
+
+    state.pickedSalesOrderAdjustedReport = {
+      rows,
+      total,
+      filters: { ...filters },
+      sortBy,
+      sortDirection,
+      page: resolvedPage,
+      pageSize,
+      loaded: true
+    };
+    renderPickedSalesOrderAdjustedReport();
+  } catch (error) {
+    state.pickedSalesOrderAdjustedReport = {
+      rows: [],
+      total: 0,
+      filters: { ...filters },
+      sortBy,
+      sortDirection,
+      page: 1,
+      pageSize,
+      loaded: false
+    };
+    $('picked-so-adjusted-report-summary').textContent = `Report could not be loaded: ${friendlyError(error)}`;
+    $('picked-so-adjusted-report-table').innerHTML = emptyState('Picked Sales Order Report (Adjusted) is unavailable.');
+    $('picked-so-adjusted-report-page').textContent = 'Page —';
+    $('picked-so-adjusted-report-prev').disabled = true;
+    $('picked-so-adjusted-report-next').disabled = true;
+    toast(friendlyError(error), 'error');
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function renderPickedSalesOrderAdjustedReport() {
+  const report = state.pickedSalesOrderAdjustedReport || {
+    rows: [], total: 0, filters: {}, sortBy: 'picked',
+    sortDirection: 'desc', page: 1, pageSize: 250
+  };
+  const rows = report.rows || [];
+  const pageSize = Number(report.pageSize || 250);
+  const page = Math.max(1, Number(report.page || 1));
+  const total = Number(report.total || 0);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const startLine = total ? ((page - 1) * pageSize) + 1 : 0;
+  const endLine = total ? Math.min(startLine + rows.length - 1, total) : 0;
+  const adjustedLines = rows.filter((row) => Number(row.completed_correction_qty || 0) > 0).length;
+
+  $('picked-so-adjusted-report-summary').innerHTML =
+    `<strong>${total.toLocaleString()} picked line(s)</strong> · ` +
+    `Showing ${startLine.toLocaleString()}–${endLine.toLocaleString()} · ` +
+    `${adjustedLines.toLocaleString()} corrected line(s) on this page · ` +
+    `Filters: ${escapeHtml(pickedSalesOrderReportFilterText(report.filters))} · ` +
+    `Sort: ${escapeHtml(pickedSalesOrderReportSortText(report.sortBy, report.sortDirection))}`;
+
+  $('picked-so-adjusted-report-page').textContent = `Page ${page.toLocaleString()} of ${totalPages.toLocaleString()}`;
+  $('picked-so-adjusted-report-prev').disabled = page <= 1 || !total;
+  $('picked-so-adjusted-report-next').disabled = page >= totalPages || !total;
+
+  if (!rows.length) {
+    $('picked-so-adjusted-report-table').innerHTML = emptyState('No adjusted picked Sales Order records match the current filters.');
+    return;
+  }
+
+  $('picked-so-adjusted-report-table').innerHTML = `
+    <table>
+      <thead><tr>
+        <th>SO</th><th>PO</th><th>Customer</th><th>Picked</th><th>Transaction</th>
+        <th>Picker</th><th>Rack</th><th>SKU</th><th>Container</th><th>Expiry</th><th>UOM</th>
+        <th>Original Qty</th><th>Correction</th><th>Adjusted Qty</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((row) => `<tr>
+          <td><strong>${escapeHtml(row.sales_order || '—')}</strong></td>
+          <td>${escapeHtml(row.po_number || '—')}</td>
+          <td>${escapeHtml(row.customer_name || '—')}</td>
+          <td>${escapeHtml(fmtDateTime(row.picked_at))}</td>
+          <td>${escapeHtml(row.transaction_no || '—')}</td>
+          <td>${escapeHtml(row.picker_username || '—')}</td>
+          <td>${escapeHtml(row.location_code || '—')}</td>
+          <td>${escapeHtml(pickedSalesOrderReportSkuText(row))}</td>
+          <td>${escapeHtml(row.container_no || '—')}</td>
+          <td>${escapeHtml(fmtDate(row.expiry_date))}</td>
+          <td>${escapeHtml(row.uom || '—')}</td>
+          <td>${escapeHtml(fmtQty(row.original_picked_qty))}</td>
+          <td>${Number(row.completed_correction_qty || 0) > 0 ? `<span class="pill active">−${escapeHtml(fmtQty(row.completed_correction_qty))}</span>` : '—'}</td>
+          <td><strong>${escapeHtml(fmtQty(row.adjusted_picked_qty))}</strong></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+async function changePickedSalesOrderAdjustedReportPage(delta) {
+  const report = state.pickedSalesOrderAdjustedReport;
+  if (!report?.loaded) return;
+  const totalPages = Math.max(1, Math.ceil(Number(report.total || 0) / Number(report.pageSize || 250)));
+  const nextPage = Math.min(totalPages, Math.max(1, Number(report.page || 1) + Number(delta || 0)));
+  if (nextPage === report.page) return;
+  await loadPickedSalesOrderAdjustedReport(nextPage);
+}
+
+function resetPickedSalesOrderAdjustedReportFilters() {
+  ['picked-so-adjusted-report-so','picked-so-adjusted-report-po','picked-so-adjusted-report-customer','picked-so-adjusted-report-sku']
+    .forEach((id) => { $(id).value = ''; });
+  void loadPickedSalesOrderAdjustedReport(1);
+}
+
+async function fetchAllPickedSalesOrderAdjustedReportRows(filters, sortBy, sortDirection) {
+  const pageSize = 1000;
+  let offset = 0;
+  let total = 0;
+  const rows = [];
+
+  while (true) {
+    const batch = await fetchPickedSalesOrderAdjustedReportBatch(
+      filters, sortBy, sortDirection, pageSize, offset
+    );
+    if (!batch.length) break;
+
+    if (!total) total = Number(batch[0].total_count || 0);
+    rows.push(...batch);
+
+    if (rows.length >= total || batch.length < pageSize) break;
+    offset += batch.length;
+  }
+
+  return rows;
+}
+
+async function printPickedSalesOrderAdjustedReport() {
+  const report = state.pickedSalesOrderAdjustedReport;
+  if (!report?.loaded) return toast('Load the Picked Sales Order Report (Adjusted) first.', 'error');
+
+  const printButton = $('picked-so-adjusted-report-print');
+  setBusy(printButton, true, 'Preparing print…');
+
+  let rows = [];
+  try {
+    rows = await fetchAllPickedSalesOrderAdjustedReportRows(
+      report.filters || {},
+      report.sortBy || 'picked',
+      report.sortDirection || 'desc'
+    );
+  } catch (error) {
+    setBusy(printButton, false);
+    return toast(`Adjusted print report could not be prepared: ${friendlyError(error)}`, 'error');
+  }
+  setBusy(printButton, false);
+
+  if (!rows.length) return toast('No adjusted picked Sales Order records match the current filters.', 'error');
+
+  const existing = $('picked-so-adjusted-report-print-style');
+  if (existing) existing.remove();
+
+  const style = document.createElement('style');
+  style.id = 'picked-so-adjusted-report-print-style';
+  style.textContent = `
+    @page { size: Letter landscape; margin: 0.26in; }
+    @media print {
+      body > *:not(#print-area) { display:none !important; }
+      #print-area { display:block !important; }
+      html,body { background:#fff !important; color:#000 !important; }
+    }
+    #print-area.picked-so-adjusted-print {
+      font-family:Arial,Helvetica,sans-serif;
+      color:#000;
+      background:#fff;
+      font-size:6.8pt;
+    }
+    #print-area.picked-so-adjusted-print * { box-sizing:border-box; color:#000; }
+    #print-area.picked-so-adjusted-print h1 { margin:0 0 2mm; font-size:15pt; text-align:center; }
+    #print-area.picked-so-adjusted-print h2 { margin:0 0 4mm; font-size:11pt; text-align:center; }
+    #print-area.picked-so-adjusted-print .report-meta {
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:1.5mm 7mm;
+      margin-bottom:4mm;
+      line-height:1.2;
+    }
+    #print-area.picked-so-adjusted-print table {
+      width:100%;
+      border-collapse:collapse;
+      table-layout:fixed;
+    }
+    #print-area.picked-so-adjusted-print thead { display:table-header-group; }
+    #print-area.picked-so-adjusted-print tr {
+      break-inside:avoid;
+      page-break-inside:avoid;
+    }
+    #print-area.picked-so-adjusted-print th,
+    #print-area.picked-so-adjusted-print td {
+      border:1px solid #000;
+      padding:1.4mm 1mm;
+      vertical-align:top;
+      white-space:normal !important;
+      overflow:hidden;
+      overflow-wrap:anywhere !important;
+      word-break:break-word;
+      line-height:1.15;
+      height:auto !important;
+    }
+    #print-area.picked-so-adjusted-print th {
+      font-size:6.6pt;
+      text-align:left;
+      background:#eee !important;
+      font-weight:800;
+      -webkit-print-color-adjust:exact;
+      print-color-adjust:exact;
+    }
+    #print-area.picked-so-adjusted-print .c-so{width:7%}
+    #print-area.picked-so-adjusted-print .c-po{width:7%}
+    #print-area.picked-so-adjusted-print .c-customer{width:11%}
+    #print-area.picked-so-adjusted-print .c-picked{width:9%}
+    #print-area.picked-so-adjusted-print .c-tx{width:8%}
+    #print-area.picked-so-adjusted-print .c-rack{width:4%}
+    #print-area.picked-so-adjusted-print .c-sku{width:19%}
+    #print-area.picked-so-adjusted-print .c-container{width:7%}
+    #print-area.picked-so-adjusted-print .c-expiry{width:6%}
+    #print-area.picked-so-adjusted-print .c-uom{width:5%}
+    #print-area.picked-so-adjusted-print .c-original{width:6%;text-align:right}
+    #print-area.picked-so-adjusted-print .c-correction{width:6%;text-align:right}
+    #print-area.picked-so-adjusted-print .c-adjusted{width:6%;text-align:right;font-weight:800}
+    #print-area.picked-so-adjusted-print .report-footer {
+      margin-top:3mm;
+      font-size:6.8pt;
+      line-height:1.2;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const printArea = document.createElement('section');
+  printArea.id = 'print-area';
+  printArea.className = 'picked-so-adjusted-print';
+  const generatedAt = new Date().toLocaleString();
+
+  printArea.innerHTML = `
+    <h1>IFTC WAREHOUSE LOCATOR SYSTEM (JPM)</h1>
+    <h2>PICKED SALES ORDER REPORT (ADJUSTED)</h2>
+    <div class="report-meta">
+      <div><strong>Generated:</strong> ${escapeHtml(generatedAt)}</div>
+      <div><strong>Report lines:</strong> ${rows.length.toLocaleString()}</div>
+      <div><strong>Filters:</strong> ${escapeHtml(pickedSalesOrderReportFilterText(report.filters))}</div>
+      <div><strong>Sort:</strong> ${escapeHtml(pickedSalesOrderReportSortText(report.sortBy, report.sortDirection))}</div>
+      <div><strong>Scope:</strong> Completed normal-SO PICK lines with completed Saved Pick corrections deducted; SO 0 excluded.</div>
+      <div><strong>Formula:</strong> Adjusted Qty = Original Picked Qty − Completed Correction Qty.</div>
+    </div>
+    <table>
+      <thead><tr>
+        <th class="c-so">SO</th><th class="c-po">PO</th><th class="c-customer">Customer</th>
+        <th class="c-picked">Picked</th><th class="c-tx">Transaction</th><th class="c-rack">Rack</th>
+        <th class="c-sku">SKU</th><th class="c-container">Container</th><th class="c-expiry">Expiry</th>
+        <th class="c-uom">UOM</th><th class="c-original">Original Qty</th>
+        <th class="c-correction">Correction</th><th class="c-adjusted">Adjusted Qty</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((row) => `<tr>
+          <td class="c-so"><strong>${escapeHtml(row.sales_order || '—')}</strong></td>
+          <td class="c-po">${escapeHtml(row.po_number || '—')}</td>
+          <td class="c-customer">${escapeHtml(row.customer_name || '—')}</td>
+          <td class="c-picked">${escapeHtml(fmtDateTime(row.picked_at))}</td>
+          <td class="c-tx">${escapeHtml(row.transaction_no || '—')}</td>
+          <td class="c-rack">${escapeHtml(row.location_code || '—')}</td>
+          <td class="c-sku">${escapeHtml(pickedSalesOrderReportSkuText(row))}</td>
+          <td class="c-container">${escapeHtml(row.container_no || '—')}</td>
+          <td class="c-expiry">${escapeHtml(fmtDate(row.expiry_date))}</td>
+          <td class="c-uom">${escapeHtml(row.uom || '—')}</td>
+          <td class="c-original">${escapeHtml(fmtQty(row.original_picked_qty))}</td>
+          <td class="c-correction">${Number(row.completed_correction_qty || 0) > 0 ? '−' + escapeHtml(fmtQty(row.completed_correction_qty)) : '—'}</td>
+          <td class="c-adjusted">${escapeHtml(fmtQty(row.adjusted_picked_qty))}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+    <div class="report-footer"><strong>Read-only report.</strong> Requested/rejected/pending-return corrections are not deducted until COMPLETED. Printing does not modify Sales Orders, Picking history, corrections, or inventory.</div>
+  `;
+
+  document.body.appendChild(printArea);
+  try {
+    window.print();
+  } finally {
+    setTimeout(() => {
+      printArea.remove();
+      style.remove();
+    }, 1000);
+  }
+}
+
 
 function so0AdjustmentReportFilters() {
   return {
